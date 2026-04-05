@@ -5,253 +5,491 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>alpha-swarm</title>
 <style>
-  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --dim: #8b949e; --green: #3fb950; --red: #f85149; --blue: #58a6ff; --yellow: #d29922; }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); padding: 20px; }
-  h1 { font-size: 1.5em; margin-bottom: 4px; }
-  h2 { font-size: 1.1em; color: var(--dim); margin: 20px 0 10px; }
-  .subtitle { color: var(--dim); font-size: 0.9em; margin-bottom: 20px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
-  .card h3 { font-size: 0.95em; margin-bottom: 8px; }
-  .card .value { font-size: 2em; font-weight: bold; }
-  .card .label { color: var(--dim); font-size: 0.85em; }
-  .status { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; font-weight: 600; }
-  .status.running { background: rgba(210, 153, 34, 0.2); color: var(--yellow); }
-  .status.passed { background: rgba(63, 185, 80, 0.2); color: var(--green); }
-  .status.failed { background: rgba(248, 81, 73, 0.2); color: var(--red); }
-  .status.connected { background: rgba(63, 185, 80, 0.2); color: var(--green); }
-  .status.disconnected { background: rgba(248, 81, 73, 0.2); color: var(--red); }
-  #agents { min-height: 60px; }
-  .agent-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
-  .agent-card .info { flex: 1; }
-  .agent-card .model { color: var(--blue); font-size: 0.85em; }
-  .agent-card .task { font-size: 0.9em; margin-top: 4px; }
-  .agent-card .elapsed { color: var(--dim); font-size: 0.85em; }
-  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 0.9em; }
-  th { color: var(--dim); font-weight: 500; }
-  .models-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-top: 8px; }
-  .model-chip { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; font-size: 0.85em; }
-  .model-chip .name { font-weight: 600; color: var(--blue); }
-  .model-chip .meta { color: var(--dim); font-size: 0.8em; }
-  #event-log { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 300px; overflow-y: auto; font-family: monospace; font-size: 0.8em; }
-  #event-log .event { padding: 2px 0; border-bottom: 1px solid var(--border); }
-  .event .time { color: var(--dim); }
-  .event .type { color: var(--blue); font-weight: 600; }
-  .empty { color: var(--dim); font-style: italic; padding: 20px; text-align: center; }
+/* --- Theme: system auto (light/dark) --- */
+:root {
+  --bg: #ffffff; --bg-secondary: #f9fafb; --card: #ffffff; --card-hover: #f3f4f6;
+  --border: #e5e7eb; --text: #111827; --text-secondary: #374151; --muted: #6b7280;
+  --accent: #3b82f6; --accent-hover: #2563eb; --accent-bg: rgba(59,130,246,0.08);
+  --success: #22c55e; --success-bg: rgba(34,197,94,0.1);
+  --error: #ef4444; --error-bg: rgba(239,68,68,0.1);
+  --warning: #f59e0b; --warning-bg: rgba(245,158,11,0.1);
+  --sidebar-w: 220px; --radius: 8px; --radius-sm: 6px;
+  --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #09090b; --bg-secondary: #0f0f11; --card: #18181b; --card-hover: #1f1f23;
+    --border: #27272a; --text: #fafafa; --text-secondary: #d4d4d8; --muted: #a1a1aa;
+    --accent: #3b82f6; --accent-hover: #60a5fa; --accent-bg: rgba(59,130,246,0.12);
+    --success: #4ade80; --success-bg: rgba(74,222,128,0.12);
+    --error: #f87171; --error-bg: rgba(248,113,113,0.12);
+    --warning: #fbbf24; --warning-bg: rgba(251,191,36,0.12);
+    --shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif; background: var(--bg); color: var(--text); display: flex; min-height: 100vh; }
+
+/* --- Sidebar --- */
+.sidebar { width: var(--sidebar-w); background: var(--bg-secondary); border-right: 1px solid var(--border); padding: 16px 12px; display: flex; flex-direction: column; position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; }
+.sidebar .logo { font-size: 15px; font-weight: 700; padding: 8px 12px 20px; color: var(--text); letter-spacing: -0.3px; }
+.sidebar .logo span { color: var(--accent); }
+.sidebar nav { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.sidebar a { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm); color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; transition: all 0.15s; cursor: pointer; }
+.sidebar a:hover { background: var(--accent-bg); color: var(--text); }
+.sidebar a.active { background: var(--accent-bg); color: var(--accent); }
+.sidebar a svg { width: 18px; height: 18px; flex-shrink: 0; }
+.sidebar .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); margin-left: auto; }
+.sidebar .status-dot.offline { background: var(--error); }
+
+/* --- Main content --- */
+.main { margin-left: var(--sidebar-w); flex: 1; padding: 32px 40px; max-width: 1100px; }
+.main h1 { font-size: 22px; font-weight: 700; margin-bottom: 4px; letter-spacing: -0.3px; }
+.main .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
+
+/* --- Components --- */
+.card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); transition: border-color 0.15s; }
+.card:hover { border-color: var(--muted); }
+.card-clickable { cursor: pointer; }
+.card-clickable:hover { border-color: var(--accent); }
+.card h3 { font-size: 13px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.card .value { font-size: 28px; font-weight: 700; line-height: 1.1; }
+.card .label { font-size: 13px; color: var(--muted); margin-top: 4px; }
+
+.grid { display: grid; gap: 16px; }
+.grid-3 { grid-template-columns: repeat(3, 1fr); }
+.grid-2 { grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 800px) { .grid-3, .grid-2 { grid-template-columns: 1fr; } }
+
+.badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+.badge.passed, .badge.success { background: var(--success-bg); color: var(--success); }
+.badge.failed, .badge.error { background: var(--error-bg); color: var(--error); }
+.badge.running, .badge.warning { background: var(--warning-bg); color: var(--warning); }
+.badge.skipped { background: var(--accent-bg); color: var(--accent); }
+.badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: var(--radius-sm); font-size: 14px; font-weight: 500; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; transition: all 0.15s; }
+.btn:hover { border-color: var(--muted); background: var(--card-hover); }
+.btn-primary { background: var(--accent); color: white; border-color: var(--accent); }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-sm { padding: 5px 12px; font-size: 13px; }
+.btn-back { background: none; border: none; color: var(--muted); padding: 4px 0; margin-bottom: 16px; }
+.btn-back:hover { color: var(--text); }
+
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; padding: 10px 12px; font-size: 12px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+td { padding: 12px; font-size: 14px; border-bottom: 1px solid var(--border); }
+tr:hover td { background: var(--card-hover); }
+
+.input { width: 100%; padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; outline: none; transition: border-color 0.15s; }
+.input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+textarea.input { min-height: 80px; resize: vertical; font-family: inherit; }
+select.input { appearance: auto; }
+
+.form-group { margin-bottom: 16px; }
+.form-label { display: block; font-size: 13px; font-weight: 500; color: var(--text-secondary); margin-bottom: 6px; }
+
+.agent-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 14px; transition: border-color 0.15s; }
+.agent-card:hover { border-color: var(--muted); }
+.agent-card .info { flex: 1; }
+.agent-card .info .task-name { font-size: 14px; font-weight: 500; margin-top: 4px; }
+.agent-card .info .meta { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.agent-card .elapsed { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.model-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+.model-card .name { font-size: 14px; font-weight: 600; color: var(--accent); }
+.model-card .meta { font-size: 13px; color: var(--muted); margin-top: 2px; }
+
+.empty { color: var(--muted); text-align: center; padding: 40px 20px; font-size: 14px; }
+.section-title { font-size: 15px; font-weight: 600; margin: 28px 0 12px; }
+.page { display: none; }
+.page.active { display: block; }
 </style>
 </head>
 <body>
 
-<h1>alpha-swarm</h1>
-<p class="subtitle">Distributed agent orchestration &mdash; <span id="sse-status" class="status disconnected">connecting...</span></p>
-
-<div class="grid">
-  <div class="card">
-    <h3>Active Agents</h3>
-    <div class="value" id="active-count">0</div>
-    <div class="label">currently running</div>
-  </div>
-  <div class="card">
-    <h3>Models Available</h3>
-    <div class="value" id="model-count">-</div>
-    <div class="label">across all backends</div>
-  </div>
-  <div class="card">
-    <h3>System</h3>
-    <div class="value" id="system-status">-</div>
-    <div class="label" id="system-detail"></div>
-  </div>
+<!-- Sidebar -->
+<div class="sidebar">
+  <div class="logo"><span>alpha</span>-swarm</div>
+  <nav>
+    <a href="#overview" class="active" onclick="navigate('overview')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      Overview
+      <div class="status-dot" id="health-dot"></div>
+    </a>
+    <a href="#projects" onclick="navigate('projects')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+      Projects
+    </a>
+    <a href="#agents" onclick="navigate('agents')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 10-16 0"/></svg>
+      Agents
+      <span id="agent-count-badge" style="margin-left:auto;font-size:12px;color:var(--accent);display:none">0</span>
+    </a>
+    <a href="#models" onclick="navigate('models')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg>
+      Models
+    </a>
+    <a href="#submit" onclick="navigate('submit')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Submit Task
+    </a>
+  </nav>
 </div>
 
-<h2>Live Agents</h2>
-<div id="agents"><p class="empty">No agents running</p></div>
+<!-- Main content -->
+<div class="main">
 
-<h2>Models</h2>
-<div id="models" class="models-grid"><p class="empty">Loading...</p></div>
+  <!-- Overview -->
+  <div class="page active" id="page-overview">
+    <h1>Overview</h1>
+    <p class="subtitle">System status and recent activity</p>
+    <div class="grid grid-3">
+      <div class="card"><h3>System</h3><div class="value" id="sys-status">--</div><div class="label">wasmCloud 2.0</div></div>
+      <div class="card"><h3>Active Agents</h3><div class="value" id="active-count">0</div><div class="label">currently running</div></div>
+      <div class="card"><h3>Models</h3><div class="value" id="model-count">--</div><div class="label">available</div></div>
+    </div>
+    <div class="section-title">Recent Activity</div>
+    <div id="recent-activity"><p class="empty">No recent activity</p></div>
+  </div>
 
-<h2>Recent Runs <small style="color:var(--dim)">(project: <input id="project-input" value="default" style="background:var(--card);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:4px;width:120px" onchange="loadRuns();loadMetrics()">)</small></h2>
-<div id="runs-metrics" class="grid" style="margin-bottom:12px">
-  <div class="card"><h3>Pass Rate</h3><div class="value" id="pass-rate">-</div></div>
-  <div class="card"><h3>Total Runs</h3><div class="value" id="total-runs">-</div></div>
-  <div class="card"><h3>Avg Duration</h3><div class="value" id="avg-duration">-</div><div class="label">ms</div></div>
+  <!-- Projects -->
+  <div class="page" id="page-projects">
+    <h1>Projects</h1>
+    <p class="subtitle">Manage and monitor your projects</p>
+    <div id="projects-list" class="grid grid-2"><p class="empty">Loading projects...</p></div>
+  </div>
+
+  <!-- Project Detail -->
+  <div class="page" id="page-project-detail">
+    <button class="btn btn-back" onclick="navigate('projects')">&larr; Back to Projects</button>
+    <h1 id="proj-name">Project</h1>
+    <div class="grid grid-3" style="margin:20px 0">
+      <div class="card"><h3>Pass Rate</h3><div class="value" id="proj-pass-rate">--</div></div>
+      <div class="card"><h3>Total Runs</h3><div class="value" id="proj-runs">--</div></div>
+      <div class="card"><h3>Avg Duration</h3><div class="value" id="proj-duration">--</div><div class="label">ms</div></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:20px">
+      <button class="btn btn-primary btn-sm" onclick="navigate('submit')">Submit Task</button>
+    </div>
+    <div class="section-title">Run History</div>
+    <div id="proj-runs-table"></div>
+  </div>
+
+  <!-- Agents -->
+  <div class="page" id="page-agents">
+    <h1>Agents</h1>
+    <p class="subtitle">Live and recent agent activity</p>
+    <div class="section-title">Live</div>
+    <div id="live-agents"><p class="empty">No agents running</p></div>
+    <div class="section-title">Recent</div>
+    <div id="recent-agents"><p class="empty">Loading...</p></div>
+  </div>
+
+  <!-- Models -->
+  <div class="page" id="page-models">
+    <h1>Models</h1>
+    <p class="subtitle">Available inference models across backends</p>
+    <div id="models-list" class="grid grid-3"><p class="empty">Loading...</p></div>
+  </div>
+
+  <!-- Submit -->
+  <div class="page" id="page-submit">
+    <h1>Submit Task</h1>
+    <p class="subtitle">Run an agent on a code task</p>
+    <div class="card" style="max-width:600px">
+      <div class="form-group">
+        <label class="form-label">Task Description</label>
+        <textarea class="input" id="submit-task" placeholder="Add a function called multiply that takes two i32 and returns their product"></textarea>
+      </div>
+      <div class="grid grid-2">
+        <div class="form-group">
+          <label class="form-label">Project</label>
+          <input class="input" id="submit-project" value="default" placeholder="project name">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Model</label>
+          <input class="input" id="submit-model" value="qwen2.5-coder:7b" placeholder="model name">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Ollama URL</label>
+        <input class="input" id="submit-ollama" value="http://100.81.10.8:11434">
+      </div>
+      <div class="form-group">
+        <label class="form-label">File Path</label>
+        <input class="input" id="submit-filepath" placeholder="src/main.rs">
+      </div>
+      <div class="form-group">
+        <label class="form-label">File Content</label>
+        <textarea class="input" id="submit-content" placeholder="pub fn add(a: i32, b: i32) -> i32 { a + b }" style="font-family:monospace;font-size:13px"></textarea>
+      </div>
+      <button class="btn btn-primary" id="submit-btn" onclick="submitTask()">Run Agent</button>
+      <div id="submit-result" style="margin-top:16px"></div>
+    </div>
+  </div>
+
 </div>
-<div id="runs"><p class="empty">Loading runs...</p></div>
-
-<h2>Event Log</h2>
-<div id="event-log"><p class="empty">Waiting for events...</p></div>
 
 <script>
-// --- SSE Connection ---
-let eventLog = document.getElementById('event-log');
-let sseStatus = document.getElementById('sse-status');
+// --- State ---
+let currentPage = 'overview';
 let agents = {};
+let sseSource = null;
 
-function connectSSE() {
-  const evtSource = new EventSource('/api/events');
+// --- Navigation ---
+function navigate(page, data) {
+  currentPage = page;
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.sidebar a').forEach(a => a.classList.remove('active'));
 
-  evtSource.onopen = () => {
-    sseStatus.textContent = 'connected';
-    sseStatus.className = 'status connected';
-  };
+  const pageId = page === 'project-detail' ? 'page-project-detail' : `page-${page}`;
+  const el = document.getElementById(pageId);
+  if (el) el.classList.add('active');
 
-  evtSource.onerror = () => {
-    sseStatus.textContent = 'disconnected';
-    sseStatus.className = 'status disconnected';
-  };
+  const link = document.querySelector(`.sidebar a[href="#${page}"]`);
+  if (link) link.classList.add('active');
+  if (page === 'project-detail') document.querySelector('.sidebar a[href="#projects"]').classList.add('active');
 
-  evtSource.addEventListener('status', (e) => {
-    const data = JSON.parse(e.data);
-    document.getElementById('active-count').textContent = data.active_agents || 0;
-    addLogEntry('status', e.data);
-  });
+  // Load page data
+  if (page === 'overview') loadOverview();
+  if (page === 'projects') loadProjects();
+  if (page === 'agents') loadAgents();
+  if (page === 'models') loadModels();
+  if (page === 'project-detail' && data) loadProjectDetail(data);
 
-  evtSource.addEventListener('agent_started', (e) => {
-    const data = JSON.parse(e.data);
-    agents[data.agent_id] = { ...data, started: Date.now() };
-    renderAgents();
-    addLogEntry('agent_started', e.data);
-  });
-
-  evtSource.addEventListener('agent_finished', (e) => {
-    const data = JSON.parse(e.data);
-    if (agents[data.agent_id]) {
-      agents[data.agent_id].status = data.status;
-      agents[data.agent_id].edits = data.edits;
-    }
-    renderAgents();
-    addLogEntry('agent_finished', e.data);
-    setTimeout(() => { delete agents[data.agent_id]; renderAgents(); }, 5000);
-  });
-
-  evtSource.addEventListener('agent_failed', (e) => {
-    const data = JSON.parse(e.data);
-    if (agents[data.agent_id]) {
-      agents[data.agent_id].status = 'failed';
-      agents[data.agent_id].error = data.error;
-    }
-    renderAgents();
-    addLogEntry('agent_failed', e.data);
-    setTimeout(() => { delete agents[data.agent_id]; renderAgents(); }, 10000);
-  });
+  window.location.hash = page === 'project-detail' ? `project/${data}` : page;
 }
 
-function renderAgents() {
-  const el = document.getElementById('agents');
+// --- SSE ---
+function connectSSE() {
+  if (sseSource) sseSource.close();
+  sseSource = new EventSource('/api/events');
+
+  sseSource.addEventListener('status', e => {
+    try {
+      const d = JSON.parse(e.data);
+      document.getElementById('active-count').textContent = d.active_agents || 0;
+      const badge = document.getElementById('agent-count-badge');
+      if (d.active_agents > 0) { badge.textContent = d.active_agents; badge.style.display = ''; }
+      else badge.style.display = 'none';
+    } catch(e) {}
+  });
+
+  sseSource.addEventListener('agent_started', e => {
+    try {
+      const d = JSON.parse(e.data);
+      agents[d.agent_id] = { ...d, started: Date.now(), status: 'running' };
+      renderLiveAgents();
+    } catch(e) {}
+  });
+
+  sseSource.addEventListener('agent_finished', e => {
+    try {
+      const d = JSON.parse(e.data);
+      agents[d.agent_id] = { ...d, status: d.status || 'passed' };
+      renderLiveAgents();
+      addRecentActivity(d);
+      setTimeout(() => { delete agents[d.agent_id]; renderLiveAgents(); }, 8000);
+    } catch(e) {}
+  });
+
+  sseSource.addEventListener('agent_failed', e => {
+    try {
+      const d = JSON.parse(e.data);
+      agents[d.agent_id] = { ...d, status: 'failed' };
+      renderLiveAgents();
+      addRecentActivity(d);
+      setTimeout(() => { delete agents[d.agent_id]; renderLiveAgents(); }, 12000);
+    } catch(e) {}
+  });
+
+  sseSource.onopen = () => {
+    document.getElementById('health-dot').classList.remove('offline');
+    document.getElementById('sys-status').textContent = 'Online';
+  };
+  sseSource.onerror = () => {
+    document.getElementById('health-dot').classList.add('offline');
+    document.getElementById('sys-status').textContent = 'Offline';
+  };
+}
+
+function renderLiveAgents() {
+  const el = document.getElementById('live-agents');
   const keys = Object.keys(agents);
-  document.getElementById('active-count').textContent = keys.filter(k => !agents[k].status || agents[k].status === 'running').length;
-
-  if (keys.length === 0) {
-    el.innerHTML = '<p class="empty">No agents running</p>';
-    return;
-  }
-
+  if (!keys.length) { el.innerHTML = '<p class="empty">No agents running</p>'; return; }
   el.innerHTML = keys.map(id => {
     const a = agents[id];
-    const elapsed = a.started ? Math.round((Date.now() - a.started) / 1000) : 0;
-    const status = a.status || 'running';
+    const elapsed = a.started ? Math.round((Date.now() - a.started) / 1000) : '';
     return `<div class="agent-card">
       <div class="info">
-        <span class="status ${status}">${status}</span>
-        <span class="model">${a.model || '?'}</span>
-        <div class="task">${a.task || a.agent_id}</div>
+        <span class="badge ${a.status}">${a.status}</span>
+        <div class="task-name">${a.task || id}</div>
+        <div class="meta">${a.model || ''} &middot; ${a.project || ''}</div>
       </div>
-      <div class="elapsed">${elapsed}s</div>
+      <div class="elapsed">${elapsed ? elapsed + 's' : (a.duration_ms ? (a.duration_ms/1000).toFixed(1) + 's' : '')}</div>
     </div>`;
   }).join('');
 }
 
-function addLogEntry(type, data) {
-  const log = document.getElementById('event-log');
-  if (log.querySelector('.empty')) log.innerHTML = '';
-  const time = new Date().toLocaleTimeString();
-  const div = document.createElement('div');
-  div.className = 'event';
-  div.innerHTML = `<span class="time">${time}</span> <span class="type">${type}</span> ${data}`;
-  log.prepend(div);
-  while (log.children.length > 100) log.removeChild(log.lastChild);
+function addRecentActivity(d) {
+  const el = document.getElementById('recent-activity');
+  if (el.querySelector('.empty')) el.innerHTML = '';
+  const status = d.status || 'unknown';
+  const html = `<div class="agent-card">
+    <div class="info">
+      <span class="badge ${status}">${status}</span>
+      <div class="task-name">${d.task || d.agent_id || '?'}</div>
+      <div class="meta">${d.model || ''} &middot; ${d.tokens_output || 0} tokens &middot; ${d.duration_ms ? (d.duration_ms/1000).toFixed(1) + 's' : ''}</div>
+    </div>
+  </div>`;
+  el.insertAdjacentHTML('afterbegin', html);
+  while (el.children.length > 15) el.removeChild(el.lastChild);
 }
 
-// --- Load models ---
+// --- Data loading ---
+async function loadOverview() {
+  loadModels();
+  try { await fetch('/api/health'); document.getElementById('sys-status').textContent = 'Online'; }
+  catch(e) { document.getElementById('sys-status').textContent = 'Offline'; }
+}
+
+async function loadProjects() {
+  const el = document.getElementById('projects-list');
+  try {
+    // Get all distinct projects from runs
+    const res = await fetch('/api/runs/default');
+    // For now show "default" project — full implementation would list all
+    const runs = await res.json();
+    const projects = {};
+    if (Array.isArray(runs)) {
+      runs.forEach(r => {
+        const p = r.project || 'default';
+        if (!projects[p]) projects[p] = { runs: 0, passed: 0 };
+        projects[p].runs++;
+        if (r.status === 'passed') projects[p].passed++;
+      });
+    }
+
+    const keys = Object.keys(projects);
+    if (!keys.length) { el.innerHTML = '<p class="empty">No projects yet. Submit a task to create one.</p>'; return; }
+
+    el.innerHTML = keys.map(name => {
+      const p = projects[name];
+      const rate = p.runs ? Math.round(p.passed / p.runs * 100) : 0;
+      return `<div class="card card-clickable" onclick="navigate('project-detail','${name}')">
+        <h3 style="text-transform:none;font-size:16px;font-weight:600;color:var(--text)">${name}</h3>
+        <div style="margin-top:8px;font-size:14px;color:var(--muted)">${p.runs} runs &middot; ${rate}% pass rate</div>
+      </div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = '<p class="empty">Failed to load projects</p>'; }
+}
+
+async function loadProjectDetail(name) {
+  document.getElementById('proj-name').textContent = name;
+  try {
+    const res = await fetch(`/api/metrics/${name}`);
+    const m = await res.json();
+    document.getElementById('proj-pass-rate').textContent = Math.round((m.pass_rate || 0) * 100) + '%';
+    document.getElementById('proj-runs').textContent = m.total_runs || 0;
+    document.getElementById('proj-duration').textContent = m.avg_duration_ms || 0;
+  } catch(e) {}
+
+  try {
+    const res = await fetch(`/api/runs/${name}`);
+    const runs = await res.json();
+    const el = document.getElementById('proj-runs-table');
+    if (!Array.isArray(runs) || !runs.length) { el.innerHTML = '<p class="empty">No runs yet</p>'; return; }
+    el.innerHTML = `<table><tr><th>Status</th><th>Model</th><th>Task</th><th>Tokens</th><th>Duration</th></tr>` +
+      runs.slice(0, 30).map(r => `<tr>
+        <td><span class="badge ${r.status || 'unknown'}">${r.status || '?'}</span></td>
+        <td style="font-size:13px">${(r.model_used || '').substring(0, 22)}</td>
+        <td style="font-size:13px">${(r.task_description || '').substring(0, 40)}</td>
+        <td style="font-size:13px;font-variant-numeric:tabular-nums">${r.tokens_output || 0}</td>
+        <td style="font-size:13px;font-variant-numeric:tabular-nums">${r.duration_ms || 0}ms</td>
+      </tr>`).join('') + '</table>';
+  } catch(e) {}
+}
+
+async function loadAgents() {
+  renderLiveAgents();
+  // Load recent from SSE events already in state
+}
+
 async function loadModels() {
   try {
     const res = await fetch('/api/models');
     const models = await res.json();
-    const el = document.getElementById('models');
-    document.getElementById('model-count').textContent = models.length || 0;
+    document.getElementById('model-count').textContent = Array.isArray(models) ? models.length : 0;
 
-    if (!models.length) { el.innerHTML = '<p class="empty">No models found</p>'; return; }
-
-    el.innerHTML = models.map(m => `<div class="model-chip">
+    const el = document.getElementById('models-list');
+    if (!Array.isArray(models) || !models.length) { el.innerHTML = '<p class="empty">No models available. Is Ollama running?</p>'; return; }
+    el.innerHTML = models.map(m => `<div class="model-card">
       <div class="name">${m.name || m.model || '?'}</div>
-      <div class="meta">${m.details?.parameter_size || ''} &middot; ${m.details?.family || ''}</div>
+      <div class="meta">${m.details?.parameter_size || m.parameter_size || ''} &middot; ${m.details?.family || m.family || ''}</div>
     </div>`).join('');
   } catch(e) {
-    document.getElementById('models').innerHTML = '<p class="empty">Failed to load models</p>';
+    document.getElementById('models-list').innerHTML = '<p class="empty">Failed to load models</p>';
   }
 }
 
-// --- Health check ---
-async function checkHealth() {
+// --- Submit task ---
+async function submitTask() {
+  const btn = document.getElementById('submit-btn');
+  const resultEl = document.getElementById('submit-result');
+  btn.disabled = true; btn.textContent = 'Running...';
+  resultEl.innerHTML = '';
+
+  const body = {
+    task: document.getElementById('submit-task').value,
+    project: document.getElementById('submit-project').value || 'default',
+    model: document.getElementById('submit-model').value || 'qwen2.5-coder:7b',
+    ollama_url: document.getElementById('submit-ollama').value || 'http://localhost:11434',
+    files: [],
+  };
+
+  const fp = document.getElementById('submit-filepath').value;
+  const fc = document.getElementById('submit-content').value;
+  if (fp && fc) body.files.push({ path: fp, content: fc });
+
   try {
-    const res = await fetch('/api/health');
+    const res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const data = await res.json();
-    document.getElementById('system-status').textContent = data.status === 'ok' ? 'Online' : 'Error';
-    document.getElementById('system-detail').textContent = 'wasmCloud 2.0 WASI component';
+
+    if (data.status === 'passed' || data.edits > 0) {
+      resultEl.innerHTML = `<div class="card" style="border-color:var(--success)">
+        <span class="badge passed">passed</span>
+        <span style="margin-left:8px;font-size:14px">${data.edits || 0} edits &middot; ${data.model || ''} &middot; ${((data.duration_ms||0)/1000).toFixed(1)}s</span>
+        ${data.modified_files?.length ? '<pre style="margin-top:12px;font-size:13px;overflow-x:auto;color:var(--text-secondary)">' + JSON.stringify(data.modified_files, null, 2).substring(0, 500) + '</pre>' : ''}
+      </div>`;
+    } else if (data.error) {
+      resultEl.innerHTML = `<div class="card" style="border-color:var(--error)"><span class="badge failed">error</span> <span style="font-size:14px;margin-left:8px">${data.error}</span></div>`;
+    } else {
+      resultEl.innerHTML = `<div class="card"><span class="badge skipped">no edits</span> <span style="font-size:14px;margin-left:8px">Model returned no changes</span></div>`;
+    }
   } catch(e) {
-    document.getElementById('system-status').textContent = 'Offline';
+    resultEl.innerHTML = `<div class="card" style="border-color:var(--error)"><span class="badge failed">error</span> <span style="font-size:14px;margin-left:8px">${e.message}</span></div>`;
   }
-}
 
-// --- Load runs ---
-async function loadRuns() {
-  const project = document.getElementById('project-input').value || 'default';
-  try {
-    const res = await fetch(`/api/runs/${project}`);
-    const runs = await res.json();
-    const el = document.getElementById('runs');
-
-    if (!runs.length) { el.innerHTML = '<p class="empty">No runs found</p>'; return; }
-
-    el.innerHTML = `<table><tr><th>Status</th><th>Model</th><th>Task</th><th>Tokens</th><th>Duration</th></tr>` +
-      runs.slice(0, 20).map(r => {
-        const status = r.status || 'unknown';
-        const task = (r.task_description || '').substring(0, 50);
-        return `<tr>
-          <td><span class="status ${status}">${status}</span></td>
-          <td>${(r.model_used || '').substring(0, 20)}</td>
-          <td>${task}</td>
-          <td>${r.tokens_output || 0}</td>
-          <td>${r.duration_ms || 0}ms</td>
-        </tr>`;
-      }).join('') + '</table>';
-  } catch(e) {
-    document.getElementById('runs').innerHTML = '<p class="empty">Failed to load runs</p>';
-  }
-}
-
-// --- Load metrics ---
-async function loadMetrics() {
-  const project = document.getElementById('project-input').value || 'default';
-  try {
-    const res = await fetch(`/api/metrics/${project}`);
-    const m = await res.json();
-    document.getElementById('pass-rate').textContent = `${Math.round((m.pass_rate || 0) * 100)}%`;
-    document.getElementById('total-runs').textContent = m.total_runs || 0;
-    document.getElementById('avg-duration').textContent = m.avg_duration_ms || 0;
-  } catch(e) {}
+  btn.disabled = false; btn.textContent = 'Run Agent';
 }
 
 // --- Init ---
-connectSSE();
-loadModels();
-loadRuns();
-loadMetrics();
-checkHealth();
-setInterval(loadModels, 30000);
-setInterval(loadRuns, 10000);
-setInterval(loadMetrics, 10000);
+function init() {
+  const hash = window.location.hash.slice(1);
+  if (hash.startsWith('project/')) {
+    navigate('project-detail', hash.slice(8));
+  } else if (['overview','projects','agents','models','submit'].includes(hash)) {
+    navigate(hash);
+  } else {
+    navigate('overview');
+  }
+  connectSSE();
+  setInterval(() => { if (currentPage === 'overview') loadOverview(); }, 15000);
+}
+
+init();
 </script>
 </body>
 </html>
