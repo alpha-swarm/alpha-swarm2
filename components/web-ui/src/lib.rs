@@ -45,6 +45,14 @@ impl Guest for WebUi {
                 let body = read_body(&request);
                 api_create_project(response_out, &body);
             }
+            (Method::Delete, p) if p.starts_with("/api/projects/") => {
+                let name = p.strip_prefix("/api/projects/").unwrap_or("");
+                api_delete_project(response_out, name);
+            }
+            (Method::Get, p) if p.starts_with("/api/goals/") => {
+                let project = p.strip_prefix("/api/goals/").unwrap_or("default");
+                api_goals(response_out, project);
+            }
             (Method::Post, "/api/run") => {
                 let body = read_body(&request);
                 api_submit_run(response_out, &body);
@@ -231,6 +239,69 @@ fn api_create_project(response_out: ResponseOutparam, body: &[u8]) {
                 .cloned()
                 .unwrap_or_default();
             respond_json(response_out, 201, &serde_json::to_string(&created).unwrap_or_default());
+        }
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn api_delete_project(response_out: ResponseOutparam, name: &str) {
+    let safe_name = name.replace('\'', "");
+    let query = format!(
+        "DELETE FROM project WHERE name = '{}'; DELETE FROM agent_run WHERE project = '{}'",
+        safe_name, safe_name
+    );
+    match surreal_query(&query) {
+        Ok(_) => respond_json(response_out, 200, r#"{"status":"deleted"}"#),
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn api_goals(response_out: ResponseOutparam, project: &str) {
+    // Goals are agent_runs grouped by task_description.
+    // Each unique task_description is a "goal" (kanban column/card).
+    // Sub-agents are individual runs under that goal.
+    let safe = project.replace('\'', "");
+    let query = format!(
+        "SELECT task_description, status, model_used, agent_id, tokens_output, duration_ms, created_at FROM agent_run WHERE project = '{}' ORDER BY created_at DESC LIMIT 100",
+        safe
+    );
+    match surreal_query(&query) {
+        Ok(body) => {
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let runs = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result"))
+                .and_then(|r| r.as_array()).cloned().unwrap_or_default();
+
+            // Group runs into goals (by task_description)
+            let mut goals: std::collections::BTreeMap<String, Vec<serde_json::Value>> = std::collections::BTreeMap::new();
+            for run in runs {
+                let task = run.get("task_description").and_then(|t| t.as_str()).unwrap_or("unknown").to_string();
+                goals.entry(task).or_default().push(run);
+            }
+
+            // Build kanban structure: { goals: [ { goal, status, agents: [...] } ] }
+            let kanban: Vec<serde_json::Value> = goals.into_iter().map(|(goal, agents)| {
+                let total = agents.len();
+                let passed = agents.iter().filter(|a| a.get("status").and_then(|s| s.as_str()) == Some("passed")).count();
+                let failed = agents.iter().filter(|a| a.get("status").and_then(|s| s.as_str()) == Some("failed")).count();
+                let running = agents.iter().filter(|a| a.get("status").and_then(|s| s.as_str()) == Some("running")).count();
+
+                let status = if running > 0 { "running" }
+                    else if failed > 0 && passed == 0 { "failed" }
+                    else if passed == total { "passed" }
+                    else { "partial" };
+
+                serde_json::json!({
+                    "goal": goal,
+                    "status": status,
+                    "total": total,
+                    "passed": passed,
+                    "failed": failed,
+                    "running": running,
+                    "agents": agents,
+                })
+            }).collect();
+
+            respond_json(response_out, 200, &serde_json::to_string(&kanban).unwrap_or_default());
         }
         Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
     }

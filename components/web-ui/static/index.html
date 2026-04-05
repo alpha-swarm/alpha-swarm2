@@ -105,6 +105,26 @@ select.input { appearance: auto; }
 .section-title { font-size: 15px; font-weight: 600; margin: 28px 0 12px; }
 .page { display: none; }
 .page.active { display: block; }
+
+/* Kanban board */
+.kanban-board { display: flex; gap: 16px; overflow-x: auto; padding-bottom: 8px; min-height: 200px; }
+.kanban-column { min-width: 280px; max-width: 340px; flex-shrink: 0; }
+.kanban-column-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; font-size: 13px; font-weight: 600; border-bottom: 2px solid var(--border); margin-bottom: 8px; }
+.kanban-column-header .count { color: var(--muted); font-weight: 400; }
+.kanban-column.running .kanban-column-header { border-color: var(--warning); }
+.kanban-column.passed .kanban-column-header { border-color: var(--success); }
+.kanban-column.failed .kanban-column-header { border-color: var(--error); }
+.kanban-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 8px; transition: border-color 0.15s; cursor: default; }
+.kanban-card:hover { border-color: var(--muted); }
+.kanban-card .goal-title { font-size: 14px; font-weight: 500; margin-bottom: 6px; line-height: 1.4; }
+.kanban-card .goal-meta { font-size: 12px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; }
+.kanban-card .sub-agents { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+.sub-agent { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 0; color: var(--text-secondary); }
+.sub-agent .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.sub-agent .dot.passed { background: var(--success); }
+.sub-agent .dot.failed { background: var(--error); }
+.sub-agent .dot.running { background: var(--warning); }
+.sub-agent .dot.skipped { background: var(--accent); }
 </style>
 </head>
 <body>
@@ -182,16 +202,19 @@ select.input { appearance: auto; }
 
   <!-- Project Detail -->
   <div class="page" id="page-project-detail">
-    <button class="btn btn-back" onclick="navigate('projects')">&larr; Back to Projects</button>
-    <h1 id="proj-name">Project</h1>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
+      <button class="btn btn-back" onclick="navigate('projects')" style="margin:0">&larr;</button>
+      <h1 id="proj-name" style="flex:1">Project</h1>
+      <button class="btn btn-primary btn-sm" onclick="navigateSubmitForProject()">Submit Task</button>
+      <button class="btn btn-sm" style="color:var(--error)" onclick="deleteCurrentProject()">Delete</button>
+    </div>
     <div class="grid grid-3" style="margin:20px 0">
       <div class="card"><h3>Pass Rate</h3><div class="value" id="proj-pass-rate">--</div></div>
       <div class="card"><h3>Total Runs</h3><div class="value" id="proj-runs">--</div></div>
       <div class="card"><h3>Avg Duration</h3><div class="value" id="proj-duration">--</div><div class="label">ms</div></div>
     </div>
-    <div style="display:flex;gap:8px;margin-bottom:20px">
-      <button class="btn btn-primary btn-sm" onclick="navigate('submit')">Submit Task</button>
-    </div>
+    <div class="section-title">Task Board</div>
+    <div id="kanban" class="kanban-board"><p class="empty">Loading tasks...</p></div>
     <div class="section-title">Run History</div>
     <div id="proj-runs-table"></div>
   </div>
@@ -395,6 +418,14 @@ async function createProject() {
   } catch(e) {}
 }
 
+async function deleteProject(name) {
+  if (!confirm(`Delete project "${name}" and all its runs?`)) return;
+  try {
+    await fetch(`/api/projects/${name}`, { method: 'DELETE' });
+    loadProjects();
+  } catch(e) {}
+}
+
 async function loadProjects() {
   const el = document.getElementById('projects-list');
   try {
@@ -435,7 +466,10 @@ async function loadProjects() {
       const p = projectMap[name];
       const rate = p.runs ? Math.round(p.passed / p.runs * 100) : 0;
       return `<div class="card card-clickable" onclick="navigate('project-detail','${name}')">
-        <h3 style="text-transform:none;font-size:16px;font-weight:600;color:var(--text)">${name}</h3>
+        <div style="display:flex;justify-content:space-between;align-items:start">
+          <h3 style="text-transform:none;font-size:16px;font-weight:600;color:var(--text)">${name}</h3>
+          <button class="btn btn-sm" style="color:var(--error);padding:2px 8px;font-size:12px" onclick="event.stopPropagation();deleteProject('${name}')">Delete</button>
+        </div>
         <div style="margin-top:4px;font-size:13px;color:var(--muted)">${p.description || ''}</div>
         <div style="margin-top:8px;font-size:14px;color:var(--muted)">${p.runs} runs${p.runs ? ` &middot; ${rate}% pass rate` : ''}</div>
       </div>`;
@@ -443,8 +477,26 @@ async function loadProjects() {
   } catch(e) { el.innerHTML = '<p class="empty">Failed to load projects</p>'; }
 }
 
+let currentProjectName = '';
+
+function navigateSubmitForProject() {
+  navigate('submit');
+  document.getElementById('submit-project').value = currentProjectName;
+}
+
+async function deleteCurrentProject() {
+  if (!currentProjectName || !confirm(`Delete project "${currentProjectName}" and all its runs?`)) return;
+  try {
+    await fetch(`/api/projects/${currentProjectName}`, { method: 'DELETE' });
+    navigate('projects');
+  } catch(e) {}
+}
+
 async function loadProjectDetail(name) {
+  currentProjectName = name;
   document.getElementById('proj-name').textContent = name;
+
+  // Metrics
   try {
     const res = await fetch(`/api/metrics/${name}`);
     const m = await res.json();
@@ -453,6 +505,16 @@ async function loadProjectDetail(name) {
     document.getElementById('proj-duration').textContent = m.avg_duration_ms || 0;
   } catch(e) {}
 
+  // Kanban board
+  try {
+    const res = await fetch(`/api/goals/${name}`);
+    const goals = await res.json();
+    renderKanban(goals);
+  } catch(e) {
+    document.getElementById('kanban').innerHTML = '<p class="empty">Failed to load tasks</p>';
+  }
+
+  // Run history table
   try {
     const res = await fetch(`/api/runs/${name}`);
     const runs = await res.json();
@@ -467,6 +529,74 @@ async function loadProjectDetail(name) {
         <td style="font-size:13px;font-variant-numeric:tabular-nums">${r.duration_ms || 0}ms</td>
       </tr>`).join('') + '</table>';
   } catch(e) {}
+}
+
+function renderKanban(goals) {
+  const el = document.getElementById('kanban');
+  if (!Array.isArray(goals) || !goals.length) {
+    el.innerHTML = '<p class="empty">No tasks yet. Submit a task to get started.</p>';
+    return;
+  }
+
+  // Group goals into kanban columns by status
+  const columns = {
+    running: { label: 'In Progress', goals: [] },
+    passed: { label: 'Completed', goals: [] },
+    failed: { label: 'Failed', goals: [] },
+    partial: { label: 'Partial', goals: [] },
+  };
+
+  goals.forEach(g => {
+    const status = g.status || 'partial';
+    if (columns[status]) columns[status].goals.push(g);
+    else columns.partial.goals.push(g);
+  });
+
+  el.innerHTML = Object.entries(columns)
+    .filter(([_, col]) => col.goals.length > 0)
+    .map(([status, col]) => `
+      <div class="kanban-column ${status}">
+        <div class="kanban-column-header">
+          ${col.label}
+          <span class="count">${col.goals.length}</span>
+        </div>
+        ${col.goals.map(g => renderKanbanCard(g)).join('')}
+      </div>
+    `).join('');
+
+  // If no columns have content, show empty
+  if (!el.innerHTML.trim()) {
+    el.innerHTML = '<p class="empty">No tasks yet</p>';
+  }
+}
+
+function renderKanbanCard(goal) {
+  const agents = goal.agents || [];
+  const goalTitle = (goal.goal || '').substring(0, 80);
+
+  return `<div class="kanban-card">
+    <div class="goal-title">${goalTitle}</div>
+    <div class="goal-meta">
+      <span>${goal.total || 0} agent${(goal.total||0) !== 1 ? 's' : ''}</span>
+      ${goal.passed ? `<span style="color:var(--success)">${goal.passed} passed</span>` : ''}
+      ${goal.failed ? `<span style="color:var(--error)">${goal.failed} failed</span>` : ''}
+      ${goal.running ? `<span style="color:var(--warning)">${goal.running} running</span>` : ''}
+    </div>
+    ${agents.length > 0 ? `<div class="sub-agents">
+      ${agents.slice(0, 8).map(a => {
+        const st = a.status || 'unknown';
+        const model = (a.model_used || '').split(':')[0];
+        const dur = a.duration_ms ? (a.duration_ms / 1000).toFixed(1) + 's' : '';
+        return `<div class="sub-agent">
+          <div class="dot ${st}"></div>
+          <span>${a.agent_id || '?'}</span>
+          <span style="color:var(--muted)">${model}</span>
+          <span style="margin-left:auto;color:var(--muted)">${dur}</span>
+        </div>`;
+      }).join('')}
+      ${agents.length > 8 ? `<div class="sub-agent" style="color:var(--muted)">+${agents.length - 8} more</div>` : ''}
+    </div>` : ''}
+  </div>`;
 }
 
 async function loadAgents() {
