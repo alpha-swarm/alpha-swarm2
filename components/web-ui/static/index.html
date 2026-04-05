@@ -254,35 +254,21 @@ select.input { appearance: auto; }
   <!-- Submit -->
   <div class="page" id="page-submit">
     <h1>Submit Task</h1>
-    <p class="subtitle">Run an agent on a code task</p>
+    <p class="subtitle">Describe what you want done — the system picks the best model, reads the repo, and creates sub-agents as needed</p>
     <div class="card" style="max-width:600px">
       <div class="form-group">
-        <label class="form-label">Task Description</label>
-        <textarea class="input" id="submit-task" placeholder="Add a function called multiply that takes two i32 and returns their product"></textarea>
-      </div>
-      <div class="grid grid-2">
-        <div class="form-group">
-          <label class="form-label">Project</label>
-          <input class="input" id="submit-project" value="default" placeholder="project name">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Model</label>
-          <input class="input" id="submit-model" value="qwen2.5-coder:7b" placeholder="model name">
-        </div>
+        <label class="form-label">What do you want to do?</label>
+        <textarea class="input" id="submit-task" placeholder="Add error handling to all public functions in the auth module" style="min-height:100px"></textarea>
       </div>
       <div class="form-group">
-        <label class="form-label">Ollama URL</label>
-        <input class="input" id="submit-ollama" value="http://100.81.10.8:11434">
+        <label class="form-label">Project</label>
+        <select class="input" id="submit-project"><option value="">Loading projects...</option></select>
       </div>
-      <div class="form-group">
-        <label class="form-label">File Path</label>
-        <input class="input" id="submit-filepath" placeholder="src/main.rs">
+      <div style="padding:12px 0;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+        The orchestrator will use the most capable model to plan, then dispatch smaller specialized agents for each sub-task automatically.
       </div>
-      <div class="form-group">
-        <label class="form-label">File Content</label>
-        <textarea class="input" id="submit-content" placeholder="pub fn add(a: i32, b: i32) -> i32 { a + b }" style="font-family:monospace;font-size:13px"></textarea>
-      </div>
-      <button class="btn btn-primary" id="submit-btn" onclick="submitTask()">Run Agent</button>
+      <button class="btn btn-primary" id="submit-btn" onclick="submitTask()" style="width:100%;justify-content:center;padding:12px">Submit Goal</button>
       <div id="submit-result" style="margin-top:16px"></div>
     </div>
   </div>
@@ -314,6 +300,7 @@ function navigate(page, data) {
   if (page === 'projects') loadProjects();
   if (page === 'agents') loadAgents();
   if (page === 'models') loadModels();
+  if (page === 'submit') loadProjectDropdown();
   if (page === 'project-detail' && data) loadProjectDetail(data);
 
   window.location.hash = page === 'project-detail' ? `project/${data}` : page;
@@ -508,8 +495,9 @@ async function loadProjects() {
 
 let currentProjectName = '';
 
-function navigateSubmitForProject() {
+async function navigateSubmitForProject() {
   navigate('submit');
+  await loadProjectDropdown();
   document.getElementById('submit-project').value = currentProjectName;
 }
 
@@ -690,24 +678,42 @@ async function loadModels() {
   }
 }
 
+// --- Load project dropdown ---
+async function loadProjectDropdown() {
+  const select = document.getElementById('submit-project');
+  try {
+    const res = await fetch('/api/projects');
+    const projects = await res.json();
+    if (Array.isArray(projects) && projects.length) {
+      select.innerHTML = projects.map(p =>
+        `<option value="${p.name}">${p.name}${p.repo_url ? ' — ' + p.repo_url.replace('https://github.com/','').replace('.git','') : ''}</option>`
+      ).join('');
+    } else {
+      select.innerHTML = '<option value="">No projects — create one first</option>';
+    }
+  } catch(e) {
+    select.innerHTML = '<option value="">Failed to load projects</option>';
+  }
+}
+
 // --- Submit task ---
 async function submitTask() {
   const btn = document.getElementById('submit-btn');
   const resultEl = document.getElementById('submit-result');
-  btn.disabled = true; btn.textContent = 'Running...';
-  resultEl.innerHTML = '';
+  const project = document.getElementById('submit-project').value;
+  const task = document.getElementById('submit-task').value.trim();
+
+  if (!project) { alert('Select a project first'); return; }
+  if (!task) { alert('Describe what you want to do'); return; }
+
+  btn.disabled = true; btn.textContent = 'Planning & executing...';
+  resultEl.innerHTML = '<div style="color:var(--muted);font-size:13px">The orchestrator is analyzing the repo and creating sub-agents...</div>';
 
   const body = {
-    task: document.getElementById('submit-task').value,
-    project: document.getElementById('submit-project').value || 'default',
-    model: document.getElementById('submit-model').value || 'qwen2.5-coder:7b',
-    ollama_url: document.getElementById('submit-ollama').value || 'http://localhost:11434',
+    task: task,
+    project: project,
     files: [],
   };
-
-  const fp = document.getElementById('submit-filepath').value;
-  const fc = document.getElementById('submit-content').value;
-  if (fp && fc) body.files.push({ path: fp, content: fc });
 
   try {
     const res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -728,7 +734,7 @@ async function submitTask() {
     resultEl.innerHTML = `<div class="card" style="border-color:var(--error)"><span class="badge failed">error</span> <span style="font-size:14px;margin-left:8px">${e.message}</span></div>`;
   }
 
-  btn.disabled = false; btn.textContent = 'Run Agent';
+  btn.disabled = false; btn.textContent = 'Submit Goal';
 }
 
 // --- Init ---

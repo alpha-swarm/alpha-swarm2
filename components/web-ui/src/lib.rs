@@ -539,9 +539,11 @@ fn api_submit_run(response_out: ResponseOutparam, body: &[u8]) {
     };
 
     let task = parsed.get("task").and_then(|t| t.as_str()).unwrap_or("");
-    let ollama_url = parsed.get("ollama_url").and_then(|u| u.as_str()).unwrap_or("http://localhost:11434");
-    let model = parsed.get("model").and_then(|m| m.as_str()).unwrap_or("qwen2.5-coder:7b");
     let project = parsed.get("project").and_then(|p| p.as_str()).unwrap_or("default");
+
+    // Use app-wide defaults — no per-request model/url selection
+    let ollama_url = "http://100.81.10.8:11434"; // TODO: read from config
+    let model = "codellama:34b"; // Always start with the most capable model
     let files = parsed.get("files").and_then(|f| f.as_array()).cloned().unwrap_or_default();
 
     // Build file context
