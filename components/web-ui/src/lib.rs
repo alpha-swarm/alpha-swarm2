@@ -87,7 +87,7 @@ fn read_body(request: &IncomingRequest) -> Vec<u8> {
 }
 
 fn api_models(response_out: ResponseOutparam) {
-    let ollama_url = "http://localhost:11434";
+    let ollama_url = "http://100.81.10.8:11434";
 
     // Call Ollama /api/tags
     match http_get(&format!("{}/api/tags", ollama_url)) {
