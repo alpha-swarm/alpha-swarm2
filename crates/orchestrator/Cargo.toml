@@ -1,12 +1,8 @@
 [package]
-name = "alpha-swarm-cli"
+name = "swarm-orchestrator"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-
-[[bin]]
-name = "alpha-swarm"
-path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -14,10 +10,8 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
-clap.workspace = true
+uuid = { version = "1", features = ["v4"] }
 inference-client = { path = "../inference-client" }
 agent-core = { path = "../agent-core" }
 quality-gate-lib = { path = "../quality-gate" }
 knowledge-base = { path = "../knowledge-base" }
-swarm-orchestrator = { path = "../orchestrator" }

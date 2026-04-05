@@ -50,6 +50,21 @@ enum Commands {
     /// Check health of all backends
     Health,
 
+    /// Run a swarm: decompose a goal into parallel agent tasks
+    Swarm {
+        /// Path to the repository
+        #[arg(short, long)]
+        repo: PathBuf,
+
+        /// High-level goal description
+        #[arg(short, long)]
+        goal: String,
+
+        /// Project name for knowledge base
+        #[arg(short, long, default_value = "default")]
+        project: String,
+    },
+
     /// Show past agent runs from knowledge base
     History {
         /// Project name
@@ -268,6 +283,62 @@ async fn main() -> Result<()> {
             for (kind, healthy) in statuses {
                 let status = if healthy { "healthy" } else { "unreachable" };
                 println!("{:?}: {status}", kind);
+            }
+        }
+
+        Commands::Swarm { repo, goal, project } => {
+            let repo = repo.canonicalize()
+                .context("Repository path does not exist")?;
+
+            info!(repo = %repo.display(), goal = %goal, project = %project, "Starting swarm");
+
+            let ollama = get_ollama();
+            let kb = get_knowledge_store().await?;
+
+            let mut runner = swarm_orchestrator::SwarmRunner::new(&router, &ollama, &repo, &project);
+            if let Some(store) = &kb {
+                runner = runner.with_store(store);
+            }
+
+            let result = runner.run(&goal).await?;
+
+            println!("\n=== Swarm Result ===");
+            println!("Goal:     {}", result.goal);
+            println!("Tasks:    {}", result.tasks.len());
+            println!("Duration: {}ms", result.total_duration_ms);
+            println!("Quality:  {}", if result.quality_passed { "PASSED" } else { "FAILED" });
+
+            println!("\n--- Sub-tasks ---");
+            for tr in &result.results {
+                let status = if let Some(ref r) = tr.agent_result {
+                    if r.skipped { "SKIP" } else if r.applied { "DONE" } else { "NOOP" }
+                } else {
+                    "ERR"
+                };
+                let edits = tr.agent_result.as_ref().map(|r| r.edits.len()).unwrap_or(0);
+                println!(
+                    "  [{status}] {} — {} (edits: {}, files: {:?})",
+                    tr.task.id, tr.task.description, edits, tr.task.files,
+                );
+                if let Some(err) = &tr.error {
+                    println!("         error: {err}");
+                }
+            }
+
+            if let Some(diff) = &result.merged_diff {
+                if !diff.is_empty() {
+                    println!("\n--- Merged Diff ---");
+                    for line in diff.lines().take(50) {
+                        println!("{line}");
+                    }
+                    if diff.lines().count() > 50 {
+                        println!("... ({} more lines)", diff.lines().count() - 50);
+                    }
+                }
+            }
+
+            if !result.quality_passed {
+                std::process::exit(1);
             }
         }
 

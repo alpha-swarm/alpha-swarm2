@@ -4,6 +4,7 @@ members = [
     "crates/agent-core",
     "crates/quality-gate",
     "crates/knowledge-base",
+    "crates/orchestrator",
     "crates/alpha-swarm-cli",
     "components/agent-worker",
     "components/orchestrator",
