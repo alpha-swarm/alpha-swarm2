@@ -10,11 +10,6 @@ members = [
     "components/orchestrator",
     "components/gateway",
     "components/inference-router",
-    "providers/ollama",
-    "providers/claude",
-    "providers/virtfs",
-    "providers/quality-gate",
-    "providers/knowledge-base",
 ]
 resolver = "2"
 
