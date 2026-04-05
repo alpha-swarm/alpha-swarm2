@@ -5,10 +5,12 @@ use inference_client::{Complexity, InferenceRouter};
 use tracing::info;
 
 use agent_core::{Agent, KnowledgeConfig};
+use swarm_config::SwarmConfig;
 use crate::setup;
 
 pub async fn execute(
     router: &InferenceRouter,
+    config: &SwarmConfig,
     repo: PathBuf,
     task: String,
     files: Vec<String>,
@@ -24,17 +26,16 @@ pub async fn execute(
 
     let files = if files.is_empty() { setup::discover_files(&repo)? } else { files };
 
-    let kb = if project.is_some() { setup::get_knowledge_store().await? } else { None };
-    let ollama = setup::get_ollama();
-    let events = setup::get_event_publisher().await?;
+    let kb = if project.is_some() { setup::get_knowledge_store(config).await? } else { None };
+    let ollama = setup::get_ollama(config);
+    let events = setup::get_event_publisher(config).await?;
 
     let mut agent = Agent::new(router, &repo);
     if let Some(pub_) = &events {
         agent = agent.with_events(pub_);
     }
     if let (Some(proj), Some(store)) = (&project, &kb) {
-        let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
-            .unwrap_or_else(|_| "qwen2.5-coder:7b".into());
+        let embed_model = config.defaults.embed_model.clone();
         agent = agent.with_knowledge(KnowledgeConfig {
             store,
             embedder: &ollama,

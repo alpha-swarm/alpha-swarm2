@@ -90,7 +90,7 @@ impl<'a> SwarmRunner<'a> {
             let store = self.store;
             let project = self.project.clone();
             let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
-                .unwrap_or_else(|_| "qwen2.5-coder:7b".into());
+                .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
 
             // Can't move references into spawn — need to use scoped tasks
             // For now, run sequentially but with worktree isolation

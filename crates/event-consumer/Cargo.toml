@@ -17,3 +17,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 swarm-events = { path = "../events" }
 knowledge-base = { path = "../knowledge-base" }
+swarm-config = { path = "../config" }

@@ -1,0 +1,24 @@
+# alpha-swarm configuration
+# Override with environment variables: ALPHA_SWARM_OLLAMA_URL, etc.
+
+[ollama]
+url = "http://100.81.10.8:11434"
+
+[surrealdb]
+url = "127.0.0.1:8001"
+namespace = "alpha_swarm"
+database = "swarm"
+username = "root"
+password = "root"
+
+[nats]
+url = "nats://127.0.0.1:4222"
+
+[claude]
+# api_key = ""  # Set via ANTHROPIC_API_KEY env var
+model = "claude-sonnet-4-20250514"
+
+[defaults]
+embed_model = "qwen2.5-coder:7b"
+simple_model = "qwen2.5-coder:7b"
+project = "default"

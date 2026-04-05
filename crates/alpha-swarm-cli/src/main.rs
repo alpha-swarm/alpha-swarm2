@@ -84,14 +84,15 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let router = setup::setup_router()?;
+    let config = setup::load_config();
+    let router = setup::setup_router(&config)?;
 
     match cli.command {
         Commands::Run { repo, task, files, complexity, no_quality_gate, project, agent_type, retry } => {
-            commands::run::execute(&router, repo, task, files, parse_complexity(&complexity), no_quality_gate, project, &agent_type, retry).await?;
+            commands::run::execute(&router, &config, repo, task, files, parse_complexity(&complexity), no_quality_gate, project, &agent_type, retry).await?;
         }
         Commands::Swarm { repo, goal, project } => {
-            commands::swarm::execute(&router, repo, goal, project).await?;
+            commands::swarm::execute(&router, &config, repo, goal, project).await?;
         }
         Commands::Models => {
             let models = router.list_models().await?;
@@ -110,7 +111,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Metrics { project } => {
-            let kb = setup::get_knowledge_store().await?.context("Knowledge base not available")?;
+            let kb = setup::get_knowledge_store(&config).await?.context("Knowledge base not available")?;
             let runs = kb.list_runs(&project, None).await?;
             let metrics = knowledge_base::ProjectMetrics::from_runs(&runs);
 
@@ -138,7 +139,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::History { project } => {
-            let kb = setup::get_knowledge_store().await?.context("Knowledge base not available")?;
+            let kb = setup::get_knowledge_store(&config).await?.context("Knowledge base not available")?;
             let runs = kb.list_runs(&project, None).await?;
             if runs.is_empty() {
                 println!("No runs found for project '{project}'.");

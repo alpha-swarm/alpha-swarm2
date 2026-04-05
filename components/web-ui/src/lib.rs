@@ -24,6 +24,9 @@ impl Guest for WebUi {
             (Method::Get, p) if p.starts_with("/api/models") => {
                 api_models(response_out);
             }
+            (Method::Get, "/api/model-roles") => {
+                api_model_roles(response_out);
+            }
             (Method::Get, p) if p.starts_with("/api/health") => {
                 respond_json(response_out, 200, r#"{"status":"ok"}"#);
             }
@@ -84,6 +87,16 @@ fn read_body(request: &IncomingRequest) -> Vec<u8> {
     drop(stream);
     let _ = IncomingBody::finish(body);
     bytes
+}
+
+fn api_model_roles(response_out: ResponseOutparam) {
+    let roles = r#"[
+        {"name":"qwen2.5-coder:7b","role":"Fast code edits","good_for":["lint fixes","rename","add simple function","formatting"],"complexity":"simple"},
+        {"name":"deepseek-coder:33b","role":"Medium complexity","good_for":["refactoring","add features","write tests","error handling"],"complexity":"medium"},
+        {"name":"codellama:34b","role":"Complex reasoning","good_for":["architecture","algorithms","multi-file edits","debugging"],"complexity":"complex"},
+        {"name":"claude-sonnet-4-20250514","role":"Orchestration","good_for":["task decomposition","code review","complex refactors","design"],"complexity":"complex"}
+    ]"#;
+    respond_json(response_out, 200, roles);
 }
 
 fn api_models(response_out: ResponseOutparam) {

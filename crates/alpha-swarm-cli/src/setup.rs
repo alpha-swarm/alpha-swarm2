@@ -3,37 +3,34 @@ use tracing::info;
 
 use inference_client::{ClaudeBackend, InferenceRouter, OllamaBackend};
 use knowledge_base::KnowledgeStore;
+use swarm_config::SwarmConfig;
 
-pub fn setup_router() -> Result<InferenceRouter> {
+pub fn load_config() -> SwarmConfig {
+    SwarmConfig::load()
+}
+
+pub fn setup_router(config: &SwarmConfig) -> Result<InferenceRouter> {
     let mut router = InferenceRouter::new();
 
-    if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-        let model = std::env::var("ALPHA_SWARM_CLAUDE_MODEL")
-            .unwrap_or_else(|_| "claude-sonnet-4-20250514".into());
-        info!("Claude backend configured (model: {model})");
-        router = router.add_backend(ClaudeBackend::new(api_key).with_model(model));
+    if !config.claude.api_key.is_empty() {
+        info!(model = %config.claude.model, "Claude backend configured");
+        router = router.add_backend(
+            ClaudeBackend::new(&config.claude.api_key).with_model(&config.claude.model)
+        );
     }
 
-    let ollama_url = ollama_url();
-    info!("Ollama backend configured ({ollama_url})");
-    router = router.add_backend(OllamaBackend::new(&ollama_url));
+    info!(url = %config.ollama.url, "Ollama backend configured");
+    router = router.add_backend(OllamaBackend::new(&config.ollama.url));
 
     Ok(router)
 }
 
-pub fn get_ollama() -> OllamaBackend {
-    OllamaBackend::new(ollama_url())
+pub fn get_ollama(config: &SwarmConfig) -> OllamaBackend {
+    OllamaBackend::new(&config.ollama.url)
 }
 
-pub async fn get_knowledge_store() -> Result<Option<KnowledgeStore>> {
-    let url = std::env::var("ALPHA_SWARM_SURREALDB_URL")
-        .unwrap_or_else(|_| "127.0.0.1:8000".into());
-    let ns = std::env::var("ALPHA_SWARM_SURREALDB_NS")
-        .unwrap_or_else(|_| "alpha_swarm".into());
-    let db = std::env::var("ALPHA_SWARM_SURREALDB_DB")
-        .unwrap_or_else(|_| "swarm".into());
-
-    match KnowledgeStore::connect(&url, &ns, &db).await {
+pub async fn get_knowledge_store(config: &SwarmConfig) -> Result<Option<KnowledgeStore>> {
+    match KnowledgeStore::connect(&config.surrealdb.url, &config.surrealdb.namespace, &config.surrealdb.database).await {
         Ok(store) => Ok(Some(store)),
         Err(e) => {
             tracing::warn!("Knowledge base unavailable: {e}");
@@ -42,22 +39,14 @@ pub async fn get_knowledge_store() -> Result<Option<KnowledgeStore>> {
     }
 }
 
-pub async fn get_event_publisher() -> Result<Option<swarm_events::EventPublisher>> {
-    let url = std::env::var("ALPHA_SWARM_NATS_URL")
-        .unwrap_or_else(|_| "nats://127.0.0.1:4222".into());
-
-    match swarm_events::EventPublisher::connect(&url).await {
+pub async fn get_event_publisher(config: &SwarmConfig) -> Result<Option<swarm_events::EventPublisher>> {
+    match swarm_events::EventPublisher::connect(&config.nats.url).await {
         Ok(pub_) => Ok(Some(pub_)),
         Err(e) => {
             tracing::warn!("NATS unavailable (events disabled): {e}");
             Ok(None)
         }
     }
-}
-
-fn ollama_url() -> String {
-    std::env::var("ALPHA_SWARM_OLLAMA_URL")
-        .unwrap_or_else(|_| "http://localhost:11434".into())
 }
 
 pub fn discover_files(repo: &std::path::Path) -> Result<Vec<String>> {
