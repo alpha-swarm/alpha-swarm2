@@ -42,6 +42,19 @@ pub async fn get_knowledge_store() -> Result<Option<KnowledgeStore>> {
     }
 }
 
+pub async fn get_event_publisher() -> Result<Option<swarm_events::EventPublisher>> {
+    let url = std::env::var("ALPHA_SWARM_NATS_URL")
+        .unwrap_or_else(|_| "nats://127.0.0.1:4222".into());
+
+    match swarm_events::EventPublisher::connect(&url).await {
+        Ok(pub_) => Ok(Some(pub_)),
+        Err(e) => {
+            tracing::warn!("NATS unavailable (events disabled): {e}");
+            Ok(None)
+        }
+    }
+}
+
 fn ollama_url() -> String {
     std::env::var("ALPHA_SWARM_OLLAMA_URL")
         .unwrap_or_else(|_| "http://localhost:11434".into())

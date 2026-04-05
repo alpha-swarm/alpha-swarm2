@@ -21,6 +21,7 @@ agent-core = { path = "../agent-core" }
 quality-gate-lib = { path = "../quality-gate" }
 knowledge-base = { path = "../knowledge-base" }
 swarm-orchestrator = { path = "../orchestrator" }
+swarm-events = { path = "../events" }
 
 [dev-dependencies]
 tempfile = "3"

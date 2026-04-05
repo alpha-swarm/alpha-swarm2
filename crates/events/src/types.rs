@@ -1,0 +1,93 @@
+use serde::{Deserialize, Serialize};
+
+/// NATS subject schema:
+///   alpha-swarm.{project}.agent.started
+///   alpha-swarm.{project}.agent.finished
+///   alpha-swarm.{project}.agent.failed
+///   alpha-swarm.{project}.swarm.planned
+///   alpha-swarm.{project}.swarm.completed
+///   alpha-swarm.{project}.quality.checked
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SwarmEvent {
+    AgentStarted {
+        project: String,
+        agent_id: String,
+        task: String,
+        model: String,
+        files: Vec<String>,
+        timestamp: String,
+    },
+    AgentFinished {
+        project: String,
+        agent_id: String,
+        status: String,
+        edits: u32,
+        tokens_input: u32,
+        tokens_output: u32,
+        duration_ms: u64,
+        model: String,
+        timestamp: String,
+    },
+    AgentFailed {
+        project: String,
+        agent_id: String,
+        error: String,
+        model: String,
+        duration_ms: u64,
+        timestamp: String,
+    },
+    SwarmPlanned {
+        project: String,
+        goal: String,
+        task_count: u32,
+        tasks: Vec<String>,
+        timestamp: String,
+    },
+    SwarmCompleted {
+        project: String,
+        goal: String,
+        quality_passed: bool,
+        tasks_passed: u32,
+        tasks_failed: u32,
+        total_duration_ms: u64,
+        timestamp: String,
+    },
+    QualityChecked {
+        project: String,
+        agent_id: String,
+        check_name: String,
+        passed: bool,
+        duration_ms: u64,
+        timestamp: String,
+    },
+}
+
+impl SwarmEvent {
+    pub fn nats_subject(&self) -> String {
+        match self {
+            Self::AgentStarted { project, .. } => format!("alpha-swarm.{project}.agent.started"),
+            Self::AgentFinished { project, .. } => format!("alpha-swarm.{project}.agent.finished"),
+            Self::AgentFailed { project, .. } => format!("alpha-swarm.{project}.agent.failed"),
+            Self::SwarmPlanned { project, .. } => format!("alpha-swarm.{project}.swarm.planned"),
+            Self::SwarmCompleted { project, .. } => format!("alpha-swarm.{project}.swarm.completed"),
+            Self::QualityChecked { project, .. } => format!("alpha-swarm.{project}.quality.checked"),
+        }
+    }
+
+    pub fn project(&self) -> &str {
+        match self {
+            Self::AgentStarted { project, .. }
+            | Self::AgentFinished { project, .. }
+            | Self::AgentFailed { project, .. }
+            | Self::SwarmPlanned { project, .. }
+            | Self::SwarmCompleted { project, .. }
+            | Self::QualityChecked { project, .. } => project,
+        }
+    }
+
+    pub fn timestamp() -> String {
+        chrono::Utc::now().to_rfc3339()
+    }
+}

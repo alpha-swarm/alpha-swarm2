@@ -26,8 +26,12 @@ pub async fn execute(
 
     let kb = if project.is_some() { setup::get_knowledge_store().await? } else { None };
     let ollama = setup::get_ollama();
+    let events = setup::get_event_publisher().await?;
 
     let mut agent = Agent::new(router, &repo);
+    if let Some(pub_) = &events {
+        agent = agent.with_events(pub_);
+    }
     if let (Some(proj), Some(store)) = (&project, &kb) {
         let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
             .unwrap_or_else(|_| "qwen2.5-coder:7b".into());

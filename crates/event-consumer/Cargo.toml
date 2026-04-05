@@ -1,8 +1,12 @@
 [package]
-name = "agent-core"
+name = "event-consumer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[[bin]]
+name = "event-consumer"
+path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -10,9 +14,6 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-uuid = { version = "1", features = ["v4"] }
-inference-client = { path = "../inference-client" }
-edit-parser = { path = "../edit-parser" }
-quality-gate-lib = { path = "../quality-gate" }
+tracing-subscriber.workspace = true
 swarm-events = { path = "../events" }
 knowledge-base = { path = "../knowledge-base" }

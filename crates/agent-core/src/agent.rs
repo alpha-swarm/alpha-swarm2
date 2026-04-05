@@ -5,6 +5,7 @@ use tracing::{info, warn};
 
 use inference_client::{Complexity, InferenceOptions, InferenceResponse, InferenceRouter, OllamaBackend};
 use knowledge_base::{AgentRun, KnowledgeStore, RunStatus};
+use swarm_events::{EventPublisher, SwarmEvent};
 
 use crate::parser::{FileEdit, parse_edits};
 use crate::prompt::build_prompt;
@@ -34,6 +35,8 @@ pub struct Agent<'a> {
     router: &'a InferenceRouter,
     repo_path: PathBuf,
     knowledge: Option<KnowledgeConfig<'a>>,
+    events: Option<&'a EventPublisher>,
+    project: String,
 }
 
 impl<'a> Agent<'a> {
@@ -42,11 +45,24 @@ impl<'a> Agent<'a> {
             router,
             repo_path: repo_path.into(),
             knowledge: None,
+            events: None,
+            project: "default".into(),
         }
     }
 
     pub fn with_knowledge(mut self, config: KnowledgeConfig<'a>) -> Self {
+        self.project = config.project.clone();
         self.knowledge = Some(config);
+        self
+    }
+
+    pub fn with_events(mut self, publisher: &'a EventPublisher) -> Self {
+        self.events = Some(publisher);
+        self
+    }
+
+    pub fn with_project(mut self, project: impl Into<String>) -> Self {
+        self.project = project.into();
         self
     }
 
@@ -133,6 +149,18 @@ impl<'a> Agent<'a> {
             if let Some(last) = messages.last_mut() {
                 last.content.push_str(&context_from_knowledge);
             }
+        }
+
+        // --- Emit: agent started ---
+        if let Some(pub_) = &self.events {
+            let _ = pub_.publish(&SwarmEvent::AgentStarted {
+                project: self.project.clone(),
+                agent_id: agent_id.clone(),
+                task: task.to_string(),
+                model: "pending".into(),
+                files: file_paths.to_vec(),
+                timestamp: SwarmEvent::timestamp(),
+            }).await;
         }
 
         // --- Knowledge: record run start ---
@@ -223,6 +251,22 @@ impl<'a> Agent<'a> {
         }
 
         let has_edits = !edits.is_empty();
+
+        // --- Emit: agent finished ---
+        if let Some(pub_) = &self.events {
+            let _ = pub_.publish(&SwarmEvent::AgentFinished {
+                project: self.project.clone(),
+                agent_id: agent_id.clone(),
+                status: if has_edits { "passed".into() } else { "skipped".into() },
+                edits: edits.len() as u32,
+                tokens_input: response.tokens_input,
+                tokens_output: response.tokens_output,
+                duration_ms: response.duration_ms,
+                model: response.model.clone(),
+                timestamp: SwarmEvent::timestamp(),
+            }).await;
+        }
+
         Ok(AgentResult {
             edits,
             inference_response: response,
