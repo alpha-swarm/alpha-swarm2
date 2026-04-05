@@ -655,11 +655,27 @@ fn respond_json(response_out: ResponseOutparam, status: u16, body: &str) {
     let response = OutgoingResponse::new(headers);
     response.set_status_code(status).unwrap();
     let out_body = response.body().unwrap();
+
+    // Send headers first, then stream body in chunks (prevents WASI buffer overflow)
+    ResponseOutparam::set(response_out, Ok(response));
+
     let stream = out_body.write().unwrap();
-    stream.blocking_write_and_flush(body.as_bytes()).unwrap();
+    let bytes = body.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let capacity = stream.check_write().unwrap_or(0) as usize;
+        if capacity == 0 {
+            stream.subscribe().block();
+            continue;
+        }
+        let end = (offset + capacity).min(bytes.len());
+        stream.write(&bytes[offset..end]).unwrap();
+        offset = end;
+    }
+    stream.flush().unwrap();
+    stream.subscribe().block();
     drop(stream);
     OutgoingBody::finish(out_body, None).unwrap();
-    ResponseOutparam::set(response_out, Ok(response));
 }
 
 export!(WebUi);

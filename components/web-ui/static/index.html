@@ -239,6 +239,15 @@ select.input { appearance: auto; }
     </div>
     <div class="section-title">Task Board</div>
     <div id="kanban" class="kanban-board"><p class="empty">Loading tasks...</p></div>
+    <div id="goal-detail" style="display:none">
+      <div class="card" style="margin-top:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+          <h3 style="text-transform:none;color:var(--text);font-size:16px" id="goal-detail-title">Goal</h3>
+          <button class="btn btn-sm" onclick="closeGoalDetail()">&times; Close</button>
+        </div>
+        <div id="goal-detail-content"></div>
+      </div>
+    </div>
     <div class="section-title">Run History</div>
     <div style="display:flex;gap:16px">
       <div id="proj-runs-table" style="flex:1;min-width:0"></div>
@@ -761,6 +770,7 @@ async function loadProjectDetail(name) {
 
 function renderKanban(goals) {
   const el = document.getElementById('kanban');
+  window._kanbanGoals = []; // Reset for card indexing
   if (!Array.isArray(goals) || !goals.length) {
     el.innerHTML = '<p class="empty">No tasks yet. Submit a task to get started.</p>';
     return;
@@ -799,6 +809,92 @@ function renderKanban(goals) {
   }
 }
 
+function showGoalDetail(idx) {
+  const goal = window._kanbanGoals?.[idx];
+  if (!goal) return;
+
+  document.getElementById('goal-detail').style.display = '';
+  document.getElementById('goal-detail-title').textContent = goal.goal || 'Goal';
+
+  const agents = goal.agents || [];
+  const status = goal.status || 'unknown';
+
+  // Aggregate stats
+  const totalTokensIn = agents.reduce((s, a) => s + (a.tokens_input || 0), 0);
+  const totalTokensOut = agents.reduce((s, a) => s + (a.tokens_output || 0), 0);
+  const totalDuration = agents.reduce((s, a) => s + (a.duration_ms || 0), 0);
+  const models = [...new Set(agents.map(a => a.model_used || a.model || '').filter(Boolean))];
+
+  // Find PR link from any agent's diff field
+  const prAgent = agents.find(a => a.diff && a.diff.startsWith('PR: '));
+  const prUrl = prAgent ? prAgent.diff.substring(4) : null;
+
+  // Collect all diffs
+  const diffs = agents
+    .filter(a => a.diff && !a.diff.startsWith('PR: '))
+    .map(a => ({ agent: a.agent_id || '?', diff: a.diff }));
+
+  const content = document.getElementById('goal-detail-content');
+  content.innerHTML = `
+    <div style="margin-bottom:16px">
+      <span class="badge ${status}">${status}</span>
+      <span style="margin-left:8px;font-size:13px;color:var(--muted)">${goal.total || 0} agents &middot; ${models.join(', ')}</span>
+    </div>
+
+    <div class="grid grid-3" style="margin-bottom:16px">
+      <div class="card" style="padding:12px"><h3>Tokens</h3><div style="font-size:18px;font-weight:600">${totalTokensIn} / ${totalTokensOut}</div><div class="label">in / out</div></div>
+      <div class="card" style="padding:12px"><h3>Duration</h3><div style="font-size:18px;font-weight:600">${(totalDuration / 1000).toFixed(1)}s</div></div>
+      <div class="card" style="padding:12px"><h3>Agents</h3><div style="font-size:18px;font-weight:600">${goal.passed || 0} / ${goal.total || 0}</div><div class="label">passed</div></div>
+    </div>
+
+    ${prUrl ? `<div style="margin-bottom:16px"><a href="${prUrl}" target="_blank" class="btn btn-primary btn-sm" style="text-decoration:none">View PR on GitHub &rarr;</a></div>` : ''}
+
+    <div class="section-title" style="margin-top:0">Sub-Agents</div>
+    <table>
+      <tr><th>Status</th><th>Agent</th><th>Model</th><th>Tokens</th><th>Duration</th></tr>
+      ${agents.map(a => {
+        const st = a.status || 'unknown';
+        const model = (a.model_used || a.model || '').substring(0, 20);
+        const dur = a.duration_ms ? (a.duration_ms / 1000).toFixed(1) + 's' : '';
+        return `<tr>
+          <td><span class="badge ${st}">${st}</span></td>
+          <td style="font-size:13px">${a.agent_id || '?'}</td>
+          <td style="font-size:13px">${model}</td>
+          <td style="font-size:13px;font-variant-numeric:tabular-nums">${a.tokens_output || 0}</td>
+          <td style="font-size:13px;font-variant-numeric:tabular-nums">${dur}</td>
+        </tr>`;
+      }).join('')}
+    </table>
+
+    ${agents.filter(a => a.error_message).length ? `
+      <div class="section-title">Errors</div>
+      ${agents.filter(a => a.error_message).map(a => `
+        <div style="margin-bottom:8px">
+          <span style="font-size:12px;color:var(--muted)">${a.agent_id || '?'}</span>
+          <div class="detail-error">${(a.error_message || '').substring(0, 500)}</div>
+        </div>
+      `).join('')}
+    ` : ''}
+
+    ${diffs.length ? `
+      <div class="section-title">Diffs</div>
+      ${diffs.map(d => `
+        <div style="margin-bottom:12px">
+          <span style="font-size:12px;color:var(--muted)">${d.agent}</span>
+          <pre style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;font-size:12px;overflow-x:auto;max-height:200px;color:var(--text-secondary);margin-top:4px">${d.diff.substring(0, 2000).replace(/</g,'&lt;')}</pre>
+        </div>
+      `).join('')}
+    ` : ''}
+  `;
+
+  // Scroll to it
+  document.getElementById('goal-detail').scrollIntoView({ behavior: 'smooth' });
+}
+
+function closeGoalDetail() {
+  document.getElementById('goal-detail').style.display = 'none';
+}
+
 function rerunGoal(goalText) {
   fetch('/api/run', {
     method: 'POST',
@@ -812,7 +908,11 @@ function renderKanbanCard(goal) {
   const goalTitle = (goal.goal || '').substring(0, 80);
   const escapedGoal = (goal.goal || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 
-  return `<div class="kanban-card">
+  const goalIdx = window._kanbanGoals ? window._kanbanGoals.length : 0;
+  if (!window._kanbanGoals) window._kanbanGoals = [];
+  window._kanbanGoals.push(goal);
+
+  return `<div class="kanban-card" style="cursor:pointer" onclick="showGoalDetail(${goalIdx})">
     <div style="display:flex;justify-content:space-between;align-items:start">
       <div class="goal-title">${goalTitle}</div>
       <button class="btn btn-sm" style="padding:2px 8px;font-size:11px;flex-shrink:0" onclick="event.stopPropagation();rerunGoal('${escapedGoal}')">Re-run</button>
