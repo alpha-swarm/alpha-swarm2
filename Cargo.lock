@@ -22,6 +22,7 @@ name = "agent-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "edit-parser",
  "inference-client",
  "knowledge-base",
  "serde",
@@ -35,6 +36,7 @@ dependencies = [
 name = "agent-worker"
 version = "0.1.0"
 dependencies = [
+ "edit-parser",
  "serde",
  "serde_json",
  "wit-bindgen 0.41.0",
@@ -1018,6 +1020,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "edit-parser"
+version = "0.1.0"
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1333,13 +1339,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54614a3312934d066701a80f20f15fa3b56d67ac7722b39eea5b4c9dd1d66c94"
 dependencies = [
  "thread_local",
-]
-
-[[package]]
-name = "gateway"
-version = "0.1.0"
-dependencies = [
- "wit-bindgen-rt 0.21.0",
 ]
 
 [[package]]
@@ -2037,13 +2036,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inference-router"
-version = "0.1.0"
-dependencies = [
- "wit-bindgen-rt 0.21.0",
-]
-
-[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2661,13 +2653,6 @@ dependencies = [
  "libc",
  "pkg-config",
  "vcpkg",
-]
-
-[[package]]
-name = "orchestrator"
-version = "0.1.0"
-dependencies = [
- "wit-bindgen-rt 0.21.0",
 ]
 
 [[package]]
@@ -5713,7 +5698,7 @@ version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10fb6648689b3929d56bbc7eb1acf70c9a42a29eb5358c67c10f54dbd5d695de"
 dependencies = [
- "wit-bindgen-rt 0.41.0",
+ "wit-bindgen-rt",
  "wit-bindgen-rust-macro 0.41.0",
 ]
 
@@ -5747,12 +5732,6 @@ dependencies = [
  "heck",
  "wit-parser 0.244.0",
 ]
-
-[[package]]
-name = "wit-bindgen-rt"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "026d24a27f6712541fa534f2954bd9e0eb66172f033c2157c0f31d106255c497"
 
 [[package]]
 name = "wit-bindgen-rt"

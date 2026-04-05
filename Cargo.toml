@@ -8,9 +8,6 @@ members = [
     "crates/orchestrator",
     "crates/alpha-swarm-cli",
     "components/agent-worker",
-    "components/orchestrator",
-    "components/gateway",
-    "components/inference-router",
 ]
 resolver = "2"
 
