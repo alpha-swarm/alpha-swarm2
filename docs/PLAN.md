@@ -225,9 +225,106 @@ Phase 2: + WasmCloud (local single-host)
 Phase 3: + multi-agent (still single machine)
 Phase 4: + multi-machine (opt-in, not required)
 Phase 5: + smart local model routing
+Phase 6: + distributed daemon via wasmCloud plugins + resource-aware scheduling
 ```
 
 Each phase is **independently useful**. You can stop at any phase and have a working system.
+
+---
+
+## Phase 6: Distributed Agent Daemon + Resource Awareness (Future)
+
+**Goal**: Agent daemon runs as a wasmCloud plugin on any machine in the lattice. Tasks are routed to the machine with the best resources for the job.
+
+### Why
+
+Currently the agent-daemon is a single native binary on one machine. It calls Ollama over the network (adds latency) and can't leverage multiple machines' resources. To truly distribute:
+
+1. Daemon should run on every machine (next to local Ollama = zero inference latency)
+2. Tasks should be routed based on resource availability
+3. Git clone/quality gate should run where there's disk space and the right toolchain
+
+### wasmCloud Plugin Approach
+
+Convert the daemon into a WASI component + custom host plugins:
+
+```wit
+// Custom host plugin interfaces
+interface git-ops {
+    clone: func(url: string, path: string) -> result<string, string>;
+    pull: func(path: string) -> result<_, string>;
+    worktree-create: func(repo: string, branch: string) -> result<string, string>;
+    diff: func(path: string) -> result<string, string>;
+    apply-diff: func(repo: string, diff: string) -> result<_, string>;
+}
+
+interface shell-exec {
+    run: func(cmd: string, args: list<string>, cwd: string) -> result<exec-result, string>;
+}
+```
+
+The daemon WASI component imports these interfaces. The wasmCloud host provides them as native plugins. Deploy on any machine via the lattice.
+
+### Resource-Aware Scheduling
+
+Each host reports capabilities:
+
+```toml
+[labels]
+alpha-swarm-role = "inference"
+alpha-swarm-cpu-cores = "10"
+alpha-swarm-ram-gb = "96"
+alpha-swarm-disk-free-gb = "2700"
+alpha-swarm-gpu = "false"
+alpha-swarm-ollama-models = "qwen2.5-coder:7b,deepseek-coder:33b,codellama:34b"
+alpha-swarm-toolchains = "rust,node,go"
+```
+
+Task routing heuristics:
+- Inference → machine with the needed model loaded + most free RAM
+- Git clone → machine with most free disk
+- Quality gate (cargo test) → machine with the toolchain installed + most free CPU
+- Complex task → machine with the largest model available
+- Simple task → any machine with a small model
+
+### Atomic Task Claiming
+
+Multiple daemons watching SurrealDB need atomic claiming:
+
+```sql
+UPDATE agent_run
+  SET status = 'running', claimed_by = $host
+  WHERE status = 'pending'
+    AND claimed_by IS NONE
+  LIMIT 1
+  RETURN BEFORE
+```
+
+First daemon to execute this wins. Others get empty result and skip.
+
+### Tasks
+1. Define custom WIT interfaces for git-ops and shell-exec
+2. Implement host plugins in Rust for wasmCloud 2.0
+3. Port agent-daemon to a WASI component importing these interfaces
+4. Add resource reporting to each host (labels or heartbeat)
+5. Implement resource-aware task routing in the daemon
+6. Atomic task claiming in SurrealDB
+7. Deploy and test across local + csatapaci + malna
+
+### Checkpoint 6
+```
+TEST: Submit a task from the web UI.
+      Daemon on csatapaci picks it up (has the model locally).
+      Inference runs at localhost speed (not over network).
+      Quality gate runs on malna (has the toolchain).
+VERIFY: Task claimed atomically (no double execution).
+VERIFY: Resource labels reported correctly per host.
+VERIFY: Inference latency significantly lower (localhost vs network).
+VERIFY: Killing one daemon doesn't lose pending tasks.
+```
+
+### Milestone: "Truly Distributed Swarm"
+Agents float to the machine with the best resources. No single point of failure. Add a machine → it joins the swarm automatically.
 
 ---
 
