@@ -1,8 +1,10 @@
+[package]
 name = "agent-worker"
-language = "rust"
-type = "component"
 version = "0.1.0"
 
-[component]
-wit_world = "agent-worker"
-wasm_target = "wasm32-wasip2"
+[build]
+command = "cargo build --target wasm32-wasip2 --release"
+artifact = "../../target/wasm32-wasip2/release/agent_worker.wasm"
+
+[dev]
+http_listen_address = "0.0.0.0:8080"

@@ -60,6 +60,8 @@ dependencies = [
 name = "agent-worker"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "wit-bindgen 0.41.0",
 ]
 
