@@ -71,14 +71,23 @@ impl KnowledgeStore {
         Ok(id)
     }
 
-    /// Update an existing run by ID.
+    /// Update an existing run by ID. Accepts both "agent_run:xyz" and "xyz" formats.
     pub async fn update_run(&self, id: &str, run: &AgentRun) -> Result<()> {
-        let json = serde_json::to_value(run)?;
-        let id = id.to_string();
+        let mut json = serde_json::to_value(run)?;
+        // Remove the id field to avoid conflicts
+        if let serde_json::Value::Object(ref mut map) = json {
+            map.remove("id");
+        }
+
+        // Use the full record ID directly if it contains ":"
+        let query = if id.contains(':') {
+            format!("UPDATE {} CONTENT $data", id)
+        } else {
+            format!("UPDATE type::thing('agent_run', '{}') CONTENT $data", id)
+        };
 
         self.db
-            .query("UPDATE type::thing('agent_run', $id) CONTENT $data")
-            .bind(("id", id))
+            .query(query)
             .bind(("data", json))
             .await
             .context("Failed to update agent run")?;
