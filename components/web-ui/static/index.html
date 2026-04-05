@@ -156,8 +156,27 @@ select.input { appearance: auto; }
 
   <!-- Projects -->
   <div class="page" id="page-projects">
-    <h1>Projects</h1>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <h1>Projects</h1>
+      <button class="btn btn-primary btn-sm" onclick="showNewProject()">+ New Project</button>
+    </div>
     <p class="subtitle">Manage and monitor your projects</p>
+    <div id="new-project-form" style="display:none;margin-bottom:20px">
+      <div class="card" style="max-width:500px">
+        <div class="form-group">
+          <label class="form-label">Project Name</label>
+          <input class="input" id="new-proj-name" placeholder="my-app">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Description (optional)</label>
+          <input class="input" id="new-proj-desc" placeholder="A brief description">
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary btn-sm" onclick="createProject()">Create</button>
+          <button class="btn btn-sm" onclick="hideNewProject()">Cancel</button>
+        </div>
+      </div>
+    </div>
     <div id="projects-list" class="grid grid-2"><p class="empty">Loading projects...</p></div>
   </div>
 
@@ -355,32 +374,70 @@ async function loadOverview() {
   catch(e) { document.getElementById('sys-status').textContent = 'Offline'; }
 }
 
+function showNewProject() { document.getElementById('new-project-form').style.display = ''; }
+function hideNewProject() { document.getElementById('new-project-form').style.display = 'none'; }
+
+async function createProject() {
+  const name = document.getElementById('new-proj-name').value.trim();
+  const desc = document.getElementById('new-proj-desc').value.trim();
+  if (!name) return;
+
+  try {
+    await fetch('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description: desc }),
+    });
+    hideNewProject();
+    document.getElementById('new-proj-name').value = '';
+    document.getElementById('new-proj-desc').value = '';
+    loadProjects();
+  } catch(e) {}
+}
+
 async function loadProjects() {
   const el = document.getElementById('projects-list');
   try {
-    // Get all distinct projects from runs
-    const res = await fetch('/api/runs/default');
-    // For now show "default" project — full implementation would list all
-    const runs = await res.json();
-    const projects = {};
-    if (Array.isArray(runs)) {
-      runs.forEach(r => {
-        const p = r.project || 'default';
-        if (!projects[p]) projects[p] = { runs: 0, passed: 0 };
-        projects[p].runs++;
-        if (r.status === 'passed') projects[p].passed++;
+    // Load explicitly created projects
+    const projRes = await fetch('/api/projects');
+    const projects = await projRes.json();
+    const projectMap = {};
+
+    if (Array.isArray(projects)) {
+      projects.forEach(p => {
+        const name = p.name || 'unnamed';
+        projectMap[name] = { name, description: p.description || '', runs: 0, passed: 0, created: true };
       });
     }
 
-    const keys = Object.keys(projects);
-    if (!keys.length) { el.innerHTML = '<p class="empty">No projects yet. Submit a task to create one.</p>'; return; }
+    // Also discover projects from runs
+    // Query runs for all known project names + "default"
+    const allNames = [...Object.keys(projectMap), 'default'];
+    for (const name of allNames) {
+      try {
+        const runsRes = await fetch(`/api/runs/${name}`);
+        const runs = await runsRes.json();
+        if (Array.isArray(runs) && runs.length > 0) {
+          if (!projectMap[name]) projectMap[name] = { name, description: '', runs: 0, passed: 0, created: false };
+          projectMap[name].runs = runs.length;
+          projectMap[name].passed = runs.filter(r => r.status === 'passed').length;
+        }
+      } catch(e) {}
+    }
+
+    const keys = Object.keys(projectMap);
+    if (!keys.length) {
+      el.innerHTML = '<p class="empty">No projects yet. Click "+ New Project" to create one.</p>';
+      return;
+    }
 
     el.innerHTML = keys.map(name => {
-      const p = projects[name];
+      const p = projectMap[name];
       const rate = p.runs ? Math.round(p.passed / p.runs * 100) : 0;
       return `<div class="card card-clickable" onclick="navigate('project-detail','${name}')">
         <h3 style="text-transform:none;font-size:16px;font-weight:600;color:var(--text)">${name}</h3>
-        <div style="margin-top:8px;font-size:14px;color:var(--muted)">${p.runs} runs &middot; ${rate}% pass rate</div>
+        <div style="margin-top:4px;font-size:13px;color:var(--muted)">${p.description || ''}</div>
+        <div style="margin-top:8px;font-size:14px;color:var(--muted)">${p.runs} runs${p.runs ? ` &middot; ${rate}% pass rate` : ''}</div>
       </div>`;
     }).join('');
   } catch(e) { el.innerHTML = '<p class="empty">Failed to load projects</p>'; }

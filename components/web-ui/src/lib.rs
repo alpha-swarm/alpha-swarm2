@@ -38,6 +38,13 @@ impl Guest for WebUi {
                 let project = p.strip_prefix("/api/metrics/").unwrap_or("default");
                 api_metrics(response_out, project);
             }
+            (Method::Get, "/api/projects") => {
+                api_list_projects(response_out);
+            }
+            (Method::Post, "/api/projects") => {
+                let body = read_body(&request);
+                api_create_project(response_out, &body);
+            }
             (Method::Post, "/api/run") => {
                 let body = read_body(&request);
                 api_submit_run(response_out, &body);
@@ -99,7 +106,7 @@ fn api_events_impl(response_out: ResponseOutparam) {
     let running_query = "SELECT * FROM agent_run WHERE status = 'running' ORDER BY created_at DESC LIMIT 10";
     if let Ok(body) = surreal_query(running_query) {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
-            if let Some(runs) = parsed.get(1).or_else(|| parsed.get(0)).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
+            if let Some(runs) = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
                 let count = runs.len();
                 events.push_str(&format!(
                     "event: status\ndata: {{\"active_agents\":{}}}\n\n",
@@ -124,7 +131,7 @@ fn api_events_impl(response_out: ResponseOutparam) {
     let recent_query = "SELECT * FROM agent_run WHERE status != 'running' ORDER BY created_at DESC LIMIT 10";
     if let Ok(body) = surreal_query(recent_query) {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
-            if let Some(runs) = parsed.get(1).or_else(|| parsed.get(0)).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
+            if let Some(runs) = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
                 for run in runs {
                     let agent_id = run.get("agent_id").and_then(|a| a.as_str()).unwrap_or("unknown");
                     let status = run.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
@@ -181,10 +188,147 @@ fn api_events_impl(response_out: ResponseOutparam) {
     OutgoingBody::finish(body, None).unwrap();
 }
 
+fn api_list_projects(response_out: ResponseOutparam) {
+    match surreal_query("SELECT * FROM project ORDER BY created_at DESC") {
+        Ok(body) => {
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let projects = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(vec![]));
+            respond_json(response_out, 200, &serde_json::to_string(&projects).unwrap_or_default());
+        }
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn api_create_project(response_out: ResponseOutparam, body: &[u8]) {
+    let body_str = String::from_utf8_lossy(body);
+    let parsed: serde_json::Value = match serde_json::from_str(&body_str) {
+        Ok(v) => v,
+        Err(e) => {
+            respond_json(response_out, 400, &format!(r#"{{"error":"invalid json: {}"}}"#, e));
+            return;
+        }
+    };
+
+    let name = parsed.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    if name.is_empty() {
+        respond_json(response_out, 400, r#"{"error":"name is required"}"#);
+        return;
+    }
+    let description = parsed.get("description").and_then(|d| d.as_str()).unwrap_or("");
+
+    let query = format!(
+        "CREATE project SET name='{}', description='{}', created_at=time::now()",
+        name.replace('\'', ""),
+        description.replace('\'', ""),
+    );
+
+    match surreal_query(&query) {
+        Ok(body) => {
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let created = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result"))
+                .cloned()
+                .unwrap_or_default();
+            respond_json(response_out, 201, &serde_json::to_string(&created).unwrap_or_default());
+        }
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
 fn surreal_query(query: &str) -> Result<String, String> {
-    // Prefix with schema init to handle fresh SurrealDB instances
-    let full_query = format!("DEFINE TABLE IF NOT EXISTS agent_run SCHEMALESS; {}", query);
-    surreal_raw_query(&full_query)
+    // Use inline NS/DB selection + table definitions as SQL prefix
+    // This avoids relying on HTTP headers for namespace selection
+    let full_query = format!(
+        "USE NS alpha_swarm DB swarm; DEFINE TABLE IF NOT EXISTS agent_run SCHEMALESS; DEFINE TABLE IF NOT EXISTS project SCHEMALESS; {}",
+        query
+    );
+    surreal_raw_query_no_headers(&full_query)
+}
+
+fn surreal_raw_query_no_headers(query: &str) -> Result<String, String> {
+    let headers = Fields::new();
+    headers.append(&"content-type".to_string(), &b"text/plain"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append(&"accept".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append(&"authorization".to_string(), &b"Basic cm9vdDpyb290"[..]).map_err(|e| format!("{e:?}"))?;
+
+    let request = OutgoingRequest::new(headers);
+    request.set_method(&Method::Post).map_err(|_| "method")?;
+    request.set_scheme(Some(&Scheme::Http)).map_err(|_| "scheme")?;
+    request.set_authority(Some("127.0.0.1:8001")).map_err(|_| "authority")?;
+    request.set_path_with_query(Some("/sql")).map_err(|_| "path")?;
+
+    let out_body = request.body().map_err(|_| "body")?;
+    let out_stream = out_body.write().map_err(|_| "stream")?;
+    out_stream.blocking_write_and_flush(query.as_bytes()).map_err(|e| format!("write: {e:?}"))?;
+    drop(out_stream);
+    OutgoingBody::finish(out_body, None).map_err(|_| "finish")?;
+
+    let future_response = outgoing_handler::handle(request, None).map_err(|e| format!("send: {e:?}"))?;
+    let pollable = future_response.subscribe();
+    pollable.block();
+
+    let response = future_response.get()
+        .ok_or("no response")?
+        .map_err(|_| "response error")?
+        .map_err(|e| format!("http: {e:?}"))?;
+
+    let resp_body = response.consume().map_err(|_| "consume")?;
+    let resp_stream = resp_body.stream().map_err(|_| "stream")?;
+    let mut bytes = Vec::new();
+    loop {
+        match resp_stream.read(65536) {
+            Ok(chunk) if chunk.is_empty() => break,
+            Ok(chunk) => bytes.extend_from_slice(&chunk),
+            Err(_) => break,
+        }
+    }
+    drop(resp_stream);
+    let _ = IncomingBody::finish(resp_body);
+    String::from_utf8(bytes).map_err(|e| format!("utf8: {e}"))
+}
+
+fn surreal_init_query(query: &str) -> Result<String, String> {
+    // Query without namespace/db headers — for creating ns/db
+    let headers = Fields::new();
+    headers.append(&"content-type".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append(&"accept".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append(&"authorization".to_string(), &b"Basic cm9vdDpyb290"[..]).map_err(|e| format!("{e:?}"))?;
+
+    let request = OutgoingRequest::new(headers);
+    request.set_method(&Method::Post).map_err(|_| "method")?;
+    request.set_scheme(Some(&Scheme::Http)).map_err(|_| "scheme")?;
+    request.set_authority(Some("127.0.0.1:8001")).map_err(|_| "authority")?;
+    request.set_path_with_query(Some("/sql")).map_err(|_| "path")?;
+
+    let out_body = request.body().map_err(|_| "body")?;
+    let out_stream = out_body.write().map_err(|_| "stream")?;
+    out_stream.blocking_write_and_flush(query.as_bytes()).map_err(|e| format!("write: {e:?}"))?;
+    drop(out_stream);
+    OutgoingBody::finish(out_body, None).map_err(|_| "finish")?;
+
+    let future_response = outgoing_handler::handle(request, None).map_err(|e| format!("send: {e:?}"))?;
+    let pollable = future_response.subscribe();
+    pollable.block();
+
+    let response = future_response.get()
+        .ok_or("no response")?
+        .map_err(|_| "response error")?
+        .map_err(|e| format!("http: {e:?}"))?;
+
+    let resp_body = response.consume().map_err(|_| "consume")?;
+    let resp_stream = resp_body.stream().map_err(|_| "stream")?;
+    let mut bytes = Vec::new();
+    loop {
+        match resp_stream.read(65536) {
+            Ok(chunk) if chunk.is_empty() => break,
+            Ok(chunk) => bytes.extend_from_slice(&chunk),
+            Err(_) => break,
+        }
+    }
+    drop(resp_stream);
+    let _ = IncomingBody::finish(resp_body);
+    String::from_utf8(bytes).map_err(|e| format!("utf8: {e}"))
 }
 
 fn surreal_raw_query(query: &str) -> Result<String, String> {
@@ -244,9 +388,7 @@ fn api_runs(response_out: ResponseOutparam, project: &str) {
             // SurrealDB returns [{result: [...], ...}], extract the result array
             let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
             // Index 1 because index 0 is the DEFINE TABLE prefix
-            let runs = parsed.get(1)
-                .or_else(|| parsed.get(0))
-                .and_then(|r| r.get("result"))
+            let runs = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result"))
                 .cloned()
                 .unwrap_or(serde_json::Value::Array(vec![]));
             respond_json(response_out, 200, &serde_json::to_string(&runs).unwrap_or_default());
@@ -263,9 +405,7 @@ fn api_metrics(response_out: ResponseOutparam, project: &str) {
     match surreal_query(&query) {
         Ok(body) => {
             let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-            let runs = parsed.get(1)
-                .or_else(|| parsed.get(0))
-                .and_then(|r| r.get("result"))
+            let runs = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result"))
                 .and_then(|r| r.as_array())
                 .cloned()
                 .unwrap_or_default();
