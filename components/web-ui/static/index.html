@@ -85,6 +85,14 @@ table { width: 100%; border-collapse: collapse; }
 th { text-align: left; padding: 10px 12px; font-size: 12px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
 td { padding: 12px; font-size: 14px; border-bottom: 1px solid var(--border); }
 tr:hover td { background: var(--card-hover); }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--accent-bg); }
+tr.selected td { background: var(--accent-bg); border-color: var(--accent); }
+.detail-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.detail-row:last-child { border-bottom: none; }
+.detail-label { color: var(--muted); }
+.detail-value { font-weight: 500; text-align: right; max-width: 220px; word-break: break-all; }
+.detail-error { background: var(--error-bg); color: var(--error); padding: 8px 12px; border-radius: var(--radius-sm); font-size: 13px; margin-top: 8px; white-space: pre-wrap; word-break: break-word; }
 
 .input { width: 100%; padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; outline: none; transition: border-color 0.15s; }
 .input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
@@ -232,7 +240,18 @@ select.input { appearance: auto; }
     <div class="section-title">Task Board</div>
     <div id="kanban" class="kanban-board"><p class="empty">Loading tasks...</p></div>
     <div class="section-title">Run History</div>
-    <div id="proj-runs-table"></div>
+    <div style="display:flex;gap:16px">
+      <div id="proj-runs-table" style="flex:1;min-width:0"></div>
+      <div id="run-detail-panel" style="display:none;width:380px;flex-shrink:0">
+        <div class="card" style="position:sticky;top:20px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <h3 style="text-transform:none;color:var(--text);font-size:15px">Run Detail</h3>
+            <button class="btn btn-sm" onclick="closeRunDetail()" style="padding:2px 8px">&times;</button>
+          </div>
+          <div id="run-detail-content"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Agents -->
@@ -501,6 +520,75 @@ async function loadProjects() {
 }
 
 let currentProjectName = '';
+let projectRuns = [];
+let selectedRunIdx = -1;
+
+function showRunDetail(idx) {
+  const run = projectRuns[idx];
+  if (!run) return;
+  selectedRunIdx = idx;
+
+  // Highlight selected row
+  document.querySelectorAll('#proj-runs-table tr.selected').forEach(r => r.classList.remove('selected'));
+  const row = document.getElementById(`run-row-${idx}`);
+  if (row) row.classList.add('selected');
+
+  const panel = document.getElementById('run-detail-panel');
+  const content = document.getElementById('run-detail-content');
+  panel.style.display = '';
+
+  const status = run.status || 'unknown';
+  const task = run.task_description || '';
+  const model = run.model_used || '';
+  const agent = run.agent_id || '';
+  const tokens_in = run.tokens_input || 0;
+  const tokens_out = run.tokens_output || 0;
+  const duration = run.duration_ms || 0;
+  const created = run.created_at || '';
+  const error = run.error_message || '';
+  const qg = run.quality_gate_passed;
+  const files = run.files_modified || [];
+
+  content.innerHTML = `
+    <div style="margin-bottom:12px">
+      <span class="badge ${status}">${status}</span>
+      ${qg === true ? '<span class="badge passed" style="margin-left:4px">QA passed</span>' : ''}
+      ${qg === false ? '<span class="badge failed" style="margin-left:4px">QA failed</span>' : ''}
+    </div>
+    <div style="font-size:14px;font-weight:500;margin-bottom:12px;line-height:1.4">${task}</div>
+    <div class="detail-row"><span class="detail-label">Model</span><span class="detail-value">${model}</span></div>
+    <div class="detail-row"><span class="detail-label">Agent</span><span class="detail-value">${agent}</span></div>
+    <div class="detail-row"><span class="detail-label">Tokens</span><span class="detail-value">${tokens_in} in / ${tokens_out} out</span></div>
+    <div class="detail-row"><span class="detail-label">Duration</span><span class="detail-value">${(duration / 1000).toFixed(1)}s</span></div>
+    <div class="detail-row"><span class="detail-label">Created</span><span class="detail-value">${created.substring(0, 19).replace('T', ' ')}</span></div>
+    ${files.length ? `<div class="detail-row"><span class="detail-label">Files</span><span class="detail-value">${files.join(', ')}</span></div>` : ''}
+    ${error ? `<div style="margin-top:8px"><div class="detail-label" style="margin-bottom:4px">Error</div><div class="detail-error">${error}</div></div>` : ''}
+    <div style="margin-top:16px;display:flex;gap:8px">
+      <button class="btn btn-primary btn-sm" onclick="rerunTask(${idx})">Re-run</button>
+    </div>
+  `;
+}
+
+function closeRunDetail() {
+  document.getElementById('run-detail-panel').style.display = 'none';
+  document.querySelectorAll('#proj-runs-table tr.selected').forEach(r => r.classList.remove('selected'));
+  selectedRunIdx = -1;
+}
+
+function rerunTask(idx) {
+  const run = projectRuns[idx];
+  if (!run) return;
+
+  // Fire-and-forget re-run with the same task
+  fetch('/api/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task: run.task_description, project: currentProjectName, files: [] }),
+  }).catch(() => {});
+
+  closeRunDetail();
+  // Refresh will happen via SSE
+}
 
 async function navigateSubmitForProject() {
   navigate('submit');
@@ -557,9 +645,10 @@ async function loadProjectDetail(name) {
     const res = await fetch(`/api/runs/${name}`);
     const runs = await res.json();
     const el = document.getElementById('proj-runs-table');
-    if (!Array.isArray(runs) || !runs.length) { el.innerHTML = '<p class="empty">No runs yet</p>'; return; }
+    projectRuns = Array.isArray(runs) ? runs : [];
+    if (!projectRuns.length) { el.innerHTML = '<p class="empty">No runs yet</p>'; return; }
     el.innerHTML = `<table><tr><th>Status</th><th>Model</th><th>Task</th><th>Tokens</th><th>Duration</th></tr>` +
-      runs.slice(0, 30).map(r => `<tr>
+      projectRuns.slice(0, 30).map((r, i) => `<tr class="clickable" onclick="showRunDetail(${i})" id="run-row-${i}">
         <td><span class="badge ${r.status || 'unknown'}">${r.status || '?'}</span></td>
         <td style="font-size:13px">${(r.model_used || '').substring(0, 22)}</td>
         <td style="font-size:13px">${(r.task_description || '').substring(0, 40)}</td>
