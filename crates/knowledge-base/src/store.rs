@@ -51,7 +51,11 @@ impl KnowledgeStore {
 
     /// Store a new agent run. Returns the record ID.
     pub async fn store_run(&self, run: &AgentRun) -> Result<String> {
-        let json = serde_json::to_value(run)?;
+        let mut json = serde_json::to_value(run)?;
+        // Remove the id field so SurrealDB generates one
+        if let serde_json::Value::Object(ref mut map) = json {
+            map.remove("id");
+        }
 
         let mut result = self.db
             .query("CREATE agent_run CONTENT $data RETURN id")
@@ -59,9 +63,9 @@ impl KnowledgeStore {
             .await
             .context("Failed to store agent run")?;
 
-        let created: Option<serde_json::Value> = result.take(0)?;
-        let id = created
-            .and_then(|v| v.get("id").and_then(|id| id.as_str().map(String::from)))
+        let created: Vec<serde_json::Value> = result.take(0)?;
+        let id = created.first()
+            .and_then(|v| v.get("id").map(|id| id.to_string().trim_matches('"').to_string()))
             .unwrap_or_else(|| "unknown".into());
 
         Ok(id)
