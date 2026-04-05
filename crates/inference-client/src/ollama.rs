@@ -184,3 +184,45 @@ impl InferenceBackend for OllamaBackend {
         })
     }
 }
+
+// --- Embedding support ---
+
+#[derive(Serialize)]
+struct EmbedRequest {
+    model: String,
+    input: String,
+}
+
+#[derive(Deserialize)]
+struct EmbedResponse {
+    embeddings: Vec<Vec<f32>>,
+}
+
+impl OllamaBackend {
+    /// Generate an embedding vector for the given text.
+    pub async fn embed(&self, model: &str, text: &str) -> Result<Vec<f32>> {
+        let request = EmbedRequest {
+            model: model.to_string(),
+            input: text.to_string(),
+        };
+
+        let response = self.client
+            .post(format!("{}/api/embed", self.base_url))
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send embed request to Ollama")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("Ollama embed API error {status}: {body}");
+        }
+
+        let resp: EmbedResponse = response.json().await
+            .context("Failed to parse Ollama embed response")?;
+
+        resp.embeddings.into_iter().next()
+            .ok_or_else(|| anyhow::anyhow!("No embedding returned"))
+    }
+}

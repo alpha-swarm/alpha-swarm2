@@ -3,6 +3,7 @@ members = [
     "crates/inference-client",
     "crates/agent-core",
     "crates/quality-gate",
+    "crates/knowledge-base",
     "crates/alpha-swarm-cli",
     "components/agent-worker",
     "components/orchestrator",

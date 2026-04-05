@@ -4,8 +4,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
 
-use agent_core::Agent;
+use agent_core::{Agent, KnowledgeConfig};
 use inference_client::{ClaudeBackend, Complexity, InferenceRouter, OllamaBackend};
+use knowledge_base::KnowledgeStore;
 
 #[derive(Parser)]
 #[command(name = "alpha-swarm", about = "Distributed agent orchestration system")]
@@ -34,9 +35,13 @@ enum Commands {
         #[arg(short, long, default_value = "medium")]
         complexity: String,
 
-        /// Run quality gate after applying changes
-        #[arg(long, default_value_t = true)]
-        quality_gate: bool,
+        /// Skip quality gate
+        #[arg(long)]
+        no_quality_gate: bool,
+
+        /// Project name for knowledge base (enables knowledge features)
+        #[arg(short, long)]
+        project: Option<String>,
     },
 
     /// List available models across all backends
@@ -44,12 +49,18 @@ enum Commands {
 
     /// Check health of all backends
     Health,
+
+    /// Show past agent runs from knowledge base
+    History {
+        /// Project name
+        #[arg(short, long)]
+        project: String,
+    },
 }
 
 fn setup_router() -> Result<InferenceRouter> {
     let mut router = InferenceRouter::new();
 
-    // Claude backend (if API key is set)
     if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
         let model = std::env::var("ALPHA_SWARM_CLAUDE_MODEL")
             .unwrap_or_else(|_| "claude-sonnet-4-20250514".into());
@@ -57,13 +68,35 @@ fn setup_router() -> Result<InferenceRouter> {
         router = router.add_backend(ClaudeBackend::new(api_key).with_model(model));
     }
 
-    // Ollama backend
     let ollama_url = std::env::var("ALPHA_SWARM_OLLAMA_URL")
         .unwrap_or_else(|_| "http://localhost:11434".into());
     info!("Ollama backend configured ({ollama_url})");
-    router = router.add_backend(OllamaBackend::new(ollama_url));
+    router = router.add_backend(OllamaBackend::new(&ollama_url));
 
     Ok(router)
+}
+
+fn get_ollama() -> OllamaBackend {
+    let ollama_url = std::env::var("ALPHA_SWARM_OLLAMA_URL")
+        .unwrap_or_else(|_| "http://localhost:11434".into());
+    OllamaBackend::new(ollama_url)
+}
+
+async fn get_knowledge_store() -> Result<Option<KnowledgeStore>> {
+    let url = std::env::var("ALPHA_SWARM_SURREALDB_URL")
+        .unwrap_or_else(|_| "127.0.0.1:8000".into());
+    let ns = std::env::var("ALPHA_SWARM_SURREALDB_NS")
+        .unwrap_or_else(|_| "alpha_swarm".into());
+    let db = std::env::var("ALPHA_SWARM_SURREALDB_DB")
+        .unwrap_or_else(|_| "swarm".into());
+
+    match KnowledgeStore::connect(&url, &ns, &db).await {
+        Ok(store) => Ok(Some(store)),
+        Err(e) => {
+            tracing::warn!("Knowledge base unavailable: {e}");
+            Ok(None)
+        }
+    }
 }
 
 fn parse_complexity(s: &str) -> Complexity {
@@ -82,7 +115,8 @@ async fn main() -> Result<()> {
                 .add_directive("alpha_swarm=info".parse().unwrap())
                 .add_directive("agent_core=info".parse().unwrap())
                 .add_directive("inference_client=info".parse().unwrap())
-                .add_directive("quality_gate_lib=info".parse().unwrap()),
+                .add_directive("quality_gate_lib=info".parse().unwrap())
+                .add_directive("knowledge_base=info".parse().unwrap()),
         )
         .init();
 
@@ -95,7 +129,8 @@ async fn main() -> Result<()> {
             task,
             files,
             complexity,
-            quality_gate,
+            no_quality_gate,
+            project,
         } => {
             let repo = repo.canonicalize()
                 .context("Repository path does not exist")?;
@@ -103,24 +138,52 @@ async fn main() -> Result<()> {
 
             info!(repo = %repo.display(), task = %task, "Starting agent run");
 
-            // Discover files if none specified
             let files = if files.is_empty() {
                 discover_files(&repo)?
             } else {
                 files
             };
 
-            // Run agent
-            let agent = Agent::new(&router, &repo);
+            // Set up knowledge base if project is specified
+            let kb = if project.is_some() {
+                get_knowledge_store().await?
+            } else {
+                None
+            };
+            let ollama = get_ollama();
+
+            let mut agent = Agent::new(&router, &repo);
+
+            if let (Some(proj), Some(store)) = (&project, &kb) {
+                let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
+                    .unwrap_or_else(|_| "qwen2.5-coder:7b".into());
+                agent = agent.with_knowledge(KnowledgeConfig {
+                    store,
+                    embedder: &ollama,
+                    embed_model,
+                    project: proj.clone(),
+                    skip_threshold: 0.9,
+                });
+                info!(project = %proj, "Knowledge base enabled");
+            }
+
             let result = agent.run(&task, &files, complexity).await?;
 
             // Print results
             println!("\n=== Agent Result ===");
+            if result.skipped {
+                println!("SKIPPED: {}", result.inference_response.content);
+                return Ok(());
+            }
+
             println!("Model:    {} ({:?})", result.inference_response.model, result.inference_response.backend);
             println!("Tokens:   {} in / {} out", result.inference_response.tokens_input, result.inference_response.tokens_output);
             println!("Duration: {}ms", result.inference_response.duration_ms);
             println!("Edits:    {}", result.edits.len());
             println!("Applied:  {}", result.applied);
+            if let Some(id) = &result.run_id {
+                println!("Run ID:   {id}");
+            }
 
             for edit in &result.edits {
                 match edit {
@@ -131,20 +194,44 @@ async fn main() -> Result<()> {
             }
 
             // Quality gate
-            if quality_gate && result.applied {
+            if !no_quality_gate && result.applied {
                 println!("\n=== Quality Gate ===");
                 let config = quality_gate_lib::detect_toolchain(&repo);
                 let checks = quality_gate_lib::run_all(&repo, &config).await?;
 
                 let all_passed = checks.iter().all(|c| c.passed);
+
+                // Update knowledge base with quality gate result
+                if let (Some(store), Some(id)) = (&kb, &result.run_id) {
+                    let mut run = knowledge_base::AgentRun::new(
+                        project.as_deref().unwrap_or(""),
+                        &task,
+                        "",
+                        &result.inference_response.model,
+                    );
+                    run.quality_gate_passed = Some(all_passed);
+                    run.status = if all_passed {
+                        knowledge_base::RunStatus::Passed
+                    } else {
+                        knowledge_base::RunStatus::Failed
+                    };
+                    if !all_passed {
+                        let errors: String = checks.iter()
+                            .filter(|c| !c.passed)
+                            .map(|c| format!("{}: {}", c.check_name, c.stderr.chars().take(200).collect::<String>()))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        run.error_message = Some(errors);
+                    }
+                    let _ = store.update_run(id, &run).await;
+                }
+
                 for check in &checks {
                     let status = if check.passed { "PASS" } else { "FAIL" };
                     println!("  [{status}] {} ({}ms)", check.check_name, check.duration_ms);
-                    if !check.passed {
-                        if !check.stderr.is_empty() {
-                            for line in check.stderr.lines().take(20) {
-                                println!("    {line}");
-                            }
+                    if !check.passed && !check.stderr.is_empty() {
+                        for line in check.stderr.lines().take(20) {
+                            println!("    {line}");
                         }
                     }
                 }
@@ -183,12 +270,34 @@ async fn main() -> Result<()> {
                 println!("{:?}: {status}", kind);
             }
         }
+
+        Commands::History { project } => {
+            let kb = get_knowledge_store().await?
+                .context("Knowledge base not available")?;
+            let runs = kb.list_runs(&project, None).await?;
+            if runs.is_empty() {
+                println!("No runs found for project '{project}'.");
+            } else {
+                println!("{:<12} {:<10} {:<20} {:<40}", "STATUS", "MODEL", "CREATED", "TASK");
+                for run in &runs {
+                    let status = format!("{:?}", run.status);
+                    let task_short: String = run.task_description.chars().take(38).collect();
+                    println!(
+                        "{:<12} {:<10} {:<20} {:<40}",
+                        status,
+                        run.model_used.chars().take(10).collect::<String>(),
+                        run.created_at.chars().take(19).collect::<String>(),
+                        task_short,
+                    );
+                }
+                println!("\n{} total runs", runs.len());
+            }
+        }
     }
 
     Ok(())
 }
 
-/// Discover source files in the repo (simple heuristic for now).
 fn discover_files(repo: &PathBuf) -> Result<Vec<String>> {
     let mut files = Vec::new();
     let extensions = ["rs", "ts", "js", "go", "py"];
@@ -216,7 +325,6 @@ fn discover_files(repo: &PathBuf) -> Result<Vec<String>> {
     walk(repo, repo, &extensions, &mut files);
     files.sort();
 
-    // Limit to avoid blowing up context
     if files.len() > 20 {
         info!("Found {} files, taking first 20", files.len());
         files.truncate(20);

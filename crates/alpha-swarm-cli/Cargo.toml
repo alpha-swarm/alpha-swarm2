@@ -19,3 +19,4 @@ clap.workspace = true
 inference-client = { path = "../inference-client" }
 agent-core = { path = "../agent-core" }
 quality-gate-lib = { path = "../quality-gate" }
+knowledge-base = { path = "../knowledge-base" }
