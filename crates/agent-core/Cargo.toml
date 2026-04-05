@@ -13,4 +13,5 @@ tracing.workspace = true
 uuid = { version = "1", features = ["v4"] }
 inference-client = { path = "../inference-client" }
 edit-parser = { path = "../edit-parser" }
+quality-gate-lib = { path = "../quality-gate" }
 knowledge-base = { path = "../knowledge-base" }

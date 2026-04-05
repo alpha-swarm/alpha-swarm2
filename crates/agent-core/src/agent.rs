@@ -16,6 +16,8 @@ pub struct AgentResult {
     pub applied: bool,
     pub skipped: bool,
     pub run_id: Option<String>,
+    pub attempt: u32,
+    pub escalated_from: Option<String>,
 }
 
 /// Configuration for knowledge-aware agent.
@@ -83,6 +85,8 @@ impl<'a> Agent<'a> {
                         applied: false,
                         skipped: true,
                         run_id: None,
+                        attempt: 1,
+                        escalated_from: None,
                     });
                 }
 
@@ -189,6 +193,8 @@ impl<'a> Agent<'a> {
                     applied: false,
                     skipped: false,
                     run_id,
+                    attempt: 1,
+                    escalated_from: None,
                 });
             }
         };
@@ -222,7 +228,108 @@ impl<'a> Agent<'a> {
             applied: true,
             skipped: false,
             run_id,
+            attempt: 1,
+            escalated_from: None,
         })
+    }
+
+    /// Run with retry and model escalation.
+    /// On quality gate failure: retry same model once, then escalate to larger model.
+    pub async fn run_with_retry(
+        &self,
+        task: &str,
+        file_paths: &[String],
+        complexity: Complexity,
+        repo_path: &std::path::Path,
+        max_attempts: u32,
+    ) -> Result<AgentResult> {
+        let mut last_result = self.run(task, file_paths, complexity).await?;
+        if !last_result.applied || last_result.skipped {
+            return Ok(last_result);
+        }
+
+        // Check quality gate
+        let config = quality_gate_lib::detect_toolchain(repo_path);
+        let checks = quality_gate_lib::run_all(repo_path, &config).await?;
+        let passed = checks.iter().all(|c| c.passed);
+
+        if passed {
+            return Ok(last_result);
+        }
+
+        // Quality gate failed — collect error context for retry
+        let error_context: String = checks.iter()
+            .filter(|c| !c.passed)
+            .map(|c| format!("{}: {}", c.check_name, c.stderr.chars().take(300).collect::<String>()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let failed_model = last_result.inference_response.model.clone();
+
+        for attempt in 2..=max_attempts {
+            info!(attempt, failed_model = %failed_model, "Retrying after quality gate failure");
+
+            // Build retry task with error context
+            let retry_task = format!(
+                "{task}\n\nPREVIOUS ATTEMPT FAILED QUALITY GATE:\n{error_context}\n\nFix the issues from the previous attempt."
+            );
+
+            // Escalate model on 3rd+ attempt
+            let options = if attempt >= 3 {
+                match self.router.escalate_model(&failed_model, complexity).await {
+                    Ok(bigger) => {
+                        last_result.escalated_from = Some(failed_model.clone());
+                        InferenceOptions {
+                            preferred_model: Some(bigger.name.clone()),
+                            preferred_backend: Some(bigger.backend),
+                            ..Default::default()
+                        }
+                    }
+                    Err(_) => InferenceOptions::default(),
+                }
+            } else {
+                InferenceOptions::default()
+            };
+
+            // Re-read files (previous edits may have been applied)
+            let messages = crate::prompt::build_prompt(&retry_task, &self.read_files(file_paths)?);
+            let response = self.router.chat(&messages, complexity, &options).await
+                .context("Retry inference failed")?;
+
+            let edits = match parse_edits(&response.content) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("Retry parse failed: {e}");
+                    continue;
+                }
+            };
+
+            if !edits.is_empty() {
+                self.apply_edits(&edits)?;
+            }
+
+            // Re-check quality gate
+            let checks = quality_gate_lib::run_all(repo_path, &config).await?;
+            let passed = checks.iter().all(|c| c.passed);
+
+            last_result = AgentResult {
+                edits,
+                inference_response: response,
+                applied: true,
+                skipped: false,
+                run_id: last_result.run_id,
+                attempt,
+                escalated_from: last_result.escalated_from,
+            };
+
+            if passed {
+                info!(attempt, "Retry succeeded");
+                return Ok(last_result);
+            }
+        }
+
+        warn!("All retry attempts exhausted");
+        Ok(last_result)
     }
 
     fn read_files(&self, paths: &[String]) -> Result<Vec<(String, String)>> {
