@@ -1,0 +1,142 @@
+package alpha-swarm:agent-worker@0.1.0;
+
+/// Common types shared across all alpha-swarm interfaces.
+interface types {
+    type agent-id = string;
+    type task-id = string;
+    type repo-id = string;
+    type project-id = string;
+    type goal-id = string;
+    type timestamp = u64;
+    type embedding = list<f32>;
+    type unified-diff = string;
+
+    enum task-status {
+        pending,
+        claimed,
+        running,
+        passed,
+        failed,
+        skipped,
+    }
+
+    enum complexity {
+        simple,
+        medium,
+        complex,
+    }
+
+    record task {
+        id: task-id,
+        repo: repo-id,
+        description: string,
+        complexity: complexity,
+        assigned-files: list<string>,
+        context: option<string>,
+        created-at: timestamp,
+    }
+
+    record task-result {
+        task-id: task-id,
+        agent-id: agent-id,
+        status: task-status,
+        diff: option<unified-diff>,
+        model-used: string,
+        duration-ms: u64,
+        error-message: option<string>,
+    }
+
+    record file-entry {
+        path: string,
+        content: string,
+    }
+
+    variant swarm-error {
+        not-found(string),
+        already-claimed(string),
+        inference-failed(string),
+        quality-gate-failed(string),
+        io-error(string),
+        internal(string),
+    }
+}
+
+/// Inference completions interface — what agents call for LLM inference.
+interface completions {
+    use types.{complexity, swarm-error};
+
+    enum backend-kind {
+        claude,
+        ollama,
+        openai,
+        custom,
+    }
+
+    record chat-message {
+        role: string,
+        content: string,
+    }
+
+    record inference-options {
+        preferred-backend: option<backend-kind>,
+        preferred-model: option<string>,
+        temperature: option<f32>,
+        max-tokens: option<u32>,
+    }
+
+    record inference-response {
+        content: string,
+        model: string,
+        backend: backend-kind,
+        tokens-input: u32,
+        tokens-output: u32,
+        duration-ms: u64,
+    }
+
+    chat: func(
+        messages: list<chat-message>,
+        complexity: complexity,
+        options: option<inference-options>,
+    ) -> result<inference-response, swarm-error>;
+}
+
+/// VirtFS repository interface — file access for agents.
+interface repository {
+    use types.{repo-id, agent-id, file-entry, unified-diff, swarm-error};
+
+    read-file: func(repo: repo-id, agent: agent-id, path: string) -> result<string, swarm-error>;
+    write-file: func(repo: repo-id, agent: agent-id, path: string, content: string) -> result<_, swarm-error>;
+    list-files: func(repo: repo-id, agent: agent-id, glob: string) -> result<list<string>, swarm-error>;
+    extract-diff: func(repo: repo-id, agent: agent-id) -> result<unified-diff, swarm-error>;
+    read-files: func(repo: repo-id, agent: agent-id, paths: list<string>) -> result<list<file-entry>, swarm-error>;
+}
+
+/// Quality gate interface — validation of agent changes.
+interface gate {
+    use types.{repo-id, agent-id, swarm-error};
+
+    record check-result {
+        check-name: string,
+        passed: bool,
+        stdout: string,
+        stderr: string,
+        exit-code: s32,
+        duration-ms: u64,
+    }
+
+    check-all: func(repo: repo-id, agent: agent-id) -> result<list<check-result>, swarm-error>;
+}
+
+/// Handler interface exported by the agent worker.
+interface handler {
+    use types.{task, task-result, swarm-error};
+    handle-task: func(task: task) -> result<task-result, swarm-error>;
+}
+
+/// The agent worker world — imports providers, exports handler.
+world agent-worker {
+    import completions;
+    import repository;
+    import gate;
+    export handler;
+}
