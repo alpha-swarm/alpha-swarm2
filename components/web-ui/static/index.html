@@ -799,12 +799,24 @@ function renderKanban(goals) {
   }
 }
 
+function rerunGoal(goalText) {
+  fetch('/api/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task: goalText, project: currentProjectName, files: [] }),
+  }).catch(() => {});
+}
+
 function renderKanbanCard(goal) {
   const agents = goal.agents || [];
   const goalTitle = (goal.goal || '').substring(0, 80);
+  const escapedGoal = (goal.goal || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 
   return `<div class="kanban-card">
-    <div class="goal-title">${goalTitle}</div>
+    <div style="display:flex;justify-content:space-between;align-items:start">
+      <div class="goal-title">${goalTitle}</div>
+      <button class="btn btn-sm" style="padding:2px 8px;font-size:11px;flex-shrink:0" onclick="event.stopPropagation();rerunGoal('${escapedGoal}')">Re-run</button>
+    </div>
     <div class="goal-meta">
       <span>${goal.total || 0} agent${(goal.total||0) !== 1 ? 's' : ''}</span>
       ${goal.passed ? `<span style="color:var(--success)">${goal.passed} passed</span>` : ''}
