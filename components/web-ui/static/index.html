@@ -186,10 +186,18 @@ select.input { appearance: auto; }
     </div>
     <p class="subtitle">Manage and monitor your projects</p>
     <div id="new-project-form" style="display:none;margin-bottom:20px">
-      <div class="card" style="max-width:500px">
+      <div class="card" style="max-width:600px">
         <div class="form-group">
           <label class="form-label">Project Name</label>
           <input class="input" id="new-proj-name" placeholder="my-app">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Repository URL or Local Path</label>
+          <input class="input" id="new-proj-repo" placeholder="https://github.com/user/repo.git or /path/to/local/repo">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Default Branch (optional)</label>
+          <input class="input" id="new-proj-branch" placeholder="main" value="main">
         </div>
         <div class="form-group">
           <label class="form-label">Description (optional)</label>
@@ -208,7 +216,10 @@ select.input { appearance: auto; }
   <div class="page" id="page-project-detail">
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
       <button class="btn btn-back" onclick="navigate('projects')" style="margin:0">&larr;</button>
-      <h1 id="proj-name" style="flex:1">Project</h1>
+      <div style="flex:1">
+        <h1 id="proj-name">Project</h1>
+        <div id="proj-repo" style="font-size:13px;color:var(--accent);font-family:monospace;margin-top:2px"></div>
+      </div>
       <button class="btn btn-primary btn-sm" onclick="navigateSubmitForProject()">Submit Task</button>
       <button class="btn btn-sm" style="color:var(--error)" onclick="deleteCurrentProject()">Delete</button>
     </div>
@@ -413,17 +424,21 @@ function hideNewProject() { document.getElementById('new-project-form').style.di
 
 async function createProject() {
   const name = document.getElementById('new-proj-name').value.trim();
+  const repo_url = document.getElementById('new-proj-repo').value.trim();
+  const branch = document.getElementById('new-proj-branch').value.trim() || 'main';
   const desc = document.getElementById('new-proj-desc').value.trim();
   if (!name) return;
+  if (!repo_url) { alert('Repository URL or path is required'); return; }
 
   try {
-    await fetch('/api/projects', {
+    const res = await fetch('/api/projects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, description: desc }),
+      body: JSON.stringify({ name, repo_url, branch, description: desc }),
     });
     hideNewProject();
     document.getElementById('new-proj-name').value = '';
+    document.getElementById('new-proj-repo').value = '';
     document.getElementById('new-proj-desc').value = '';
     loadProjects();
   } catch(e) {}
@@ -448,7 +463,7 @@ async function loadProjects() {
     if (Array.isArray(projects)) {
       projects.forEach(p => {
         const name = p.name || 'unnamed';
-        projectMap[name] = { name, description: p.description || '', runs: 0, passed: 0, created: true };
+        projectMap[name] = { name, description: p.description || '', repo_url: p.repo_url || '', branch: p.branch || 'main', runs: 0, passed: 0, created: true };
       });
     }
 
@@ -476,12 +491,15 @@ async function loadProjects() {
     el.innerHTML = keys.map(name => {
       const p = projectMap[name];
       const rate = p.runs ? Math.round(p.passed / p.runs * 100) : 0;
+      const repoUrl = p.repo_url || '';
+      const repoShort = repoUrl.replace('https://github.com/', '').replace('.git', '').replace(/^\//, '');
       return `<div class="card card-clickable" onclick="navigate('project-detail','${name}')">
         <div style="display:flex;justify-content:space-between;align-items:start">
           <h3 style="text-transform:none;font-size:16px;font-weight:600;color:var(--text)">${name}</h3>
           <button class="btn btn-sm" style="color:var(--error);padding:2px 8px;font-size:12px" onclick="event.stopPropagation();deleteProject('${name}')">Delete</button>
         </div>
-        <div style="margin-top:4px;font-size:13px;color:var(--muted)">${p.description || ''}</div>
+        ${repoShort ? `<div style="margin-top:4px;font-size:13px;color:var(--accent);font-family:monospace">${repoShort}</div>` : ''}
+        ${p.description ? `<div style="margin-top:4px;font-size:13px;color:var(--muted)">${p.description}</div>` : ''}
         <div style="margin-top:8px;font-size:14px;color:var(--muted)">${p.runs} runs${p.runs ? ` &middot; ${rate}% pass rate` : ''}</div>
       </div>`;
     }).join('');
@@ -506,6 +524,20 @@ async function deleteCurrentProject() {
 async function loadProjectDetail(name) {
   currentProjectName = name;
   document.getElementById('proj-name').textContent = name;
+  document.getElementById('proj-repo').textContent = '';
+
+  // Load project info (repo URL)
+  try {
+    const projRes = await fetch('/api/projects');
+    const projects = await projRes.json();
+    if (Array.isArray(projects)) {
+      const proj = projects.find(p => p.name === name);
+      if (proj?.repo_url) {
+        const short = proj.repo_url.replace('https://github.com/', '').replace('.git', '');
+        document.getElementById('proj-repo').textContent = short;
+      }
+    }
+  } catch(e) {}
 
   // Metrics
   try {

@@ -233,15 +233,24 @@ fn api_create_project(response_out: ResponseOutparam, body: &[u8]) {
     };
 
     let name = parsed.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    let repo_url = parsed.get("repo_url").and_then(|u| u.as_str()).unwrap_or("");
+    let branch = parsed.get("branch").and_then(|b| b.as_str()).unwrap_or("main");
+    let description = parsed.get("description").and_then(|d| d.as_str()).unwrap_or("");
+
     if name.is_empty() {
         respond_json(response_out, 400, r#"{"error":"name is required"}"#);
         return;
     }
-    let description = parsed.get("description").and_then(|d| d.as_str()).unwrap_or("");
+    if repo_url.is_empty() {
+        respond_json(response_out, 400, r#"{"error":"repo_url is required"}"#);
+        return;
+    }
 
     let query = format!(
-        "CREATE project SET name='{}', description='{}', created_at=time::now()",
+        "CREATE project SET name='{}', repo_url='{}', branch='{}', description='{}', status='ready', created_at=time::now()",
         name.replace('\'', ""),
+        repo_url.replace('\'', ""),
+        branch.replace('\'', ""),
         description.replace('\'', ""),
     );
 
