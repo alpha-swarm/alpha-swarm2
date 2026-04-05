@@ -43,9 +43,10 @@ impl InferenceRouter {
     /// Pick the best model for a complexity tier.
     ///
     /// Routing strategy:
-    ///   Simple  → smallest Ollama code model (≤10B params)
-    ///   Medium  → mid-size Ollama model (10-35B) or Claude Haiku
-    ///   Complex → Claude Sonnet or largest available Ollama model
+    ///   All tiers → prefer largest code model for quality.
+    ///   Running locally with 96GB RAM — no reason to be stingy.
+    ///   Simple tasks still get routed to the largest model because
+    ///   the quality improvement is worth the extra seconds.
     pub async fn recommend_model(&self, complexity: Complexity) -> Result<ModelInfo> {
         let models = self.list_models().await?;
         if models.is_empty() {
@@ -54,14 +55,14 @@ impl InferenceRouter {
 
         let pick = match complexity {
             Complexity::Simple => {
-                // Prefer smallest Ollama model
-                best_ollama_by_size(&models, |size| size <= 10)
+                // Use largest code model — quality over speed
+                largest_ollama(&models)
+                    .or_else(|| best_ollama_by_size(&models, |_| true))
                     .or_else(|| any_ready(&models))
             }
             Complexity::Medium => {
-                // Prefer mid-size Ollama, then Claude Haiku, then anything
-                best_ollama_by_size(&models, |size| size > 10 && size <= 35)
-                    .or_else(|| find_model(&models, BackendKind::Claude, "haiku"))
+                // Largest Ollama code model
+                largest_ollama(&models)
                     .or_else(|| best_ollama_by_size(&models, |_| true))
                     .or_else(|| any_ready(&models))
             }

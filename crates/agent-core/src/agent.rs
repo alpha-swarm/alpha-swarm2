@@ -4,6 +4,14 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use inference_client::{Complexity, InferenceOptions, InferenceResponse, InferenceRouter, OllamaBackend};
+
+/// Default inference options — large context window for full repo context.
+fn default_options() -> InferenceOptions {
+    InferenceOptions {
+        max_tokens: Some(32768),
+        ..Default::default()
+    }
+}
 use knowledge_base::{AgentRun, KnowledgeStore, RunStatus};
 use swarm_events::{EventPublisher, SwarmEvent};
 
@@ -180,7 +188,7 @@ impl<'a> Agent<'a> {
         }
 
         // 3. Call inference
-        let options = InferenceOptions::default();
+        let options = default_options();
         let response = self.router.chat(&messages, complexity, &options).await
             .context("Inference failed")?;
 

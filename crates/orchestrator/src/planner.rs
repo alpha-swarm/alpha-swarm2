@@ -53,7 +53,7 @@ pub async fn plan_goal(
 
     // Use complex tier for planning — needs good reasoning
     let options = InferenceOptions {
-        max_tokens: Some(4096),
+        max_tokens: Some(32768),
         ..Default::default()
     };
 

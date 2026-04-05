@@ -68,15 +68,91 @@ pub async fn handle_task(
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
 
-    // 4. Run the swarm orchestrator
+    // 4. Run the swarm orchestrator with retry loop
     let start = std::time::Instant::now();
+    let max_iterations = 5;
+    let time_limit_ms: u64 = 600_000; // 10 minutes
+    let token_limit: u32 = 50_000;
+    let mut total_tokens_used: u32 = 0;
+    let mut iteration = 0;
+    let mut last_errors = String::new();
+    let mut final_result = None;
 
-    let mut runner = swarm_orchestrator::SwarmRunner::new(router, ollama, &repo_path, project);
-    runner = runner.with_store(store);
+    loop {
+        iteration += 1;
+        let elapsed = start.elapsed().as_millis() as u64;
 
-    match runner.run(goal).await {
-        Ok(result) => {
-            let duration = start.elapsed().as_millis() as u64;
+        if elapsed > time_limit_ms {
+            warn!(task_id, iteration, "Time fuel exhausted ({elapsed}ms > {time_limit_ms}ms)");
+            break;
+        }
+        if total_tokens_used > token_limit {
+            warn!(task_id, iteration, total_tokens_used, "Token fuel exhausted");
+            break;
+        }
+        if iteration > max_iterations {
+            warn!(task_id, iteration, "Max iterations reached");
+            break;
+        }
+
+        // Exponential backoff between retries
+        if iteration > 1 {
+            let backoff = std::cmp::min(2u64.pow(iteration as u32 - 1), 60);
+            info!(task_id, iteration, backoff_secs = backoff, errors = %last_errors.chars().take(100).collect::<String>(), "Retrying after backoff");
+            tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+        }
+
+        // Build goal with error context from previous iteration
+        let augmented_goal = if last_errors.is_empty() {
+            goal.to_string()
+        } else {
+            format!("{}\n\nPREVIOUS ATTEMPT FAILED:\n{}\n\nFix the issues from the previous attempt.", goal, last_errors)
+        };
+
+        let mut runner = swarm_orchestrator::SwarmRunner::new(router, ollama, &repo_path, project);
+        runner = runner.with_store(store);
+
+        match runner.run(&augmented_goal).await {
+            Ok(result) => {
+                // Track token usage
+                let iter_tokens: u32 = result.results.iter()
+                    .filter_map(|r| r.agent_result.as_ref())
+                    .map(|a| a.inference_response.tokens_input + a.inference_response.tokens_output)
+                    .sum();
+                total_tokens_used += iter_tokens;
+
+                if result.quality_passed {
+                    info!(task_id, iteration, total_tokens_used, "Quality gate passed!");
+                    final_result = Some(result);
+                    break;
+                } else {
+                    // Collect errors for next iteration
+                    last_errors = result.results.iter()
+                        .filter_map(|r| r.error.as_ref())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    info!(task_id, iteration, total_tokens_used, "Quality gate failed, will retry");
+                    final_result = Some(result);
+                    // Reset repo to clean state for next attempt
+                    let _ = std::process::Command::new("git")
+                        .args(["checkout", "."])
+                        .current_dir(&repo_path)
+                        .output();
+                }
+            }
+            Err(e) => {
+                last_errors = e.to_string();
+                warn!(task_id, iteration, error = %e, "Swarm execution failed");
+                final_result = None;
+            }
+        }
+    }
+
+    let duration = start.elapsed().as_millis() as u64;
+
+    match final_result {
+        Some(result) => {
             let status = if result.quality_passed { RunStatus::Passed } else { RunStatus::Failed };
             let tasks_passed = result.results.iter().filter(|r| r.agent_result.as_ref().is_some_and(|a| a.applied)).count();
             let tasks_failed = result.results.iter().filter(|r| r.error.is_some()).count();
@@ -91,8 +167,18 @@ pub async fn handle_task(
                 "Swarm completed"
             );
 
+            // Collect actual models used by sub-agents
+            let models_used: Vec<String> = result.results.iter()
+                .filter_map(|r| r.agent_result.as_ref())
+                .map(|a| a.inference_response.model.clone())
+                .filter(|m| !m.is_empty())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            let model_str = if models_used.is_empty() { "unknown".to_string() } else { models_used.join(", ") };
+
             // Update run record
-            let mut final_run = AgentRun::new(project, goal, "daemon", "swarm");
+            let mut final_run = AgentRun::new(project, goal, "daemon", &model_str);
             final_run.status = status;
             final_run.duration_ms = duration;
             final_run.quality_gate_passed = Some(result.quality_passed);
@@ -104,6 +190,13 @@ pub async fn handle_task(
                 .fold((0u32, 0u32), |(i, o), a| (i + a.inference_response.tokens_input, o + a.inference_response.tokens_output));
             final_run.tokens_input = total_in;
             final_run.tokens_output = total_out;
+
+            // Collect files modified from sub-agents
+            final_run.files_modified = result.results.iter()
+                .flat_map(|r| r.task.files.iter().cloned())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
 
             if !result.quality_passed {
                 let errors: Vec<String> = result.results.iter()
@@ -150,9 +243,9 @@ pub async fn handle_task(
                 }).await;
             }
         }
-        Err(e) => {
-            let duration = start.elapsed().as_millis() as u64;
-            fail_task_with_duration(store, publisher, task_id, project, goal, &format!("Swarm failed: {e}"), duration).await;
+        None => {
+            fail_task_with_duration(store, publisher, task_id, project, goal,
+                &format!("All {} iterations failed. Last error: {}", iteration, last_errors), duration).await;
         }
     }
 }

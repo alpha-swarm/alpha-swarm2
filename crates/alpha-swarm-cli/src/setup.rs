@@ -76,9 +76,11 @@ pub fn discover_files(repo: &std::path::Path) -> Result<Vec<String>> {
     walk(repo, repo, &extensions, &mut files);
     files.sort();
 
-    if files.len() > 20 {
-        info!("Found {} files, taking first 20", files.len());
-        files.truncate(20);
+    // With 32K context window, we can handle many more files
+    let max_files = 100;
+    if files.len() > max_files {
+        info!("Found {} files, taking first {}", files.len(), max_files);
+        files.truncate(max_files);
     }
 
     Ok(files)
