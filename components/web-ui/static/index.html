@@ -504,7 +504,8 @@ function showAgentDetail(idx) {
     <div class="detail-row"><span class="detail-label">Created</span><span class="detail-value">${created.substring(0, 19).replace('T', ' ')}</span></div>
     ${files.length ? `<div class="detail-row"><span class="detail-label">Files</span><span class="detail-value">${files.join(', ')}</span></div>` : ''}
     ${error ? `<div style="margin-top:12px"><div class="detail-label" style="margin-bottom:4px;font-size:12px">Error Output</div><div class="detail-error">${error.substring(0, 1000)}</div></div>` : ''}
-    ${diff ? `<div style="margin-top:12px"><div class="detail-label" style="margin-bottom:4px;font-size:12px">Diff</div><pre style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;font-size:12px;overflow-x:auto;max-height:300px;color:var(--text-secondary)">${diff.substring(0, 2000).replace(/</g,'&lt;')}</pre></div>` : ''}
+    ${diff && diff.startsWith('PR: ') ? `<div style="margin-top:12px"><a href="${diff.substring(4)}" target="_blank" class="btn btn-primary btn-sm" style="text-decoration:none">View PR on GitHub &rarr;</a></div>` : ''}
+    ${diff && !diff.startsWith('PR: ') ? `<div style="margin-top:12px"><div class="detail-label" style="margin-bottom:4px;font-size:12px">Diff</div><pre style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;font-size:12px;overflow-x:auto;max-height:300px;color:var(--text-secondary)">${diff.substring(0, 2000).replace(/</g,'&lt;')}</pre></div>` : ''}
     <div style="margin-top:16px">
       <button class="btn btn-primary btn-sm" onclick="rerunFromAgent(${idx})">Re-run</button>
     </div>
@@ -643,6 +644,7 @@ function showRunDetail(idx) {
   const duration = run.duration_ms || 0;
   const created = run.created_at || '';
   const error = run.error_message || '';
+  const diff = run.diff || '';
   const qg = run.quality_gate_passed;
   const files = run.files_modified || [];
 
@@ -659,6 +661,8 @@ function showRunDetail(idx) {
     <div class="detail-row"><span class="detail-label">Duration</span><span class="detail-value">${(duration / 1000).toFixed(1)}s</span></div>
     <div class="detail-row"><span class="detail-label">Created</span><span class="detail-value">${created.substring(0, 19).replace('T', ' ')}</span></div>
     ${files.length ? `<div class="detail-row"><span class="detail-label">Files</span><span class="detail-value">${files.join(', ')}</span></div>` : ''}
+    ${diff && diff.startsWith('PR: ') ? `<div style="margin-top:12px"><a href="${diff.substring(4)}" target="_blank" class="btn btn-primary btn-sm" style="text-decoration:none">View PR on GitHub &rarr;</a></div>` : ''}
+    ${diff && !diff.startsWith('PR: ') ? `<div style="margin-top:12px"><div class="detail-label" style="margin-bottom:4px;font-size:12px">Diff</div><pre style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;font-size:12px;overflow-x:auto;max-height:300px;color:var(--text-secondary)">${diff.substring(0, 2000).replace(/</g,'&lt;')}</pre></div>` : ''}
     ${error ? `<div style="margin-top:8px"><div class="detail-label" style="margin-bottom:4px">Error</div><div class="detail-error">${error}</div></div>` : ''}
     <div style="margin-top:16px;display:flex;gap:8px">
       <button class="btn btn-primary btn-sm" onclick="rerunTask(${idx})">Re-run</button>

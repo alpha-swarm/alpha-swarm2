@@ -6,6 +6,7 @@
 /// Usage: cargo run -p agent-daemon
 mod repo;
 mod executor;
+mod git_pr;
 
 use std::sync::Arc;
 use std::time::Duration;

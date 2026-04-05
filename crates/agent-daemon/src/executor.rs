@@ -9,6 +9,7 @@ use swarm_config::SwarmConfig;
 use swarm_events::{EventPublisher, SwarmEvent};
 
 use crate::repo;
+use crate::git_pr;
 
 /// Handle a single task: claim → clone repo → execute → update status → emit events.
 pub async fn handle_task(
@@ -111,6 +112,26 @@ pub async fn handle_task(
                     .collect();
                 if !errors.is_empty() {
                     final_run.error_message = Some(errors.join("\n"));
+                }
+            }
+
+            // 5. Create PR if there are changes
+            let sub_tasks_info: Vec<(String, String, String)> = result.results.iter()
+                .map(|r| {
+                    let model = r.agent_result.as_ref().map(|a| a.inference_response.model.clone()).unwrap_or_default();
+                    let status = if r.error.is_some() { "failed" } else if r.agent_result.as_ref().is_some_and(|a| a.applied) { "passed" } else { "skipped" };
+                    (r.task.description.clone(), model, status.to_string())
+                })
+                .collect();
+
+            match git_pr::create_pr(&repo_path, goal, &sub_tasks_info, result.quality_passed, duration, total_in, total_out) {
+                Ok(pr_url) => {
+                    info!(pr_url = %pr_url, "PR created");
+                    final_run.diff = Some(format!("PR: {}", pr_url));
+                }
+                Err(e) => {
+                    warn!("PR creation failed (non-fatal): {e}");
+                    // Still update the run — PR is optional
                 }
             }
 
