@@ -15,7 +15,10 @@ pub async fn execute(
     complexity: Complexity,
     no_quality_gate: bool,
     project: Option<String>,
+    agent_type: &str,
+    retry: bool,
 ) -> Result<()> {
+    let _agent_type = agent_core::AgentType::from_str(agent_type);
     let repo = repo.canonicalize().context("Repository path does not exist")?;
     info!(repo = %repo.display(), task = %task, "Starting agent run");
 

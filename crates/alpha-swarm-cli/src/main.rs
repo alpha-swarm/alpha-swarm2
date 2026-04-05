@@ -30,6 +30,12 @@ enum Commands {
         no_quality_gate: bool,
         #[arg(short, long)]
         project: Option<String>,
+        /// Agent specialization: general, lint, test, refactor, feature, bug
+        #[arg(short, long, default_value = "general")]
+        agent_type: String,
+        /// Enable retry with model escalation on quality gate failure
+        #[arg(long)]
+        retry: bool,
     },
     /// List available models across all backends
     Models,
@@ -76,8 +82,8 @@ async fn main() -> Result<()> {
     let router = setup::setup_router()?;
 
     match cli.command {
-        Commands::Run { repo, task, files, complexity, no_quality_gate, project } => {
-            commands::run::execute(&router, repo, task, files, parse_complexity(&complexity), no_quality_gate, project).await?;
+        Commands::Run { repo, task, files, complexity, no_quality_gate, project, agent_type, retry } => {
+            commands::run::execute(&router, repo, task, files, parse_complexity(&complexity), no_quality_gate, project, &agent_type, retry).await?;
         }
         Commands::Swarm { repo, goal, project } => {
             commands::swarm::execute(&router, repo, goal, project).await?;
