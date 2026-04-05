@@ -79,3 +79,73 @@ impl ProjectMetrics {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AgentRun, RunStatus};
+
+    fn make_run(model: &str, status: RunStatus, tokens_in: u32, tokens_out: u32, duration: u64) -> AgentRun {
+        let mut run = AgentRun::new("test", "task", "agent-1", model);
+        run.status = status;
+        run.tokens_input = tokens_in;
+        run.tokens_output = tokens_out;
+        run.duration_ms = duration;
+        run
+    }
+
+    #[test]
+    fn empty_runs() {
+        let m = ProjectMetrics::from_runs(&[]);
+        assert_eq!(m.total_runs, 0);
+        assert_eq!(m.pass_rate, 0.0);
+        assert_eq!(m.avg_duration_ms, 0);
+        assert!(m.models_used.is_empty());
+    }
+
+    #[test]
+    fn counts_and_pass_rate() {
+        let runs = vec![
+            make_run("model-a", RunStatus::Passed, 100, 50, 1000),
+            make_run("model-a", RunStatus::Passed, 100, 50, 1000),
+            make_run("model-a", RunStatus::Failed, 100, 50, 1000),
+            make_run("model-b", RunStatus::Passed, 200, 100, 2000),
+            make_run("model-b", RunStatus::Skipped, 0, 0, 0),
+        ];
+        let m = ProjectMetrics::from_runs(&runs);
+        assert_eq!(m.total_runs, 5);
+        assert_eq!(m.passed, 3);
+        assert_eq!(m.failed, 1);
+        assert_eq!(m.skipped, 1);
+        assert!((m.pass_rate - 0.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn token_sums() {
+        let runs = vec![
+            make_run("m", RunStatus::Passed, 100, 50, 1000),
+            make_run("m", RunStatus::Passed, 200, 100, 2000),
+        ];
+        let m = ProjectMetrics::from_runs(&runs);
+        assert_eq!(m.total_tokens_input, 300);
+        assert_eq!(m.total_tokens_output, 150);
+        assert_eq!(m.avg_duration_ms, 1500);
+    }
+
+    #[test]
+    fn per_model_breakdown() {
+        let runs = vec![
+            make_run("model-a", RunStatus::Passed, 100, 50, 1000),
+            make_run("model-a", RunStatus::Failed, 100, 50, 2000),
+            make_run("model-b", RunStatus::Passed, 200, 100, 3000),
+        ];
+        let m = ProjectMetrics::from_runs(&runs);
+        assert_eq!(m.models_used.len(), 2);
+        // Sorted by run count descending
+        assert_eq!(m.models_used[0].model, "model-a");
+        assert_eq!(m.models_used[0].runs, 2);
+        assert_eq!(m.models_used[0].passed, 1);
+        assert_eq!(m.models_used[1].model, "model-b");
+        assert_eq!(m.models_used[1].runs, 1);
+    }
+}

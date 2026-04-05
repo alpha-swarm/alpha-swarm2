@@ -62,3 +62,76 @@ pub fn build_prompt_with_type(
         ChatMessage::user(user_message),
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_str_parses_all_variants() {
+        assert_eq!(AgentType::from_str("lint"), AgentType::LintFixer);
+        assert_eq!(AgentType::from_str("lint-fixer"), AgentType::LintFixer);
+        assert_eq!(AgentType::from_str("linter"), AgentType::LintFixer);
+        assert_eq!(AgentType::from_str("test"), AgentType::TestWriter);
+        assert_eq!(AgentType::from_str("test-writer"), AgentType::TestWriter);
+        assert_eq!(AgentType::from_str("refactor"), AgentType::Refactorer);
+        assert_eq!(AgentType::from_str("feature"), AgentType::FeatureAdder);
+        assert_eq!(AgentType::from_str("bug"), AgentType::BugFixer);
+        assert_eq!(AgentType::from_str("bugfix"), AgentType::BugFixer);
+        assert_eq!(AgentType::from_str("general"), AgentType::General);
+        assert_eq!(AgentType::from_str("unknown"), AgentType::General);
+        assert_eq!(AgentType::from_str(""), AgentType::General);
+    }
+
+    #[test]
+    fn lint_fixer_prompt_is_constrained() {
+        let msgs = build_prompt_with_type("fix lint", &[], AgentType::LintFixer);
+        let system = &msgs[0].content;
+        assert!(system.contains("lint-fixing agent"), "should mention lint-fixing");
+        assert!(system.contains("ONLY"), "should mention ONLY");
+        assert!(system.contains("Do not refactor"), "should prohibit refactoring");
+    }
+
+    #[test]
+    fn test_writer_preserves_code() {
+        let msgs = build_prompt_with_type("write tests", &[], AgentType::TestWriter);
+        let system = &msgs[0].content;
+        assert!(system.contains("Do not modify the code under test"));
+    }
+
+    #[test]
+    fn refactorer_preserves_behavior() {
+        let msgs = build_prompt_with_type("refactor", &[], AgentType::Refactorer);
+        let system = &msgs[0].content;
+        assert!(system.contains("Do NOT change external behavior"));
+    }
+
+    #[test]
+    fn all_prompts_include_edit_format() {
+        for agent_type in [
+            AgentType::General, AgentType::LintFixer, AgentType::TestWriter,
+            AgentType::Refactorer, AgentType::FeatureAdder, AgentType::BugFixer,
+        ] {
+            let msgs = build_prompt_with_type("task", &[], agent_type);
+            let system = &msgs[0].content;
+            assert!(system.contains("<<<EDIT"), "Missing EDIT format for {agent_type:?}");
+            assert!(system.contains("--- OLD"), "Missing OLD marker for {agent_type:?}");
+            assert!(system.contains("--- NEW"), "Missing NEW marker for {agent_type:?}");
+        }
+    }
+
+    #[test]
+    fn user_message_includes_all_files() {
+        let files = vec![
+            ("src/a.rs".to_string(), "fn a(){}".to_string()),
+            ("src/b.rs".to_string(), "fn b(){}".to_string()),
+        ];
+        let msgs = build_prompt("fix both", &files);
+        let user = &msgs[1].content;
+        assert!(user.contains("=== src/a.rs ==="));
+        assert!(user.contains("=== src/b.rs ==="));
+        assert!(user.contains("fn a(){}"));
+        assert!(user.contains("fn b(){}"));
+        assert!(user.contains("TASK: fix both"));
+    }
+}

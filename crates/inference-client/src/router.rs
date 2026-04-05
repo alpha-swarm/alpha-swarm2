@@ -244,3 +244,139 @@ fn is_code_model(name: &str) -> bool {
     let n = name.to_lowercase();
     n.contains("code") || n.contains("coder") || n.contains("starcoder") || n.contains("deepseek")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mock::MockBackend;
+
+    #[tokio::test]
+    async fn simple_task_selects_smallest_code_model() {
+        let router = InferenceRouter::new()
+            .add_backend(
+                MockBackend::new(BackendKind::Ollama)
+                    .with_model("qwen2.5-coder:7b", "7.6B")
+                    .with_model("deepseek-coder:33b", "33B")
+                    .with_model("codellama:34b", "34B")
+            );
+
+        let model = router.recommend_model(Complexity::Simple).await.unwrap();
+        assert_eq!(model.name, "qwen2.5-coder:7b");
+    }
+
+    #[tokio::test]
+    async fn medium_task_selects_midsize_model() {
+        let router = InferenceRouter::new()
+            .add_backend(
+                MockBackend::new(BackendKind::Ollama)
+                    .with_model("qwen2.5-coder:7b", "7.6B")
+                    .with_model("deepseek-coder:33b", "33B")
+            );
+
+        let model = router.recommend_model(Complexity::Medium).await.unwrap();
+        assert_eq!(model.name, "deepseek-coder:33b");
+    }
+
+    #[tokio::test]
+    async fn complex_task_prefers_claude() {
+        let router = InferenceRouter::new()
+            .add_backend(
+                MockBackend::new(BackendKind::Claude)
+                    .with_model("claude-sonnet-4-20250514", "unknown")
+            )
+            .add_backend(
+                MockBackend::new(BackendKind::Ollama)
+                    .with_model("codellama:34b", "34B")
+            );
+
+        let model = router.recommend_model(Complexity::Complex).await.unwrap();
+        assert_eq!(model.backend, BackendKind::Claude);
+    }
+
+    #[tokio::test]
+    async fn complex_falls_back_to_largest_ollama() {
+        let router = InferenceRouter::new()
+            .add_backend(
+                MockBackend::new(BackendKind::Ollama)
+                    .with_model("qwen2.5-coder:7b", "7.6B")
+                    .with_model("codellama:34b", "34B")
+            );
+
+        let model = router.recommend_model(Complexity::Complex).await.unwrap();
+        assert_eq!(model.name, "codellama:34b");
+    }
+
+    #[tokio::test]
+    async fn no_models_returns_error() {
+        let router = InferenceRouter::new()
+            .add_backend(MockBackend::new(BackendKind::Ollama));
+
+        assert!(router.recommend_model(Complexity::Simple).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn fallback_on_backend_failure() {
+        let router = InferenceRouter::new()
+            .add_backend(
+                MockBackend::new(BackendKind::Claude)
+                    .with_model("claude-sonnet-4-20250514", "unknown")
+                    .unhealthy()
+            )
+            .add_backend(
+                MockBackend::new(BackendKind::Ollama)
+                    .with_model("qwen2.5-coder:7b", "7.6B")
+                    .with_response("hello")
+            );
+
+        let opts = InferenceOptions {
+            preferred_backend: Some(BackendKind::Claude),
+            ..Default::default()
+        };
+        let resp = router.chat(&[ChatMessage::user("test")], Complexity::Simple, &opts).await.unwrap();
+        assert_eq!(resp.backend, BackendKind::Ollama);
+    }
+
+    #[tokio::test]
+    async fn escalate_returns_larger_model() {
+        let router = InferenceRouter::new()
+            .add_backend(
+                MockBackend::new(BackendKind::Ollama)
+                    .with_model("qwen2.5-coder:7b", "7.6B")
+                    .with_model("deepseek-coder:33b", "33B")
+            );
+
+        let bigger = router.escalate_model("qwen2.5-coder:7b", Complexity::Simple).await.unwrap();
+        assert_eq!(bigger.name, "deepseek-coder:33b");
+    }
+
+    #[tokio::test]
+    async fn code_model_preferred_over_general() {
+        let router = InferenceRouter::new()
+            .add_backend(
+                MockBackend::new(BackendKind::Ollama)
+                    .with_model("llama3:8b", "8B")
+                    .with_model("qwen2.5-coder:7b", "7.6B")
+            );
+
+        let model = router.recommend_model(Complexity::Simple).await.unwrap();
+        assert_eq!(model.name, "qwen2.5-coder:7b");
+    }
+
+    #[test]
+    fn parse_param_size() {
+        assert_eq!(parse_param_size_b("7.6B"), 7);
+        assert_eq!(parse_param_size_b("33B"), 33);
+        assert_eq!(parse_param_size_b("unknown"), 0);
+        assert_eq!(parse_param_size_b(""), 0);
+    }
+
+    #[test]
+    fn code_model_detection() {
+        assert!(is_code_model("qwen2.5-coder:7b"));
+        assert!(is_code_model("deepseek-coder:33b"));
+        assert!(is_code_model("codellama:34b"));
+        assert!(is_code_model("starcoder2:15b"));
+        assert!(!is_code_model("llama3:8b"));
+        assert!(!is_code_model("mistral:7b"));
+    }
+}

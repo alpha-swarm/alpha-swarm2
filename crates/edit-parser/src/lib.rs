@@ -137,4 +137,45 @@ mod tests {
         let response = "<<<EDIT a.rs\n--- OLD\nx\n--- NEW\ny";
         assert!(parse_edits(response).is_err());
     }
+
+    #[test]
+    fn test_empty_response() {
+        let edits = parse_edits("").unwrap();
+        assert!(edits.is_empty());
+    }
+
+    #[test]
+    fn test_text_around_blocks_ignored() {
+        let response = "Here is my solution:\n\n<<<EDIT src/main.rs\n--- OLD\nold\n--- NEW\nnew\n>>>\n\nHope this helps!";
+        let edits = parse_edits(response).unwrap();
+        assert_eq!(edits.len(), 1);
+    }
+
+    #[test]
+    fn test_code_with_angle_brackets() {
+        let response = "<<<EDIT src/lib.rs\n--- OLD\nfn foo() -> Vec<String> { vec![] }\n--- NEW\nfn foo() -> Vec<String> { vec![\"hello\".into()] }\n>>>";
+        let edits = parse_edits(response).unwrap();
+        assert_eq!(edits.len(), 1);
+        if let FileEdit::Edit { new, .. } = &edits[0] {
+            assert!(new.contains("Vec<String>"));
+        }
+    }
+
+    #[test]
+    fn test_missing_old_marker() {
+        let response = "<<<EDIT a.rs\n--- NEW\nnew content\n>>>";
+        assert!(parse_edits(response).is_err());
+    }
+
+    #[test]
+    fn test_edit_preserves_content() {
+        let response = "<<<EDIT src/main.rs\n--- OLD\nlet x = 1;\nlet y = 2;\n--- NEW\nlet x = 10;\nlet y = 20;\n>>>";
+        let edits = parse_edits(response).unwrap();
+        if let FileEdit::Edit { old, new, .. } = &edits[0] {
+            assert!(old.contains("let x = 1;"));
+            assert!(new.contains("let x = 10;"));
+        } else {
+            panic!("Expected Edit");
+        }
+    }
 }

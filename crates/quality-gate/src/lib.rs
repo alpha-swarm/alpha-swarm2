@@ -153,3 +153,46 @@ pub async fn run_single(
         None => Ok(None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn detect_rust_toolchain() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"t\"").unwrap();
+        let config = detect_toolchain(dir.path());
+        assert_eq!(config.build_cmd.as_deref(), Some("cargo check"));
+        assert_eq!(config.fmt_cmd.as_deref(), Some("cargo fmt -- --check"));
+        assert_eq!(config.lint_cmd.as_deref(), Some("cargo clippy -- -D warnings"));
+        assert_eq!(config.unit_test_cmd.as_deref(), Some("cargo test"));
+    }
+
+    #[test]
+    fn detect_node_toolchain() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("package.json"), "{}").unwrap();
+        let config = detect_toolchain(dir.path());
+        assert_eq!(config.build_cmd.as_deref(), Some("npm run build"));
+    }
+
+    #[test]
+    fn detect_go_toolchain() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("go.mod"), "module test").unwrap();
+        let config = detect_toolchain(dir.path());
+        assert_eq!(config.build_cmd.as_deref(), Some("go build ./..."));
+    }
+
+    #[test]
+    fn detect_unknown_toolchain() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = detect_toolchain(dir.path());
+        assert!(config.build_cmd.is_none());
+        assert!(config.fmt_cmd.is_none());
+        assert!(config.lint_cmd.is_none());
+        assert!(config.unit_test_cmd.is_none());
+    }
+}

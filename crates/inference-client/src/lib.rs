@@ -3,6 +3,7 @@ mod backend;
 mod claude;
 mod ollama;
 mod router;
+pub mod mock;
 
 pub use types::*;
 pub use backend::InferenceBackend;
