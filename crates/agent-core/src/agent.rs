@@ -222,10 +222,11 @@ impl<'a> Agent<'a> {
             }
         }
 
+        let has_edits = !edits.is_empty();
         Ok(AgentResult {
             edits,
             inference_response: response,
-            applied: true,
+            applied: has_edits,
             skipped: false,
             run_id,
             attempt: 1,
