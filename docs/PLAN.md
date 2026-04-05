@@ -226,6 +226,7 @@ Phase 3: + multi-agent (still single machine)
 Phase 4: + multi-machine (opt-in, not required)
 Phase 5: + smart local model routing
 Phase 6: + distributed daemon via wasmCloud plugins + resource-aware scheduling
+Phase 7: + tool-use agents (MCP-style tools, LSP, web search, structured operations)
 ```
 
 Each phase is **independently useful**. You can stop at any phase and have a working system.
@@ -325,6 +326,112 @@ VERIFY: Killing one daemon doesn't lose pending tasks.
 
 ### Milestone: "Truly Distributed Swarm"
 Agents float to the machine with the best resources. No single point of failure. Add a machine → it joins the swarm automatically.
+
+---
+
+## Phase 7: Tool-Use Agents + MCP-style Tools (Future)
+
+**Goal**: Agents use structured tools instead of generating raw diffs. A reasoning model orchestrates tools and sub-agents dynamically.
+
+### Why
+
+Current agents do everything via LLM text generation → parse edits. This is:
+- Slow (LLM generates entire file diffs for simple renames)
+- Error-prone (OLD block matching fails on whitespace)
+- Wasteful (don't need AI to delete a variable or rename a function)
+
+### Architecture: Reasoning Model + Tools
+
+```
+Orchestrator (big model: codellama:34b / claude)
+  │
+  │  "I need to rename `foo` to `bar` in 3 files"
+  │
+  ├── Tool: rename_symbol("foo", "bar")      ← instant, no LLM
+  ├── Tool: lsp_find_references("foo")        ← LSP query
+  ├── Tool: grep("foo", "src/")               ← filesystem search
+  ├── Tool: read_file("src/main.rs")          ← read context
+  ├── Tool: write_file("src/main.rs", ...)    ← apply change
+  ├── Tool: run_tests()                       ← quality gate
+  ├── Tool: web_search("rust error E0308")    ← internet
+  │
+  └── Sub-Agent: "implement the auth module"  ← complex, needs LLM
+        └── uses same tools recursively
+```
+
+### Tool Categories
+
+**Structured tools (no LLM, instant):**
+- `read_file(path)` — read file content
+- `write_file(path, content)` — write file
+- `delete_file(path)` — delete
+- `rename_symbol(old, new, scope)` — find & replace with scope awareness
+- `list_files(glob)` — file discovery
+- `git_diff()` — current changes
+- `git_commit(msg)` — commit
+- `run_command(cmd, args)` — shell exec
+
+**LSP tools (fast, structured):**
+- `find_references(symbol)` — where is this used?
+- `go_to_definition(symbol)` — where is this defined?
+- `diagnostics(file)` — current errors/warnings
+- `completions(file, pos)` — what fits here?
+- `rename(old, new)` — semantic rename across project
+
+**Search tools (network):**
+- `web_search(query)` — internet search for docs/errors
+- `fetch_url(url)` — read a web page
+- `search_crates(query)` — find Rust crates
+- `search_docs(crate, query)` — search docs.rs
+
+**Agent tools (LLM-powered, slow):**
+- `implement(description, files)` — write new code (current agent-core)
+- `review(diff)` — code review
+- `explain(code)` — explain what code does
+- `fix_error(error, files)` — diagnose and fix
+
+### MCP-style Interface
+
+Each tool follows a standard interface:
+
+```rust
+trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn parameters_schema(&self) -> serde_json::Value;
+    async fn execute(&self, params: serde_json::Value) -> Result<ToolResult>;
+}
+
+struct ToolResult {
+    content: String,
+    is_error: bool,
+}
+```
+
+The orchestrator model receives tool descriptions in its system prompt and emits tool calls in a structured format. The daemon executes them and feeds results back.
+
+### Multi-step Loop
+
+```
+1. Orchestrator receives goal + repo context + available tools
+2. Orchestrator outputs: { "tool": "read_file", "params": { "path": "src/main.rs" } }
+3. Daemon executes tool, returns result
+4. Orchestrator analyzes result, decides next action
+5. Repeat until orchestrator outputs: { "done": true, "summary": "..." }
+```
+
+This is the Claude Code / Cursor / SWE-agent loop — but running locally with our own models.
+
+### Implementation Order
+1. Define `Tool` trait and `ToolResult` type
+2. Implement structured tools (read/write/list/grep/rename)
+3. Implement the tool-use loop in agent-core (prompt → parse tool call → execute → feed back)
+4. Add LSP tools (start LSP server, query via JSON-RPC)
+5. Add web search tools
+6. Update dashboard to show tool calls in the agent detail view
+
+### Milestone: "Tool-Using Agents"
+Agents use structured tools for simple operations and LLM for complex reasoning. 10x faster for mechanical tasks, more accurate for complex ones.
 
 ---
 
