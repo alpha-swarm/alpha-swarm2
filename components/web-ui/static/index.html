@@ -351,13 +351,20 @@ function connectSSE() {
     } catch(e) {}
   });
 
+  // SSE is poll-on-reconnect (closes after each batch, browser reconnects ~3s).
+  // Only show offline after multiple consecutive failures.
+  let sseFailCount = 0;
   sseSource.onopen = () => {
+    sseFailCount = 0;
     document.getElementById('health-dot').classList.remove('offline');
     document.getElementById('sys-status').textContent = 'Online';
   };
   sseSource.onerror = () => {
-    document.getElementById('health-dot').classList.add('offline');
-    document.getElementById('sys-status').textContent = 'Offline';
+    sseFailCount++;
+    if (sseFailCount > 5) {
+      document.getElementById('health-dot').classList.add('offline');
+      document.getElementById('sys-status').textContent = 'Offline';
+    }
   };
 }
 
