@@ -1,0 +1,85 @@
+package alpha-swarm:types@0.1.0;
+
+/// Common types shared across all alpha-swarm interfaces.
+interface types {
+
+    /// Unique identifier for an agent instance.
+    type agent-id = string;
+
+    /// Unique identifier for a task.
+    type task-id = string;
+
+    /// Unique identifier for a repository.
+    type repo-id = string;
+
+    /// Unix timestamp in milliseconds.
+    type timestamp = u64;
+
+    /// Vector embedding (f32 array for SurrealDB HNSW indexing).
+    type embedding = list<f32>;
+
+    /// A unified diff produced by an agent.
+    type unified-diff = string;
+
+    /// Status of a task in the system.
+    enum task-status {
+        pending,
+        claimed,
+        running,
+        passed,
+        failed,
+        skipped,
+    }
+
+    /// Complexity tier used for model routing.
+    enum complexity {
+        simple,
+        medium,
+        complex,
+    }
+
+    /// Test tier for quality gate checks.
+    enum test-tier {
+        unit,
+        integration,
+        e2e,
+    }
+
+    /// A task assigned to an agent.
+    record task {
+        id: task-id,
+        repo: repo-id,
+        description: string,
+        complexity: complexity,
+        assigned-files: list<string>,
+        context: option<string>,
+        created-at: timestamp,
+    }
+
+    /// Result of an agent's work on a task.
+    record task-result {
+        task-id: task-id,
+        agent-id: agent-id,
+        status: task-status,
+        diff: option<unified-diff>,
+        model-used: string,
+        duration-ms: u64,
+        error-message: option<string>,
+    }
+
+    /// A file entry with path and content.
+    record file-entry {
+        path: string,
+        content: string,
+    }
+
+    /// Errors that any alpha-swarm operation can return.
+    variant swarm-error {
+        not-found(string),
+        already-claimed(string),
+        inference-failed(string),
+        quality-gate-failed(string),
+        io-error(string),
+        internal(string),
+    }
+}

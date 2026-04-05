@@ -1,0 +1,70 @@
+package alpha-swarm:quality@0.1.0;
+
+/// Interface for running build/lint/fmt/test checks on agent-produced changes.
+interface gate {
+    use alpha-swarm:types/types.{repo-id, agent-id, test-tier, swarm-error};
+
+    /// Result of a single quality check.
+    record check-result {
+        check-name: string,
+        passed: bool,
+        stdout: string,
+        stderr: string,
+        exit-code: s32,
+        duration-ms: u64,
+    }
+
+    /// Toolchain configuration for a repository.
+    record toolchain-config {
+        build-cmd: option<string>,
+        fmt-cmd: option<string>,
+        lint-cmd: option<string>,
+        unit-test-cmd: option<string>,
+        integration-test-cmd: option<string>,
+        e2e-test-cmd: option<string>,
+    }
+
+    /// Auto-detect the toolchain for a repository (looks for Cargo.toml, package.json, go.mod, etc.).
+    detect-toolchain: func(
+        repo: repo-id,
+        agent: agent-id,
+    ) -> result<toolchain-config, swarm-error>;
+
+    /// Override the toolchain config for a repo.
+    set-toolchain: func(
+        repo: repo-id,
+        config: toolchain-config,
+    ) -> result<_, swarm-error>;
+
+    /// Run format check.
+    check-fmt: func(
+        repo: repo-id,
+        agent: agent-id,
+    ) -> result<check-result, swarm-error>;
+
+    /// Run linter.
+    check-lint: func(
+        repo: repo-id,
+        agent: agent-id,
+    ) -> result<check-result, swarm-error>;
+
+    /// Run build/compile check.
+    check-build: func(
+        repo: repo-id,
+        agent: agent-id,
+    ) -> result<check-result, swarm-error>;
+
+    /// Run tests at a specific tier.
+    check-test: func(
+        repo: repo-id,
+        agent: agent-id,
+        tier: test-tier,
+    ) -> result<check-result, swarm-error>;
+
+    /// Run all checks in order: fmt → lint → build → test(unit).
+    /// Stops at first failure.
+    check-all: func(
+        repo: repo-id,
+        agent: agent-id,
+    ) -> result<list<check-result>, swarm-error>;
+}

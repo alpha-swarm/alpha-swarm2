@@ -1,0 +1,8 @@
+name = "orchestrator"
+language = "rust"
+type = "component"
+version = "0.1.0"
+
+[component]
+wit_world = "orchestrator"
+wasm_target = "wasm32-wasip2"

@@ -1,0 +1,51 @@
+package alpha-swarm:world@0.1.0;
+
+/// World for the agent worker component.
+/// Imports all provider capabilities, exports the agent handler.
+world agent-worker {
+    import alpha-swarm:ollama/inference@0.1.0;
+    import alpha-swarm:virtfs/repository@0.1.0;
+    import alpha-swarm:quality/gate@0.1.0;
+    import alpha-swarm:knowledge/base@0.1.0;
+
+    import wasi:logging/logging@0.1.0;
+    import wasi:clocks/wall-clock@0.2.0;
+
+    /// The agent receives a task and processes it.
+    export handler: interface {
+        use alpha-swarm:types/types.{task, task-result, swarm-error};
+
+        /// Execute a one-shot task. Agent claims it, runs inference,
+        /// applies changes, validates, and reports results.
+        handle-task: func(task: task) -> result<task-result, swarm-error>;
+    };
+}
+
+/// World for the orchestrator component.
+/// Decomposes high-level tasks into sub-tasks and coordinates agents.
+world orchestrator {
+    import alpha-swarm:ollama/inference@0.1.0;
+    import alpha-swarm:virtfs/repository@0.1.0;
+    import alpha-swarm:quality/gate@0.1.0;
+    import alpha-swarm:knowledge/base@0.1.0;
+
+    import wasi:logging/logging@0.1.0;
+    import wasi:clocks/wall-clock@0.2.0;
+
+    /// The orchestrator accepts a high-level goal and manages sub-tasks.
+    export planner: interface {
+        use alpha-swarm:types/types.{repo-id, task, task-result, swarm-error};
+
+        /// Decompose a high-level goal into sub-tasks.
+        plan: func(
+            repo: repo-id,
+            goal: string,
+        ) -> result<list<task>, swarm-error>;
+
+        /// Merge completed task results back into the repo.
+        merge-results: func(
+            repo: repo-id,
+            results: list<task-result>,
+        ) -> result<_, swarm-error>;
+    };
+}

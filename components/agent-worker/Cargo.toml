@@ -1,0 +1,11 @@
+[package]
+name = "agent-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wit-bindgen-rt = "0.21"
+
+[lib]
+crate-type = ["cdylib"]

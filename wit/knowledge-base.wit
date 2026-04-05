@@ -1,0 +1,89 @@
+package alpha-swarm:knowledge@0.1.0;
+
+/// Interface for the shared knowledge base (SurrealDB).
+/// Stores agent runs, diffs, conversations, and errors.
+/// Supports vector similarity search for coordination.
+interface base {
+    use alpha-swarm:types/types.{
+        agent-id, task-id, repo-id, task, task-status,
+        task-result, unified-diff, embedding, timestamp, swarm-error,
+    };
+
+    /// Record of a single agent execution.
+    record agent-run {
+        id: string,
+        task-id: task-id,
+        agent-id: agent-id,
+        model-used: string,
+        status: task-status,
+        diff: option<unified-diff>,
+        error-message: option<string>,
+        started-at: timestamp,
+        finished-at: option<timestamp>,
+    }
+
+    /// A similar past result found via vector search.
+    record similar-result {
+        run: agent-run,
+        similarity: f32,
+    }
+
+    // --- Task operations ---
+
+    /// Create a new task.
+    create-task: func(task: task) -> result<task-id, swarm-error>;
+
+    /// Claim a task atomically (returns error if already claimed).
+    claim-task: func(
+        task-id: task-id,
+        agent-id: agent-id,
+    ) -> result<task, swarm-error>;
+
+    /// Get all tasks for a repo with a given status.
+    list-tasks: func(
+        repo: repo-id,
+        status: option<task-status>,
+    ) -> result<list<task>, swarm-error>;
+
+    // --- Agent run operations ---
+
+    /// Record the start of an agent run.
+    start-run: func(
+        task-id: task-id,
+        agent-id: agent-id,
+        model: string,
+    ) -> result<string, swarm-error>;
+
+    /// Record the completion of an agent run.
+    finish-run: func(
+        run-id: string,
+        result: task-result,
+    ) -> result<_, swarm-error>;
+
+    /// Get all currently running agents on a repo.
+    running-agents: func(
+        repo: repo-id,
+    ) -> result<list<agent-run>, swarm-error>;
+
+    // --- Vector search operations ---
+
+    /// Find past runs with similar diffs (by embedding).
+    find-similar-diffs: func(
+        embedding: embedding,
+        limit: u32,
+        min-similarity: f32,
+    ) -> result<list<similar-result>, swarm-error>;
+
+    /// Find past errors similar to the current context.
+    find-similar-errors: func(
+        embedding: embedding,
+        limit: u32,
+        min-similarity: f32,
+    ) -> result<list<similar-result>, swarm-error>;
+
+    /// Store an embedding for a completed run (for future similarity search).
+    store-embedding: func(
+        run-id: string,
+        embedding: embedding,
+    ) -> result<_, swarm-error>;
+}

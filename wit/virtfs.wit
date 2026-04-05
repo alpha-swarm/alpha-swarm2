@@ -1,0 +1,73 @@
+package alpha-swarm:virtfs@0.1.0;
+
+/// Interface for repository access via git worktrees.
+/// Agents get isolated working copies through this provider.
+interface repository {
+    use alpha-swarm:types/types.{repo-id, agent-id, file-entry, unified-diff, swarm-error};
+
+    /// Info about a registered repository.
+    record repo-info {
+        id: repo-id,
+        path: string,
+        default-branch: string,
+        worktree-count: u32,
+    }
+
+    /// Register a local repository for agent access.
+    register-repo: func(path: string) -> result<repo-info, swarm-error>;
+
+    /// Create an isolated git worktree for an agent.
+    /// Returns the worktree path.
+    create-worktree: func(
+        repo: repo-id,
+        agent: agent-id,
+    ) -> result<string, swarm-error>;
+
+    /// Remove a worktree after the agent is done.
+    remove-worktree: func(
+        repo: repo-id,
+        agent: agent-id,
+    ) -> result<_, swarm-error>;
+
+    /// Read a file from the agent's worktree.
+    read-file: func(
+        repo: repo-id,
+        agent: agent-id,
+        path: string,
+    ) -> result<string, swarm-error>;
+
+    /// Write a file in the agent's worktree.
+    write-file: func(
+        repo: repo-id,
+        agent: agent-id,
+        path: string,
+        content: string,
+    ) -> result<_, swarm-error>;
+
+    /// List files matching a glob pattern in the agent's worktree.
+    list-files: func(
+        repo: repo-id,
+        agent: agent-id,
+        glob: string,
+    ) -> result<list<string>, swarm-error>;
+
+    /// Apply a unified diff to the agent's worktree.
+    apply-diff: func(
+        repo: repo-id,
+        agent: agent-id,
+        diff: unified-diff,
+    ) -> result<_, swarm-error>;
+
+    /// Extract the diff between the agent's worktree and the base branch.
+    extract-diff: func(
+        repo: repo-id,
+        agent: agent-id,
+    ) -> result<unified-diff, swarm-error>;
+
+    /// Read multiple files at once (batch operation for context building).
+    read-files: func(
+        repo: repo-id,
+        agent: agent-id,
+        paths: list<string>,
+    ) -> result<list<file-entry>, swarm-error>;
+}
