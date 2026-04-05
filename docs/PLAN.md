@@ -422,16 +422,67 @@ The orchestrator model receives tool descriptions in its system prompt and emits
 
 This is the Claude Code / Cursor / SWE-agent loop — but running locally with our own models.
 
+### Goal Loop with Fuel Budget
+
+The entry agent/goal runs in a loop until it solves the problem OR runs out of fuel:
+
+```
+Goal: "add error handling to auth module"
+Budget: time_limit=600s, token_limit=50000, max_iterations=10
+
+Iteration 1:
+  → Orchestrator plans: 3 sub-tasks
+  → Agents execute
+  → Quality gate: FAIL (cargo clippy errors)
+  → Budget remaining: 540s, 38000 tokens
+
+Iteration 2 (exponential backoff: wait 2s):
+  → Orchestrator sees previous errors
+  → Re-plans with error context
+  → Agents fix the clippy issues
+  → Quality gate: FAIL (1 test fails)
+  → Budget remaining: 480s, 25000 tokens
+
+Iteration 3 (backoff: wait 4s):
+  → Orchestrator sees test failure
+  → Spawns focused fix agent
+  → Quality gate: PASS
+  → Done! Create PR.
+```
+
+**Fuel system:**
+- `time_fuel`: max wall-clock seconds (default: 600s = 10 min)
+- `token_fuel`: max total tokens across all iterations (default: 50000)
+- `max_iterations`: hard cap on retry loops (default: 10)
+- Exponential backoff between iterations: 2s, 4s, 8s, 16s... (cap at 60s)
+- Each iteration feeds previous errors/failures as context
+- Orchestrator can decide to give up early if it judges the task impossible
+
+**Budget tracking stored in SurrealDB:**
+```
+agent_run {
+  ...
+  iteration: 3,
+  total_tokens_used: 25000,
+  total_time_ms: 120000,
+  fuel_remaining_tokens: 25000,
+  fuel_remaining_time_ms: 480000,
+}
+```
+
+Dashboard shows fuel gauge on running tasks.
+
 ### Implementation Order
 1. Define `Tool` trait and `ToolResult` type
 2. Implement structured tools (read/write/list/grep/rename)
 3. Implement the tool-use loop in agent-core (prompt → parse tool call → execute → feed back)
-4. Add LSP tools (start LSP server, query via JSON-RPC)
-5. Add web search tools
-6. Update dashboard to show tool calls in the agent detail view
+4. Add goal retry loop with fuel budget in agent-daemon executor
+5. Add LSP tools (start LSP server, query via JSON-RPC)
+6. Add web search tools
+7. Update dashboard to show tool calls + fuel gauge in agent detail view
 
 ### Milestone: "Tool-Using Agents"
-Agents use structured tools for simple operations and LLM for complex reasoning. 10x faster for mechanical tasks, more accurate for complex ones.
+Agents use structured tools for simple operations and LLM for complex reasoning. Goal loop retries with exponential backoff until quality gate passes or fuel runs out. 10x faster for mechanical tasks, more accurate for complex ones.
 
 ---
 
