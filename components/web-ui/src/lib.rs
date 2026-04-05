@@ -148,27 +148,20 @@ fn api_events_impl(response_out: ResponseOutparam) {
         }
     }
 
-    // 3. Query recent completed/failed runs
-    let recent_query = "SELECT * FROM agent_run WHERE status != 'running' ORDER BY created_at DESC LIMIT 10";
+    // 3. Query recent completed/failed/pending runs — include ALL fields for detail view
+    let recent_query = "SELECT * FROM agent_run WHERE status != 'running' ORDER BY created_at DESC LIMIT 20";
     if let Ok(body) = surreal_query(recent_query) {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
             if let Some(runs) = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
                 for run in runs {
-                    let agent_id = run.get("agent_id").and_then(|a| a.as_str()).unwrap_or("unknown");
                     let status = run.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
-                    let model = run.get("model_used").and_then(|m| m.as_str()).unwrap_or("");
-                    let tokens_out = run.get("tokens_output").and_then(|t| t.as_u64()).unwrap_or(0);
-                    let duration = run.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0);
-
-                    let event_type = if status == "failed" { "agent_failed" } else { "agent_finished" };
-                    let data = serde_json::json!({
-                        "agent_id": agent_id,
-                        "status": status,
-                        "model": model,
-                        "tokens_output": tokens_out,
-                        "duration_ms": duration,
-                    });
-                    events.push_str(&format!("event: {event_type}\ndata: {}\n\n", data));
+                    let event_type = match status {
+                        "failed" => "agent_failed",
+                        "pending" => "agent_started",
+                        _ => "agent_finished",
+                    };
+                    // Send the full run data so the UI can show details
+                    events.push_str(&format!("event: {event_type}\ndata: {}\n\n", run));
                 }
             }
         }

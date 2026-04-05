@@ -258,10 +258,23 @@ select.input { appearance: auto; }
   <div class="page" id="page-agents">
     <h1>Agents</h1>
     <p class="subtitle">Live and recent agent activity</p>
-    <div class="section-title">Live</div>
-    <div id="live-agents"><p class="empty">No agents running</p></div>
-    <div class="section-title">Recent</div>
-    <div id="recent-agents"><p class="empty">Loading...</p></div>
+    <div style="display:flex;gap:16px">
+      <div style="flex:1;min-width:0">
+        <div class="section-title">Live</div>
+        <div id="live-agents"><p class="empty">No agents running</p></div>
+        <div class="section-title">Recent</div>
+        <div id="recent-agents"><p class="empty">Waiting for activity...</p></div>
+      </div>
+      <div id="agent-detail-panel" style="display:none;width:420px;flex-shrink:0">
+        <div class="card" style="position:sticky;top:20px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <h3 style="text-transform:none;color:var(--text);font-size:15px">Agent Detail</h3>
+            <button class="btn btn-sm" onclick="document.getElementById('agent-detail-panel').style.display='none'" style="padding:2px 8px">&times;</button>
+          </div>
+          <div id="agent-detail-content"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Models -->
@@ -340,55 +353,65 @@ function connectSSE() {
     } catch(e) {}
   });
 
+  // SSE is poll-on-reconnect: each connection gets the full current state.
+  // Replace (not append) the agents map on each batch.
+  let sseBatchAgents = {};
+  let sseBatchRecent = [];
+
   sseSource.addEventListener('agent_started', e => {
     try {
       const d = JSON.parse(e.data);
-      agents[d.agent_id] = { ...d, started: Date.now(), status: 'running' };
-      renderLiveAgents();
+      sseBatchAgents[d.agent_id] = { ...d, started: Date.now(), status: 'running' };
     } catch(e) {}
   });
 
   sseSource.addEventListener('agent_finished', e => {
     try {
       const d = JSON.parse(e.data);
-      agents[d.agent_id] = { ...d, status: d.status || 'passed' };
-      renderLiveAgents();
-      addRecentActivity(d);
-      // Refresh kanban if we're on a project detail page
-      if (currentPage === 'project-detail' && currentProjectName) {
-        loadProjectDetail(currentProjectName);
-      }
-      setTimeout(() => { delete agents[d.agent_id]; renderLiveAgents(); }, 8000);
+      sseBatchRecent.push({ ...d, status: d.status || 'passed' });
     } catch(e) {}
   });
 
   sseSource.addEventListener('agent_failed', e => {
     try {
       const d = JSON.parse(e.data);
-      agents[d.agent_id] = { ...d, status: 'failed' };
-      renderLiveAgents();
-      addRecentActivity(d);
-      if (currentPage === 'project-detail' && currentProjectName) {
-        loadProjectDetail(currentProjectName);
-      }
-      setTimeout(() => { delete agents[d.agent_id]; renderLiveAgents(); }, 12000);
+      sseBatchRecent.push({ ...d, status: 'failed' });
     } catch(e) {}
   });
 
-  // SSE is poll-on-reconnect (closes after each batch, browser reconnects ~3s).
-  // Only show offline after multiple consecutive failures.
-  let sseFailCount = 0;
-  sseSource.onopen = () => {
-    sseFailCount = 0;
-    document.getElementById('health-dot').classList.remove('offline');
-    document.getElementById('sys-status').textContent = 'Online';
-  };
+  // When SSE closes (end of batch), apply the complete state
   sseSource.onerror = () => {
+    // Apply batch: replace agents with current running set
+    agents = { ...sseBatchAgents };
+    renderLiveAgents();
+
+    // Update recent activity (deduplicate by agent_id)
+    for (const r of sseBatchRecent) {
+      addRecentActivity(r);
+    }
+
+    // Refresh kanban if on project page
+    if (currentPage === 'project-detail' && currentProjectName) {
+      loadProjectDetail(currentProjectName);
+    }
+
+    // Reset batch for next connection
+    sseBatchAgents = {};
+    sseBatchRecent = [];
+
+    // Track failures for offline detection
     sseFailCount++;
     if (sseFailCount > 5) {
       document.getElementById('health-dot').classList.add('offline');
       document.getElementById('sys-status').textContent = 'Offline';
     }
+  };
+
+  let sseFailCount = 0;
+  sseSource.onopen = () => {
+    sseFailCount = 0;
+    document.getElementById('health-dot').classList.remove('offline');
+    document.getElementById('sys-status').textContent = 'Online';
   };
 }
 
@@ -410,19 +433,93 @@ function renderLiveAgents() {
   }).join('');
 }
 
+let recentActivityData = [];
+
 function addRecentActivity(d) {
-  const el = document.getElementById('recent-activity');
-  if (el.querySelector('.empty')) el.innerHTML = '';
+  // Deduplicate by agent_id + task
+  const key = (d.agent_id || '') + ':' + (d.task_description || d.task || '');
+  if (recentActivityData.some(r => ((r.agent_id || '') + ':' + (r.task_description || r.task || '')) === key)) return;
+  recentActivityData.unshift(d);
+  if (recentActivityData.length > 20) recentActivityData.pop();
+  renderRecentActivity();
+}
+
+function renderRecentActivity() {
+  // Render in both overview and agents page
+  for (const elId of ['recent-activity', 'recent-agents']) {
+    const el = document.getElementById(elId);
+    if (!el) continue;
+    if (!recentActivityData.length) { el.innerHTML = '<p class="empty">No recent activity</p>'; continue; }
+    el.innerHTML = recentActivityData.map((d, i) => {
+      const status = d.status || 'unknown';
+      const task = d.task_description || d.task || d.agent_id || '?';
+      const model = d.model_used || d.model || '';
+      const tokens = d.tokens_output || 0;
+      const dur = d.duration_ms ? (d.duration_ms/1000).toFixed(1) + 's' : '';
+      return `<div class="agent-card" style="cursor:pointer" onclick="showAgentDetail(${i})">
+        <div class="info">
+          <span class="badge ${status}">${status}</span>
+          <div class="task-name">${task.substring(0, 60)}</div>
+          <div class="meta">${model} &middot; ${tokens} tokens &middot; ${dur}</div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+}
+
+function showAgentDetail(idx) {
+  const d = recentActivityData[idx];
+  if (!d) return;
+
+  const panel = document.getElementById('agent-detail-panel');
+  const content = document.getElementById('agent-detail-content');
+  panel.style.display = '';
+
   const status = d.status || 'unknown';
-  const html = `<div class="agent-card">
-    <div class="info">
+  const task = d.task_description || d.task || '';
+  const model = d.model_used || d.model || '';
+  const agent = d.agent_id || '';
+  const project = d.project || '';
+  const tokens_in = d.tokens_input || 0;
+  const tokens_out = d.tokens_output || 0;
+  const duration = d.duration_ms || 0;
+  const created = d.created_at || '';
+  const error = d.error_message || '';
+  const diff = d.diff || '';
+  const qg = d.quality_gate_passed;
+  const files = d.files_modified || [];
+
+  content.innerHTML = `
+    <div style="margin-bottom:12px">
       <span class="badge ${status}">${status}</span>
-      <div class="task-name">${d.task || d.agent_id || '?'}</div>
-      <div class="meta">${d.model || ''} &middot; ${d.tokens_output || 0} tokens &middot; ${d.duration_ms ? (d.duration_ms/1000).toFixed(1) + 's' : ''}</div>
+      ${qg === true ? '<span class="badge passed" style="margin-left:4px">QA passed</span>' : ''}
+      ${qg === false ? '<span class="badge failed" style="margin-left:4px">QA failed</span>' : ''}
     </div>
-  </div>`;
-  el.insertAdjacentHTML('afterbegin', html);
-  while (el.children.length > 15) el.removeChild(el.lastChild);
+    <div style="font-size:14px;font-weight:500;margin-bottom:12px;line-height:1.4">${task}</div>
+    <div class="detail-row"><span class="detail-label">Project</span><span class="detail-value">${project}</span></div>
+    <div class="detail-row"><span class="detail-label">Model</span><span class="detail-value">${model}</span></div>
+    <div class="detail-row"><span class="detail-label">Agent</span><span class="detail-value">${agent}</span></div>
+    <div class="detail-row"><span class="detail-label">Tokens</span><span class="detail-value">${tokens_in} in / ${tokens_out} out</span></div>
+    <div class="detail-row"><span class="detail-label">Duration</span><span class="detail-value">${(duration / 1000).toFixed(1)}s</span></div>
+    <div class="detail-row"><span class="detail-label">Created</span><span class="detail-value">${created.substring(0, 19).replace('T', ' ')}</span></div>
+    ${files.length ? `<div class="detail-row"><span class="detail-label">Files</span><span class="detail-value">${files.join(', ')}</span></div>` : ''}
+    ${error ? `<div style="margin-top:12px"><div class="detail-label" style="margin-bottom:4px;font-size:12px">Error Output</div><div class="detail-error">${error.substring(0, 1000)}</div></div>` : ''}
+    ${diff ? `<div style="margin-top:12px"><div class="detail-label" style="margin-bottom:4px;font-size:12px">Diff</div><pre style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;font-size:12px;overflow-x:auto;max-height:300px;color:var(--text-secondary)">${diff.substring(0, 2000).replace(/</g,'&lt;')}</pre></div>` : ''}
+    <div style="margin-top:16px">
+      <button class="btn btn-primary btn-sm" onclick="rerunFromAgent(${idx})">Re-run</button>
+    </div>
+  `;
+}
+
+function rerunFromAgent(idx) {
+  const d = recentActivityData[idx];
+  if (!d) return;
+  fetch('/api/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task: d.task_description || d.task, project: d.project || 'default', files: [] }),
+  }).catch(() => {});
+  document.getElementById('agent-detail-panel').style.display = 'none';
 }
 
 // --- Data loading ---
