@@ -8,6 +8,7 @@ members = [
     "crates/orchestrator",
     "crates/alpha-swarm-cli",
     "components/agent-worker",
+    "components/web-ui",
 ]
 resolver = "2"
 

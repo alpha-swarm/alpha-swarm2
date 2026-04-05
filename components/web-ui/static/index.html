@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>alpha-swarm</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --dim: #8b949e; --green: #3fb950; --red: #f85149; --blue: #58a6ff; --yellow: #d29922; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); padding: 20px; }
+  h1 { font-size: 1.5em; margin-bottom: 4px; }
+  h2 { font-size: 1.1em; color: var(--dim); margin: 20px 0 10px; }
+  .subtitle { color: var(--dim); font-size: 0.9em; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .card h3 { font-size: 0.95em; margin-bottom: 8px; }
+  .card .value { font-size: 2em; font-weight: bold; }
+  .card .label { color: var(--dim); font-size: 0.85em; }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; font-weight: 600; }
+  .status.running { background: rgba(210, 153, 34, 0.2); color: var(--yellow); }
+  .status.passed { background: rgba(63, 185, 80, 0.2); color: var(--green); }
+  .status.failed { background: rgba(248, 81, 73, 0.2); color: var(--red); }
+  .status.connected { background: rgba(63, 185, 80, 0.2); color: var(--green); }
+  .status.disconnected { background: rgba(248, 81, 73, 0.2); color: var(--red); }
+  #agents { min-height: 60px; }
+  .agent-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+  .agent-card .info { flex: 1; }
+  .agent-card .model { color: var(--blue); font-size: 0.85em; }
+  .agent-card .task { font-size: 0.9em; margin-top: 4px; }
+  .agent-card .elapsed { color: var(--dim); font-size: 0.85em; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 0.9em; }
+  th { color: var(--dim); font-weight: 500; }
+  .models-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-top: 8px; }
+  .model-chip { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; font-size: 0.85em; }
+  .model-chip .name { font-weight: 600; color: var(--blue); }
+  .model-chip .meta { color: var(--dim); font-size: 0.8em; }
+  #event-log { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 300px; overflow-y: auto; font-family: monospace; font-size: 0.8em; }
+  #event-log .event { padding: 2px 0; border-bottom: 1px solid var(--border); }
+  .event .time { color: var(--dim); }
+  .event .type { color: var(--blue); font-weight: 600; }
+  .empty { color: var(--dim); font-style: italic; padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>alpha-swarm</h1>
+<p class="subtitle">Distributed agent orchestration &mdash; <span id="sse-status" class="status disconnected">connecting...</span></p>
+
+<div class="grid">
+  <div class="card">
+    <h3>Active Agents</h3>
+    <div class="value" id="active-count">0</div>
+    <div class="label">currently running</div>
+  </div>
+  <div class="card">
+    <h3>Models Available</h3>
+    <div class="value" id="model-count">-</div>
+    <div class="label">across all backends</div>
+  </div>
+  <div class="card">
+    <h3>System</h3>
+    <div class="value" id="system-status">-</div>
+    <div class="label" id="system-detail"></div>
+  </div>
+</div>
+
+<h2>Live Agents</h2>
+<div id="agents"><p class="empty">No agents running</p></div>
+
+<h2>Models</h2>
+<div id="models" class="models-grid"><p class="empty">Loading...</p></div>
+
+<h2>Event Log</h2>
+<div id="event-log"><p class="empty">Waiting for events...</p></div>
+
+<script>
+// --- SSE Connection ---
+let eventLog = document.getElementById('event-log');
+let sseStatus = document.getElementById('sse-status');
+let agents = {};
+
+function connectSSE() {
+  const evtSource = new EventSource('/api/events');
+
+  evtSource.onopen = () => {
+    sseStatus.textContent = 'connected';
+    sseStatus.className = 'status connected';
+  };
+
+  evtSource.onerror = () => {
+    sseStatus.textContent = 'disconnected';
+    sseStatus.className = 'status disconnected';
+  };
+
+  evtSource.addEventListener('status', (e) => {
+    const data = JSON.parse(e.data);
+    document.getElementById('active-count').textContent = data.active_agents || 0;
+    addLogEntry('status', e.data);
+  });
+
+  evtSource.addEventListener('agent_started', (e) => {
+    const data = JSON.parse(e.data);
+    agents[data.agent_id] = { ...data, started: Date.now() };
+    renderAgents();
+    addLogEntry('agent_started', e.data);
+  });
+
+  evtSource.addEventListener('agent_finished', (e) => {
+    const data = JSON.parse(e.data);
+    if (agents[data.agent_id]) {
+      agents[data.agent_id].status = data.status;
+      agents[data.agent_id].edits = data.edits;
+    }
+    renderAgents();
+    addLogEntry('agent_finished', e.data);
+    setTimeout(() => { delete agents[data.agent_id]; renderAgents(); }, 5000);
+  });
+
+  evtSource.addEventListener('agent_failed', (e) => {
+    const data = JSON.parse(e.data);
+    if (agents[data.agent_id]) {
+      agents[data.agent_id].status = 'failed';
+      agents[data.agent_id].error = data.error;
+    }
+    renderAgents();
+    addLogEntry('agent_failed', e.data);
+    setTimeout(() => { delete agents[data.agent_id]; renderAgents(); }, 10000);
+  });
+}
+
+function renderAgents() {
+  const el = document.getElementById('agents');
+  const keys = Object.keys(agents);
+  document.getElementById('active-count').textContent = keys.filter(k => !agents[k].status || agents[k].status === 'running').length;
+
+  if (keys.length === 0) {
+    el.innerHTML = '<p class="empty">No agents running</p>';
+    return;
+  }
+
+  el.innerHTML = keys.map(id => {
+    const a = agents[id];
+    const elapsed = a.started ? Math.round((Date.now() - a.started) / 1000) : 0;
+    const status = a.status || 'running';
+    return `<div class="agent-card">
+      <div class="info">
+        <span class="status ${status}">${status}</span>
+        <span class="model">${a.model || '?'}</span>
+        <div class="task">${a.task || a.agent_id}</div>
+      </div>
+      <div class="elapsed">${elapsed}s</div>
+    </div>`;
+  }).join('');
+}
+
+function addLogEntry(type, data) {
+  const log = document.getElementById('event-log');
+  if (log.querySelector('.empty')) log.innerHTML = '';
+  const time = new Date().toLocaleTimeString();
+  const div = document.createElement('div');
+  div.className = 'event';
+  div.innerHTML = `<span class="time">${time}</span> <span class="type">${type}</span> ${data}`;
+  log.prepend(div);
+  while (log.children.length > 100) log.removeChild(log.lastChild);
+}
+
+// --- Load models ---
+async function loadModels() {
+  try {
+    const res = await fetch('/api/models');
+    const models = await res.json();
+    const el = document.getElementById('models');
+    document.getElementById('model-count').textContent = models.length || 0;
+
+    if (!models.length) { el.innerHTML = '<p class="empty">No models found</p>'; return; }
+
+    el.innerHTML = models.map(m => `<div class="model-chip">
+      <div class="name">${m.name || m.model || '?'}</div>
+      <div class="meta">${m.details?.parameter_size || ''} &middot; ${m.details?.family || ''}</div>
+    </div>`).join('');
+  } catch(e) {
+    document.getElementById('models').innerHTML = '<p class="empty">Failed to load models</p>';
+  }
+}
+
+// --- Health check ---
+async function checkHealth() {
+  try {
+    const res = await fetch('/api/health');
+    const data = await res.json();
+    document.getElementById('system-status').textContent = data.status === 'ok' ? 'Online' : 'Error';
+    document.getElementById('system-detail').textContent = 'wasmCloud 2.0 WASI component';
+  } catch(e) {
+    document.getElementById('system-status').textContent = 'Offline';
+  }
+}
+
+// --- Init ---
+connectSSE();
+loadModels();
+checkHealth();
+setInterval(loadModels, 30000);
+</script>
+</body>
+</html>
