@@ -124,6 +124,33 @@ impl KnowledgeStore {
         self.list_runs(project, Some(RunStatus::Running)).await
     }
 
+    /// Get all pending tasks across all projects.
+    pub async fn list_pending(&self) -> Result<Vec<AgentRun>> {
+        let mut result = self.db
+            .query("SELECT * FROM agent_run WHERE status = 'pending' ORDER BY created_at ASC LIMIT 20")
+            .await
+            .context("Failed to list pending runs")?;
+
+        let rows: Vec<serde_json::Value> = result.take(0)?;
+        Ok(rows.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect())
+    }
+
+    /// Look up the repo_url for a project.
+    pub async fn get_project_repo(&self, project_name: &str) -> Result<Option<String>> {
+        let project_name = project_name.to_string();
+        let mut result = self.db
+            .query("SELECT repo_url FROM project WHERE name = $name LIMIT 1")
+            .bind(("name", project_name))
+            .await
+            .context("Failed to query project")?;
+
+        let rows: Vec<serde_json::Value> = result.take(0)?;
+        Ok(rows.first()
+            .and_then(|v| v.get("repo_url"))
+            .and_then(|u| u.as_str())
+            .map(String::from))
+    }
+
     /// Find past runs with similar task descriptions (by embedding cosine similarity).
     pub async fn find_similar(
         &self,

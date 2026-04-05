@@ -526,9 +526,9 @@ fn api_metrics(response_out: ResponseOutparam, project: &str) {
     }
 }
 
-const SYSTEM_PROMPT: &str = "You are a code modification agent. You receive a task and files, then output precise edits.\n\nOUTPUT FORMAT:\n<<<EDIT path/to/file\n--- OLD\nexact lines to replace\n--- NEW\nreplacement lines\n>>>\n\nOutput ONLY edit blocks.";
-
 fn api_submit_run(response_out: ResponseOutparam, body: &[u8]) {
+    // Thin layer: store task as "pending" in SurrealDB, return immediately.
+    // The agent-daemon picks up pending tasks and executes them.
     let body_str = String::from_utf8_lossy(body);
     let parsed: serde_json::Value = match serde_json::from_str(&body_str) {
         Ok(v) => v,
@@ -541,154 +541,30 @@ fn api_submit_run(response_out: ResponseOutparam, body: &[u8]) {
     let task = parsed.get("task").and_then(|t| t.as_str()).unwrap_or("");
     let project = parsed.get("project").and_then(|p| p.as_str()).unwrap_or("default");
 
-    // Use app-wide defaults
-    let ollama_url = "http://100.81.10.8:11434";
-    let model = "codellama:34b";
-    let files = parsed.get("files").and_then(|f| f.as_array()).cloned().unwrap_or_default();
-
-    // Store "running" record immediately so kanban shows it
-    let store_running = format!(
-        "CREATE agent_run SET project='{}', task_description='{}', agent_id='web-ui', model_used='{}', status='running', tokens_input=0, tokens_output=0, duration_ms=0, created_at=time::now(), files_modified=[]",
-        project.replace('\'', ""),
-        task.replace('\'', "").chars().take(200).collect::<String>(),
-        model,
-    );
-    let _ = surreal_query(&store_running);
-
-    // Build file context
-    let mut file_context = String::new();
-    for f in &files {
-        let path = f.get("path").and_then(|p| p.as_str()).unwrap_or("");
-        let content = f.get("content").and_then(|c| c.as_str()).unwrap_or("");
-        file_context.push_str(&format!("=== {} ===\n{}\n\n", path, content));
+    if task.is_empty() {
+        respond_json(response_out, 400, r#"{"error":"task is required"}"#);
+        return;
     }
-    let user_msg = format!("TASK: {}\n\nFILES:\n{}", task, file_context);
 
-    // Build Ollama chat request
-    let system_escaped = SYSTEM_PROMPT.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-    let user_escaped = user_msg.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-    let chat_body = format!(
-        r#"{{"model":"{}","messages":[{{"role":"system","content":"{}"}},{{"role":"user","content":"{}"}}],"stream":false}}"#,
-        model, system_escaped, user_escaped
+    // Store as pending — agent-daemon will pick it up
+    let query = format!(
+        "CREATE agent_run SET project='{}', task_description='{}', agent_id='pending', model_used='auto', status='pending', tokens_input=0, tokens_output=0, duration_ms=0, created_at=time::now(), files_modified=[]",
+        project.replace('\'', ""),
+        task.replace('\'', "").chars().take(500).collect::<String>(),
     );
 
-    // Call Ollama
-    let start = std::time::SystemTime::now();
-    let ollama_result = http_post(&format!("{}/api/chat", ollama_url), &chat_body);
-    let duration_ms = start.elapsed().map(|d| d.as_millis() as u64).unwrap_or(0);
-
-    match ollama_result {
-        Ok(resp_body) => {
-            let resp_json: serde_json::Value = serde_json::from_str(&resp_body).unwrap_or_default();
-            let content = resp_json["message"]["content"].as_str().unwrap_or("");
-            let tokens_in = resp_json["prompt_eval_count"].as_u64().unwrap_or(0);
-            let tokens_out = resp_json["eval_count"].as_u64().unwrap_or(0);
-
-            // Parse edits
-            let edits = edit_parser::parse_edits(content).unwrap_or_default();
-            let edit_count = edits.len();
-
-            // Apply edits to files
-            let mut modified_files = Vec::new();
-            for edit in &edits {
-                if let edit_parser::FileEdit::Edit { path, old, new } = edit {
-                    if let Some(f) = files.iter().find(|f| f.get("path").and_then(|p| p.as_str()) == Some(path)) {
-                        let orig = f.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                        let updated = orig.replacen(old.as_str(), new.as_str(), 1);
-                        modified_files.push(serde_json::json!({"path": path, "content": updated}));
-                    }
-                }
-            }
-
-            let status = if edit_count > 0 { "passed" } else { "skipped" };
-
-            // Store in SurrealDB
-            let store_query = format!(
-                "CREATE agent_run SET project='{}', task_description='{}', agent_id='web-ui', model_used='{}', status='{}', tokens_input={}, tokens_output={}, duration_ms={}, created_at=time::now(), files_modified=[]",
-                project.replace('\'', ""),
-                task.replace('\'', "").chars().take(200).collect::<String>(),
-                model.replace('\'', ""),
-                status,
-                tokens_in,
-                tokens_out,
-                duration_ms,
-            );
-            let _ = surreal_query(&store_query);
-
-            let resp = serde_json::json!({
-                "status": status,
-                "model": model,
-                "edits": edit_count,
-                "tokens_input": tokens_in,
-                "tokens_output": tokens_out,
-                "duration_ms": duration_ms,
-                "modified_files": modified_files,
-            });
-            respond_json(response_out, 200, &resp.to_string());
+    match surreal_query(&query) {
+        Ok(_) => {
+            respond_json(response_out, 202, &format!(
+                r#"{{"status":"accepted","project":"{}","task":"{}"}}"#,
+                project,
+                task.chars().take(80).collect::<String>(),
+            ));
         }
         Err(e) => {
-            // Store failure
-            let store_query = format!(
-                "CREATE agent_run SET project='{}', task_description='{}', agent_id='web-ui', model_used='{}', status='failed', error_message='{}', duration_ms={}, created_at=time::now(), tokens_input=0, tokens_output=0, files_modified=[]",
-                project.replace('\'', ""),
-                task.replace('\'', "").chars().take(200).collect::<String>(),
-                model.replace('\'', ""),
-                e.replace('\'', "").chars().take(200).collect::<String>(),
-                duration_ms,
-            );
-            let _ = surreal_query(&store_query);
-
-            respond_json(response_out, 500, &format!(r#"{{"error":"inference failed: {}"}}"#, e.replace('"', "'")));
+            respond_json(response_out, 502, &format!(r#"{{"error":"failed to store task: {}"}}"#, e));
         }
     }
-}
-
-fn http_post(url: &str, body: &str) -> Result<String, String> {
-    let headers = Fields::new();
-    headers.append(&"content-type".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
-
-    let request = OutgoingRequest::new(headers);
-    request.set_method(&Method::Post).map_err(|_| "method")?;
-    request.set_scheme(Some(&Scheme::Http)).map_err(|_| "scheme")?;
-
-    let url_stripped = url.strip_prefix("http://").unwrap_or(url);
-    let (authority, path) = url_stripped.split_once('/').unwrap_or((url_stripped, ""));
-    request.set_authority(Some(authority)).map_err(|_| "authority")?;
-    request.set_path_with_query(Some(&format!("/{}", path))).map_err(|_| "path")?;
-
-    let out_body = request.body().map_err(|_| "body")?;
-    let out_stream = out_body.write().map_err(|_| "stream")?;
-    out_stream.blocking_write_and_flush(body.as_bytes()).map_err(|e| format!("write: {e:?}"))?;
-    drop(out_stream);
-    OutgoingBody::finish(out_body, None).map_err(|_| "finish")?;
-
-    let future_response = outgoing_handler::handle(request, None).map_err(|e| format!("send: {e:?}"))?;
-    let pollable = future_response.subscribe();
-    pollable.block();
-
-    let response = future_response.get()
-        .ok_or("no response")?
-        .map_err(|_| "response error")?
-        .map_err(|e| format!("http: {e:?}"))?;
-
-    let status = response.status();
-    let resp_body = response.consume().map_err(|_| "consume")?;
-    let resp_stream = resp_body.stream().map_err(|_| "stream")?;
-    let mut bytes = Vec::new();
-    loop {
-        match resp_stream.read(65536) {
-            Ok(chunk) if chunk.is_empty() => break,
-            Ok(chunk) => bytes.extend_from_slice(&chunk),
-            Err(_) => break,
-        }
-    }
-    drop(resp_stream);
-    let _ = IncomingBody::finish(resp_body);
-
-    if status != 200 {
-        return Err(format!("HTTP {}: {}", status, String::from_utf8_lossy(&bytes)));
-    }
-    String::from_utf8(bytes).map_err(|e| format!("utf8: {e}"))
 }
 
 fn http_get(url: &str) -> Result<String, String> {

@@ -62,6 +62,12 @@ pub enum SwarmEvent {
         duration_ms: u64,
         timestamp: String,
     },
+    TaskSubmitted {
+        project: String,
+        task_id: String,
+        goal: String,
+        timestamp: String,
+    },
 }
 
 impl SwarmEvent {
@@ -72,6 +78,7 @@ impl SwarmEvent {
             Self::AgentFailed { project, .. } => format!("alpha-swarm.{project}.agent.failed"),
             Self::SwarmPlanned { project, .. } => format!("alpha-swarm.{project}.swarm.planned"),
             Self::SwarmCompleted { project, .. } => format!("alpha-swarm.{project}.swarm.completed"),
+            Self::TaskSubmitted { project, .. } => format!("alpha-swarm.{project}.task.submitted"),
             Self::QualityChecked { project, .. } => format!("alpha-swarm.{project}.quality.checked"),
         }
     }
@@ -83,7 +90,8 @@ impl SwarmEvent {
             | Self::AgentFailed { project, .. }
             | Self::SwarmPlanned { project, .. }
             | Self::SwarmCompleted { project, .. }
-            | Self::QualityChecked { project, .. } => project,
+            | Self::QualityChecked { project, .. }
+            | Self::TaskSubmitted { project, .. } => project,
         }
     }
 

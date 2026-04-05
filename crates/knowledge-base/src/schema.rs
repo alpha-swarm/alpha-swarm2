@@ -22,6 +22,7 @@ pub struct AgentRun {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
+    Pending,
     Running,
     Passed,
     Failed,

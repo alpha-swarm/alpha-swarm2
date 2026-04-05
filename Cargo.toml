@@ -8,6 +8,7 @@ members = [
     "crates/knowledge-base",
     "crates/events",
     "crates/orchestrator",
+    "crates/agent-daemon",
     "crates/event-consumer",
     "crates/alpha-swarm-cli",
     "components/agent-worker",
