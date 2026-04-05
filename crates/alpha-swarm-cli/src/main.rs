@@ -55,6 +55,11 @@ enum Commands {
         #[arg(short, long)]
         project: String,
     },
+    /// Show aggregated metrics for a project
+    Metrics {
+        #[arg(short, long)]
+        project: String,
+    },
 }
 
 fn parse_complexity(s: &str) -> Complexity {
@@ -104,6 +109,34 @@ async fn main() -> Result<()> {
                 println!("{:?}: {}", kind, if healthy { "healthy" } else { "unreachable" });
             }
         }
+        Commands::Metrics { project } => {
+            let kb = setup::get_knowledge_store().await?.context("Knowledge base not available")?;
+            let runs = kb.list_runs(&project, None).await?;
+            let metrics = knowledge_base::ProjectMetrics::from_runs(&runs);
+
+            println!("\n=== Metrics: {project} ===");
+            println!("Total runs:  {}", metrics.total_runs);
+            println!("Passed:      {} ({:.0}%)", metrics.passed, metrics.pass_rate * 100.0);
+            println!("Failed:      {}", metrics.failed);
+            println!("Skipped:     {}", metrics.skipped);
+            println!("Tokens:      {} in / {} out", metrics.total_tokens_input, metrics.total_tokens_output);
+            println!("Avg duration: {}ms", metrics.avg_duration_ms);
+
+            if !metrics.models_used.is_empty() {
+                println!("\n--- Per Model ---");
+                println!("{:<25} {:<6} {:<6} {:<6} {:<8} {:<10} {:<10}", "MODEL", "RUNS", "PASS", "FAIL", "RATE", "AVG TOK", "AVG MS");
+                for m in &metrics.models_used {
+                    println!("{:<25} {:<6} {:<6} {:<6} {:<8.0}% {:<10} {:<10}",
+                        m.model.chars().take(24).collect::<String>(),
+                        m.runs, m.passed, m.failed,
+                        m.pass_rate * 100.0,
+                        m.avg_tokens_output,
+                        m.avg_duration_ms,
+                    );
+                }
+            }
+        }
+
         Commands::History { project } => {
             let kb = setup::get_knowledge_store().await?.context("Knowledge base not available")?;
             let runs = kb.list_runs(&project, None).await?;
