@@ -28,8 +28,19 @@ impl Guest for WebUi {
                 respond_json(response_out, 200, r#"{"status":"ok"}"#);
             }
             (Method::Get, p) if p.starts_with("/api/events") => {
-                // SSE endpoint — for now return a snapshot
                 api_events(response_out);
+            }
+            (Method::Get, p) if p.starts_with("/api/runs/") => {
+                let project = p.strip_prefix("/api/runs/").unwrap_or("default");
+                api_runs(response_out, project);
+            }
+            (Method::Get, p) if p.starts_with("/api/metrics/") => {
+                let project = p.strip_prefix("/api/metrics/").unwrap_or("default");
+                api_metrics(response_out, project);
+            }
+            (Method::Post, "/api/run") => {
+                let body = read_body(&request);
+                api_submit_run(response_out, &body);
             }
             _ => {
                 respond_json(response_out, 404, r#"{"error":"not found"}"#);
@@ -97,6 +108,141 @@ fn api_events(response_out: ResponseOutparam) {
     drop(stream);
     OutgoingBody::finish(body, None).unwrap();
     ResponseOutparam::set(response_out, Ok(response));
+}
+
+fn surreal_query(query: &str) -> Result<String, String> {
+    let surreal_url = "http://127.0.0.1:8000";
+    let headers = Fields::new();
+    headers.append(&"content-type".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append(&"accept".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append(&"NS".to_string(), &b"alpha_swarm"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append(&"DB".to_string(), &b"swarm"[..]).map_err(|e| format!("{e:?}"))?;
+    // Basic auth: root:root
+    headers.append(&"authorization".to_string(), &b"Basic cm9vdDpyb290"[..]).map_err(|e| format!("{e:?}"))?;
+
+    let request = OutgoingRequest::new(headers);
+    request.set_method(&Method::Post).map_err(|_| "method")?;
+    request.set_scheme(Some(&Scheme::Http)).map_err(|_| "scheme")?;
+    request.set_authority(Some("127.0.0.1:8000")).map_err(|_| "authority")?;
+    request.set_path_with_query(Some("/sql")).map_err(|_| "path")?;
+
+    let out_body = request.body().map_err(|_| "body")?;
+    let out_stream = out_body.write().map_err(|_| "stream")?;
+    out_stream.blocking_write_and_flush(query.as_bytes()).map_err(|e| format!("write: {e:?}"))?;
+    drop(out_stream);
+    OutgoingBody::finish(out_body, None).map_err(|_| "finish")?;
+
+    let future_response = outgoing_handler::handle(request, None).map_err(|e| format!("send: {e:?}"))?;
+    let pollable = future_response.subscribe();
+    pollable.block();
+
+    let response = future_response.get()
+        .ok_or("no response")?
+        .map_err(|_| "response error")?
+        .map_err(|e| format!("http: {e:?}"))?;
+
+    let resp_body = response.consume().map_err(|_| "consume")?;
+    let resp_stream = resp_body.stream().map_err(|_| "stream")?;
+    let mut bytes = Vec::new();
+    loop {
+        match resp_stream.read(65536) {
+            Ok(chunk) if chunk.is_empty() => break,
+            Ok(chunk) => bytes.extend_from_slice(&chunk),
+            Err(_) => break,
+        }
+    }
+    drop(resp_stream);
+    let _ = IncomingBody::finish(resp_body);
+
+    String::from_utf8(bytes).map_err(|e| format!("utf8: {e}"))
+}
+
+fn api_runs(response_out: ResponseOutparam, project: &str) {
+    let query = format!(
+        "SELECT * FROM agent_run WHERE project = '{}' ORDER BY created_at DESC LIMIT 50",
+        project.replace('\'', "")
+    );
+    match surreal_query(&query) {
+        Ok(body) => {
+            // SurrealDB returns [{result: [...], ...}], extract the result array
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let runs = parsed.get(0)
+                .and_then(|r| r.get("result"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(vec![]));
+            respond_json(response_out, 200, &serde_json::to_string(&runs).unwrap_or_default());
+        }
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"surrealdb: {}"}}"#, e)),
+    }
+}
+
+fn api_metrics(response_out: ResponseOutparam, project: &str) {
+    let query = format!(
+        "SELECT status, model_used, tokens_input, tokens_output, duration_ms FROM agent_run WHERE project = '{}'",
+        project.replace('\'', "")
+    );
+    match surreal_query(&query) {
+        Ok(body) => {
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let runs = parsed.get(0)
+                .and_then(|r| r.get("result"))
+                .and_then(|r| r.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            let total = runs.len();
+            let passed = runs.iter().filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("passed")).count();
+            let failed = runs.iter().filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("failed")).count();
+            let pass_rate = if total > 0 { passed as f64 / total as f64 } else { 0.0 };
+            let total_tokens: u64 = runs.iter()
+                .filter_map(|r| r.get("tokens_output").and_then(|t| t.as_u64()))
+                .sum();
+            let avg_duration: u64 = if total > 0 {
+                runs.iter()
+                    .filter_map(|r| r.get("duration_ms").and_then(|d| d.as_u64()))
+                    .sum::<u64>() / total as u64
+            } else { 0 };
+
+            let resp = format!(
+                r#"{{"total_runs":{},"passed":{},"failed":{},"pass_rate":{:.2},"total_tokens_output":{},"avg_duration_ms":{}}}"#,
+                total, passed, failed, pass_rate, total_tokens, avg_duration
+            );
+            respond_json(response_out, 200, &resp);
+        }
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"surrealdb: {}"}}"#, e)),
+    }
+}
+
+fn api_submit_run(response_out: ResponseOutparam, body: &[u8]) {
+    // Forward the task to the agent-worker component via HTTP
+    let body_str = String::from_utf8_lossy(body);
+    let parsed: serde_json::Value = match serde_json::from_str(&body_str) {
+        Ok(v) => v,
+        Err(e) => {
+            respond_json(response_out, 400, &format!(r#"{{"error":"invalid json: {}"}}"#, e));
+            return;
+        }
+    };
+
+    // Build the request for agent-worker
+    let task = parsed.get("task").and_then(|t| t.as_str()).unwrap_or("");
+    let ollama_url = parsed.get("ollama_url").and_then(|u| u.as_str()).unwrap_or("http://localhost:11434");
+    let model = parsed.get("model").and_then(|m| m.as_str()).unwrap_or("qwen2.5-coder:7b");
+    let files = parsed.get("files").cloned().unwrap_or(serde_json::Value::Array(vec![]));
+
+    let agent_req = serde_json::json!({
+        "task": task,
+        "model": model,
+        "ollama_url": ollama_url,
+        "files": files,
+    });
+
+    // For now, return accepted — full integration would forward to agent-worker
+    respond_json(response_out, 202, &format!(
+        r#"{{"status":"accepted","task":"{}","model":"{}"}}"#,
+        task.chars().take(50).collect::<String>(),
+        model,
+    ));
 }
 
 fn http_get(url: &str) -> Result<String, String> {

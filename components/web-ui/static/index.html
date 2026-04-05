@@ -71,6 +71,14 @@
 <h2>Models</h2>
 <div id="models" class="models-grid"><p class="empty">Loading...</p></div>
 
+<h2>Recent Runs <small style="color:var(--dim)">(project: <input id="project-input" value="default" style="background:var(--card);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:4px;width:120px" onchange="loadRuns();loadMetrics()">)</small></h2>
+<div id="runs-metrics" class="grid" style="margin-bottom:12px">
+  <div class="card"><h3>Pass Rate</h3><div class="value" id="pass-rate">-</div></div>
+  <div class="card"><h3>Total Runs</h3><div class="value" id="total-runs">-</div></div>
+  <div class="card"><h3>Avg Duration</h3><div class="value" id="avg-duration">-</div><div class="label">ms</div></div>
+</div>
+<div id="runs"><p class="empty">Loading runs...</p></div>
+
 <h2>Event Log</h2>
 <div id="event-log"><p class="empty">Waiting for events...</p></div>
 
@@ -196,11 +204,54 @@ async function checkHealth() {
   }
 }
 
+// --- Load runs ---
+async function loadRuns() {
+  const project = document.getElementById('project-input').value || 'default';
+  try {
+    const res = await fetch(`/api/runs/${project}`);
+    const runs = await res.json();
+    const el = document.getElementById('runs');
+
+    if (!runs.length) { el.innerHTML = '<p class="empty">No runs found</p>'; return; }
+
+    el.innerHTML = `<table><tr><th>Status</th><th>Model</th><th>Task</th><th>Tokens</th><th>Duration</th></tr>` +
+      runs.slice(0, 20).map(r => {
+        const status = r.status || 'unknown';
+        const task = (r.task_description || '').substring(0, 50);
+        return `<tr>
+          <td><span class="status ${status}">${status}</span></td>
+          <td>${(r.model_used || '').substring(0, 20)}</td>
+          <td>${task}</td>
+          <td>${r.tokens_output || 0}</td>
+          <td>${r.duration_ms || 0}ms</td>
+        </tr>`;
+      }).join('') + '</table>';
+  } catch(e) {
+    document.getElementById('runs').innerHTML = '<p class="empty">Failed to load runs</p>';
+  }
+}
+
+// --- Load metrics ---
+async function loadMetrics() {
+  const project = document.getElementById('project-input').value || 'default';
+  try {
+    const res = await fetch(`/api/metrics/${project}`);
+    const m = await res.json();
+    document.getElementById('pass-rate').textContent = `${Math.round((m.pass_rate || 0) * 100)}%`;
+    document.getElementById('total-runs').textContent = m.total_runs || 0;
+    document.getElementById('avg-duration').textContent = m.avg_duration_ms || 0;
+  } catch(e) {}
+}
+
 // --- Init ---
 connectSSE();
 loadModels();
+loadRuns();
+loadMetrics();
 checkHealth();
 setInterval(loadModels, 30000);
+setInterval(loadRuns, 10000);
+setInterval(loadMetrics, 10000);
 </script>
 </body>
 </html>
