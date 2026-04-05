@@ -1,0 +1,68 @@
+package alpha-swarm:ollama-provider@0.1.0;
+
+interface types {
+    type agent-id = string;
+    type task-id = string;
+    type repo-id = string;
+    type timestamp = u64;
+    type unified-diff = string;
+
+    enum complexity {
+        simple,
+        medium,
+        complex,
+    }
+
+    variant swarm-error {
+        not-found(string),
+        already-claimed(string),
+        inference-failed(string),
+        quality-gate-failed(string),
+        io-error(string),
+        internal(string),
+    }
+}
+
+/// The completions interface this provider exports.
+/// Must match what agent-worker imports.
+interface completions {
+    use types.{complexity, swarm-error};
+
+    enum backend-kind {
+        claude,
+        ollama,
+        openai,
+        custom,
+    }
+
+    record chat-message {
+        role: string,
+        content: string,
+    }
+
+    record inference-options {
+        preferred-backend: option<backend-kind>,
+        preferred-model: option<string>,
+        temperature: option<f32>,
+        max-tokens: option<u32>,
+    }
+
+    record inference-response {
+        content: string,
+        model: string,
+        backend: backend-kind,
+        tokens-input: u32,
+        tokens-output: u32,
+        duration-ms: u64,
+    }
+
+    chat: func(
+        messages: list<chat-message>,
+        complexity: complexity,
+        options: option<inference-options>,
+    ) -> result<inference-response, swarm-error>;
+}
+
+world ollama-provider {
+    export completions;
+}

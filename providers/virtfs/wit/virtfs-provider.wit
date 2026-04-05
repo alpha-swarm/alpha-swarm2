@@ -1,0 +1,35 @@
+package alpha-swarm:virtfs-provider@0.1.0;
+
+interface types {
+    type agent-id = string;
+    type repo-id = string;
+    type unified-diff = string;
+
+    record file-entry {
+        path: string,
+        content: string,
+    }
+
+    variant swarm-error {
+        not-found(string),
+        already-claimed(string),
+        inference-failed(string),
+        quality-gate-failed(string),
+        io-error(string),
+        internal(string),
+    }
+}
+
+interface repository {
+    use types.{repo-id, agent-id, file-entry, unified-diff, swarm-error};
+
+    read-file: func(repo: repo-id, agent: agent-id, path: string) -> result<string, swarm-error>;
+    write-file: func(repo: repo-id, agent: agent-id, path: string, content: string) -> result<_, swarm-error>;
+    list-files: func(repo: repo-id, agent: agent-id, glob: string) -> result<list<string>, swarm-error>;
+    extract-diff: func(repo: repo-id, agent: agent-id) -> result<unified-diff, swarm-error>;
+    read-files: func(repo: repo-id, agent: agent-id, paths: list<string>) -> result<list<file-entry>, swarm-error>;
+}
+
+world virtfs-provider {
+    export repository;
+}
