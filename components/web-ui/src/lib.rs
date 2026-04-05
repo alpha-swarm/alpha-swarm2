@@ -28,7 +28,7 @@ impl Guest for WebUi {
                 respond_json(response_out, 200, r#"{"status":"ok"}"#);
             }
             (Method::Get, p) if p.starts_with("/api/events") => {
-                api_events(response_out);
+                api_events_impl(response_out);
             }
             (Method::Get, p) if p.starts_with("/api/runs/") => {
                 let project = p.strip_prefix("/api/runs/").unwrap_or("default");
@@ -88,30 +88,107 @@ fn api_models(response_out: ResponseOutparam) {
     }
 }
 
-fn api_events(response_out: ResponseOutparam) {
-    // SSE: return text/event-stream with current status
-    // For Phase 1, return a single snapshot event then close
-    // Full SSE streaming requires long-lived connections (Phase 2)
+// SSE implementation: queries SurrealDB for running + recent agents,
+fn api_events_impl(response_out: ResponseOutparam) {
+    let mut events = String::new();
+
+    // 1. System status event
+    events.push_str("event: status\ndata: {\"active_agents\":0,\"message\":\"web-ui connected\"}\n\n");
+
+    // 2. Query running agents from SurrealDB
+    let running_query = "SELECT * FROM agent_run WHERE status = 'running' ORDER BY created_at DESC LIMIT 10";
+    if let Ok(body) = surreal_query(running_query) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(runs) = parsed.get(1).or_else(|| parsed.get(0)).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
+                let count = runs.len();
+                events.push_str(&format!(
+                    "event: status\ndata: {{\"active_agents\":{}}}\n\n",
+                    count
+                ));
+                for run in runs {
+                    let agent_id = run.get("agent_id").and_then(|a| a.as_str()).unwrap_or("unknown");
+                    let task = run.get("task_description").and_then(|t| t.as_str()).unwrap_or("");
+                    let model = run.get("model_used").and_then(|m| m.as_str()).unwrap_or("");
+                    let data = serde_json::json!({
+                        "agent_id": agent_id,
+                        "task": task,
+                        "model": model,
+                    });
+                    events.push_str(&format!("event: agent_started\ndata: {}\n\n", data));
+                }
+            }
+        }
+    }
+
+    // 3. Query recent completed/failed runs
+    let recent_query = "SELECT * FROM agent_run WHERE status != 'running' ORDER BY created_at DESC LIMIT 10";
+    if let Ok(body) = surreal_query(recent_query) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(runs) = parsed.get(1).or_else(|| parsed.get(0)).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
+                for run in runs {
+                    let agent_id = run.get("agent_id").and_then(|a| a.as_str()).unwrap_or("unknown");
+                    let status = run.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let model = run.get("model_used").and_then(|m| m.as_str()).unwrap_or("");
+                    let tokens_out = run.get("tokens_output").and_then(|t| t.as_u64()).unwrap_or(0);
+                    let duration = run.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0);
+
+                    let event_type = if status == "failed" { "agent_failed" } else { "agent_finished" };
+                    let data = serde_json::json!({
+                        "agent_id": agent_id,
+                        "status": status,
+                        "model": model,
+                        "tokens_output": tokens_out,
+                        "duration_ms": duration,
+                    });
+                    events.push_str(&format!("event: {event_type}\ndata: {}\n\n", data));
+                }
+            }
+        }
+    }
+
+    // If no DB data, still send the status event
+    if events.is_empty() {
+        events.push_str("event: status\ndata: {\"active_agents\":0,\"message\":\"web-ui running\"}\n\n");
+    }
+
+    // Send as streaming response
     let headers = Fields::new();
     headers.append(&"content-type".to_string(), &b"text/event-stream"[..]).unwrap();
     headers.append(&"cache-control".to_string(), &b"no-cache"[..]).unwrap();
 
     let response = OutgoingResponse::new(headers);
     response.set_status_code(200).unwrap();
-
     let body = response.body().unwrap();
+
+    ResponseOutparam::set(response_out, Ok(response));
+
     let stream = body.write().unwrap();
-
-    let event = "event: status\ndata: {\"active_agents\":0,\"message\":\"web-ui running\"}\n\n";
-    stream.blocking_write_and_flush(event.as_bytes()).unwrap();
-
+    let bytes = events.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let capacity = stream.check_write().unwrap_or(0) as usize;
+        if capacity == 0 {
+            stream.subscribe().block();
+            continue;
+        }
+        let end = (offset + capacity).min(bytes.len());
+        stream.write(&bytes[offset..end]).unwrap();
+        offset = end;
+    }
+    stream.flush().unwrap();
+    stream.subscribe().block();
     drop(stream);
     OutgoingBody::finish(body, None).unwrap();
-    ResponseOutparam::set(response_out, Ok(response));
 }
 
 fn surreal_query(query: &str) -> Result<String, String> {
-    let surreal_url = "http://127.0.0.1:8001";
+    // Prefix with schema init to handle fresh SurrealDB instances
+    let full_query = format!("DEFINE TABLE IF NOT EXISTS agent_run SCHEMALESS; {}", query);
+    surreal_raw_query(&full_query)
+}
+
+fn surreal_raw_query(query: &str) -> Result<String, String> {
+    let _surreal_url = "http://127.0.0.1:8001";
     let headers = Fields::new();
     headers.append(&"content-type".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
     headers.append(&"accept".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
@@ -166,7 +243,9 @@ fn api_runs(response_out: ResponseOutparam, project: &str) {
         Ok(body) => {
             // SurrealDB returns [{result: [...], ...}], extract the result array
             let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-            let runs = parsed.get(0)
+            // Index 1 because index 0 is the DEFINE TABLE prefix
+            let runs = parsed.get(1)
+                .or_else(|| parsed.get(0))
                 .and_then(|r| r.get("result"))
                 .cloned()
                 .unwrap_or(serde_json::Value::Array(vec![]));
@@ -184,7 +263,8 @@ fn api_metrics(response_out: ResponseOutparam, project: &str) {
     match surreal_query(&query) {
         Ok(body) => {
             let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-            let runs = parsed.get(0)
+            let runs = parsed.get(1)
+                .or_else(|| parsed.get(0))
                 .and_then(|r| r.get("result"))
                 .and_then(|r| r.as_array())
                 .cloned()
