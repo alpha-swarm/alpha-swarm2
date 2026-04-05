@@ -129,25 +129,56 @@ Multiple agents work on a codebase simultaneously without conflicts.
 
 **Goal**: Run WasmCloud lattice across multiple machines.
 
-### Tasks
-1. Set up 3-node NATS cluster with JetStream (can be 3 laptops, VMs, or cloud instances)
-2. Start WasmCloud hosts on each node, all joining the same lattice
-3. Resource-aware scheduling: tag hosts with capabilities (GPU, available models, memory)
-4. Agents float to hosts that have the required Ollama model loaded
-5. SurrealDB runs as a shared service accessible from all nodes
-6. Build `alpha-swarm-cli` for submitting tasks and watching progress
+### Machines
+
+| Machine | SSH Host | Role | Hardware | Tailscale IP |
+|---|---|---|---|---|
+| Local | — | Orchestrator, CLI, SurrealDB | MacBook | 100.79.38.122 |
+| csatapaci | csatapaci | Inference (big models) | M2 Max, 96GB RAM, 3.6TB | 100.81.10.8 |
+| malna (RPi) | malna | NATS quorum, quality gate, SurrealDB replica | 8GB RAM, 512GB SSD, ARM64 | TBD |
+
+### Current Status (Phase 4a — 2 machines)
+- [x] NATS 2-node cluster: local (:14222) <-> csatapaci (:4222)
+- [x] Cross-machine NATS messaging verified
+- [x] WasmCloud 2.0 host on csatapaci running agent-worker component
+- [x] Agent-worker HTTP endpoint reachable from local (http://100.81.10.8:8000/)
+- [ ] Agent-worker calls Ollama on csatapaci via wasi:http/outgoing-handler
+- [ ] Swarm CLI submits goals that execute on csatapaci
+
+### Phase 4b — Add malna (RPi) as 3rd node
+
+**Prerequisites**: SSH key auth to malna (same setup as csatapaci — chmod 755 ~, add ed25519 key to authorized_keys)
+
+**Tasks**:
+1. Install NATS server on malna (`apt install nats-server` or build from source for ARM64)
+2. Add malna NATS config (infra/nats-malna.conf) routing to both local and csatapaci
+3. 3-node NATS cluster with JetStream R3 replication — tolerates 1 node failure
+4. Install SurrealDB on malna — run as replica or shared store accessible from all nodes
+5. Install wash 2.0 on malna, start WasmCloud host
+6. Deploy quality-gate component on malna (runs cargo check/test — no GPU needed)
+7. Tag hosts with labels: local=orchestrator, csatapaci=inference, malna=infra+quality
+
+### NATS Cluster Config (3 nodes)
+
+```
+Node 1 (local):     100.79.38.122:14222 (client) / :16222 (cluster)
+Node 2 (csatapaci): 100.81.10.8:4222   (client) / :6222  (cluster)
+Node 3 (malna):     TBD:4222           (client) / :6222  (cluster)
+Cluster name: alpha-swarm
+JetStream R3: every stream replicated to all 3 nodes
+Quorum: 2/3 — survives any single node failure
+```
 
 ### Checkpoint 4
 ```
-TEST: 3 machines in the lattice. Submit a task from machine A.
-      Orchestrator on machine A decomposes task.
-      Some agents run on machine B (has GPU + codellama),
-      others on machine C (has qwen2.5-coder).
-VERIFY: wash get inventory shows hosts on all 3 machines.
-VERIFY: wash get links shows cross-machine provider links.
-VERIFY: Agent on machine B used a model only available on machine B.
+TEST: 3 machines in the lattice. Submit a task from local.
+      Orchestrator decomposes on local.
+      Agent-worker runs on csatapaci (calls Ollama locally).
+      Quality gate runs on malna.
+VERIFY: NATS cluster shows 3 nodes.
+VERIFY: Kill one NATS node — cluster continues (quorum 2/3).
+VERIFY: Agent on csatapaci uses Ollama models only available there.
 VERIFY: SurrealDB queries from all machines return consistent results.
-VERIFY: Killing one host causes agents to reschedule on remaining hosts.
 ```
 
 ### Milestone: "Distributed Swarm"
