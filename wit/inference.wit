@@ -1,0 +1,135 @@
+package alpha-swarm:inference@0.1.0;
+
+/// Provider-agnostic inference interface.
+/// Agents and orchestrator import THIS — never a specific backend.
+/// The router dispatches to the best available backend + model.
+interface types {
+    use alpha-swarm:types/types.{complexity, swarm-error};
+
+    /// Which backend served the response.
+    enum backend-kind {
+        claude,
+        ollama,
+        openai,
+        custom,
+    }
+
+    /// A chat message (role + content).
+    record chat-message {
+        role: string,
+        content: string,
+    }
+
+    /// Options for inference requests.
+    record inference-options {
+        /// Preferred backend. None = let the router decide.
+        preferred-backend: option<backend-kind>,
+        /// Preferred model name. None = let the router decide based on complexity.
+        preferred-model: option<string>,
+        /// Temperature (0.0-2.0).
+        temperature: option<f32>,
+        /// Max context window to use (tokens).
+        num-ctx: option<u32>,
+        /// Stop sequences.
+        stop: option<list<string>>,
+        /// Max tokens to generate.
+        max-tokens: option<u32>,
+    }
+
+    /// Response from any inference backend.
+    record inference-response {
+        content: string,
+        model: string,
+        backend: backend-kind,
+        tokens-input: u32,
+        tokens-output: u32,
+        duration-ms: u64,
+    }
+
+    /// Metadata about an available model (from any backend).
+    record model-info {
+        name: string,
+        backend: backend-kind,
+        family: string,
+        parameter-size: string,
+        context-window: u32,
+        /// Whether this model is currently loaded/ready (Ollama-specific, always true for API backends).
+        ready: bool,
+    }
+
+    /// Status of an inference backend.
+    record backend-status {
+        kind: backend-kind,
+        available: bool,
+        models: list<model-info>,
+        error: option<string>,
+    }
+}
+
+/// The interface agents and orchestrator use for inference.
+/// Backend-agnostic — the router picks the best backend + model.
+interface completions {
+    use types.{
+        chat-message, inference-options, inference-response,
+        model-info, backend-status, backend-kind,
+    };
+    use alpha-swarm:types/types.{complexity, swarm-error};
+
+    /// Single-shot text generation.
+    /// Router picks backend + model based on complexity and options.
+    generate: func(
+        prompt: string,
+        complexity: complexity,
+        options: option<inference-options>,
+    ) -> result<inference-response, swarm-error>;
+
+    /// Chat completion (multi-message context).
+    chat: func(
+        messages: list<chat-message>,
+        complexity: complexity,
+        options: option<inference-options>,
+    ) -> result<inference-response, swarm-error>;
+
+    /// List all models across all available backends.
+    list-models: func() -> result<list<model-info>, swarm-error>;
+
+    /// Get status of all configured backends.
+    list-backends: func() -> result<list<backend-status>, swarm-error>;
+
+    /// Recommend the best model for a given complexity tier.
+    /// Considers: backend availability, model capability, cost, latency.
+    recommend: func(complexity: complexity) -> result<model-info, swarm-error>;
+}
+
+/// Interface that each inference backend implements.
+/// The router calls into these — agents never import this directly.
+interface backend {
+    use types.{
+        chat-message, inference-options, inference-response,
+        model-info, backend-kind,
+    };
+    use alpha-swarm:types/types.{swarm-error};
+
+    /// Which backend this is.
+    kind: func() -> backend-kind;
+
+    /// Check if the backend is reachable.
+    health-check: func() -> result<_, swarm-error>;
+
+    /// List models available on this backend.
+    list-models: func() -> result<list<model-info>, swarm-error>;
+
+    /// Generate text.
+    generate: func(
+        model: string,
+        prompt: string,
+        options: option<inference-options>,
+    ) -> result<inference-response, swarm-error>;
+
+    /// Chat completion.
+    chat: func(
+        model: string,
+        messages: list<chat-message>,
+        options: option<inference-options>,
+    ) -> result<inference-response, swarm-error>;
+}

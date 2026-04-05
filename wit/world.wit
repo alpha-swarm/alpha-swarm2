@@ -1,9 +1,9 @@
 package alpha-swarm:world@0.1.0;
 
 /// World for the agent worker component.
-/// Imports all provider capabilities, exports the agent handler.
+/// Imports the generic inference interface — never a specific backend.
 world agent-worker {
-    import alpha-swarm:ollama/inference@0.1.0;
+    import alpha-swarm:inference/completions@0.1.0;
     import alpha-swarm:virtfs/repository@0.1.0;
     import alpha-swarm:quality/gate@0.1.0;
     import alpha-swarm:knowledge/base@0.1.0;
@@ -23,9 +23,9 @@ world agent-worker {
 }
 
 /// World for the orchestrator component.
-/// Decomposes high-level goals into sub-tasks and coordinates agents.
+/// Uses inference/completions for task decomposition.
 world orchestrator {
-    import alpha-swarm:ollama/inference@0.1.0;
+    import alpha-swarm:inference/completions@0.1.0;
     import alpha-swarm:virtfs/repository@0.1.0;
     import alpha-swarm:quality/gate@0.1.0;
     import alpha-swarm:knowledge/base@0.1.0;
@@ -55,13 +55,27 @@ world orchestrator {
 
 /// World for the gateway component.
 /// Exposes the high-level control API to external clients.
-/// Initially serves WIT calls + NATS events.
-/// HTTP/MCP layer added later via wasi:http/incoming-handler export.
 world gateway {
     import alpha-swarm:project/manager@0.1.0;
     import alpha-swarm:swarm/control@0.1.0;
     import alpha-swarm:events/bus@0.1.0;
+    import alpha-swarm:inference/completions@0.1.0;
 
     import wasi:logging/logging@0.1.0;
     import wasi:clocks/wall-clock@0.2.0;
+}
+
+/// World for the inference router component.
+/// Imports all backends, exports the generic completions interface.
+/// Routes requests to the best available backend + model.
+world inference-router {
+    import alpha-swarm:inference/backend@0.1.0;
+    import alpha-swarm:ollama/provider@0.1.0;
+    import alpha-swarm:claude/provider@0.1.0;
+    import alpha-swarm:events/bus@0.1.0;
+
+    import wasi:logging/logging@0.1.0;
+    import wasi:clocks/wall-clock@0.2.0;
+
+    export alpha-swarm:inference/completions@0.1.0;
 }

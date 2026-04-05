@@ -1,65 +1,18 @@
 package alpha-swarm:ollama@0.1.0;
 
-/// Interface to discover and use Ollama models for inference.
-/// Wraps Ollama HTTP API (localhost:11434).
-interface inference {
-    use alpha-swarm:types/types.{complexity, swarm-error};
+/// Ollama-specific inference backend.
+/// Implements alpha-swarm:inference/backend for local Ollama instances.
+/// Also exposes Ollama-specific operations (pull, running models, etc.).
+interface provider {
+    use alpha-swarm:inference/types.{model-info, backend-kind};
+    use alpha-swarm:types/types.{swarm-error};
 
-    /// Metadata about an available model.
-    record model-info {
-        name: string,
-        family: string,
-        parameter-size: string,
-        quantization: string,
-        context-window: u32,
-        size-bytes: u64,
-    }
+    /// Pull a model from the Ollama registry.
+    pull-model: func(name: string) -> result<model-info, swarm-error>;
 
-    /// A chat message (role + content).
-    record chat-message {
-        role: string,
-        content: string,
-    }
-
-    /// Options for inference requests.
-    record inference-options {
-        temperature: option<f32>,
-        num-ctx: option<u32>,
-        stop: option<list<string>>,
-    }
-
-    /// Response from an inference call.
-    record inference-response {
-        content: string,
-        model: string,
-        tokens-evaluated: u32,
-        tokens-predicted: u32,
-        duration-ms: u64,
-    }
-
-    /// List all models available on this host's Ollama instance.
-    list-models: func() -> result<list<model-info>, swarm-error>;
-
-    /// Get detailed info about a specific model.
-    show-model: func(name: string) -> result<model-info, swarm-error>;
-
-    /// List models currently loaded in memory.
+    /// List models currently loaded in VRAM/RAM.
     running-models: func() -> result<list<model-info>, swarm-error>;
 
-    /// Pick the best available model for a given complexity tier.
-    recommend-model: func(tier: complexity) -> result<model-info, swarm-error>;
-
-    /// Single-shot text generation.
-    generate: func(
-        model: string,
-        prompt: string,
-        options: option<inference-options>,
-    ) -> result<inference-response, swarm-error>;
-
-    /// Chat completion (multi-message context).
-    chat: func(
-        model: string,
-        messages: list<chat-message>,
-        options: option<inference-options>,
-    ) -> result<inference-response, swarm-error>;
+    /// Unload a model from memory.
+    unload-model: func(name: string) -> result<_, swarm-error>;
 }

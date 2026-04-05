@@ -1,0 +1,19 @@
+package alpha-swarm:claude@0.1.0;
+
+/// Claude API inference backend.
+/// Implements alpha-swarm:inference/backend for the Anthropic API.
+/// Also exposes Claude-specific features (tool use, extended thinking, etc.).
+interface provider {
+    use alpha-swarm:inference/types.{model-info};
+    use alpha-swarm:types/types.{swarm-error};
+
+    /// Get current API usage / rate limit info.
+    record usage-info {
+        requests-remaining: option<u32>,
+        tokens-remaining: option<u32>,
+        reset-at: option<string>,
+    }
+
+    /// Check API key validity and rate limits.
+    get-usage: func() -> result<usage-info, swarm-error>;
+}
