@@ -12,4 +12,5 @@ tokio.workspace = true
 tracing.workspace = true
 uuid = { version = "1", features = ["v4"] }
 inference-client = { path = "../inference-client" }
+edit-parser = { path = "../edit-parser" }
 knowledge-base = { path = "../knowledge-base" }

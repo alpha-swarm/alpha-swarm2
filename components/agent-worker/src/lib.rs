@@ -89,32 +89,7 @@ fn ollama_chat(ollama_url: &str, model: &str, messages: &str) -> Result<String, 
         .ok_or_else(|| format!("no content in response: {}", &body_str[..body_str.len().min(200)]))
 }
 
-// --- Edit parser ---
-
-fn parse_edits(response: &str) -> Vec<(String, String, String)> {
-    // Returns (path, old, new) tuples for EDIT blocks
-    let mut edits = Vec::new();
-    let mut pos = 0;
-    while pos < response.len() {
-        let Some(start) = response[pos..].find("<<<EDIT ") else { break };
-        let block_start = pos + start + 8;
-        let Some(end_offset) = response[block_start..].find(">>>") else { break };
-        let block = &response[block_start..block_start + end_offset];
-
-        let first_nl = block.find('\n').unwrap_or(block.len());
-        let path = block[..first_nl].trim().to_string();
-        let body = &block[first_nl + 1..];
-
-        if let (Some(old_start), Some(new_start)) = (body.find("--- OLD"), body.find("--- NEW")) {
-            let old = body[old_start + 7..new_start].trim().to_string();
-            let new_content = body[new_start + 7..].trim().to_string();
-            edits.push((path, old, new_content));
-        }
-
-        pos = block_start + end_offset + 3;
-    }
-    edits
-}
+use edit_parser::FileEdit;
 
 // --- Request/Response types ---
 
@@ -207,18 +182,20 @@ impl Guest for AgentWorker {
 
         match llm_result {
             Ok(content) => {
-                let edits = parse_edits(&content);
+                let edits = edit_parser::parse_edits(&content).unwrap_or_default();
 
                 // Apply edits to files
                 let mut modified_files = Vec::new();
-                for (path, old, new) in &edits {
-                    if let Some(f) = task_req.files.iter().find(|f| f.path == *path) {
-                        let updated = f.content.replacen(old.as_str(), new.as_str(), 1);
-                        modified_files.push(format!(
-                            r#"{{"path":"{}","content":{}}}"#,
-                            path,
-                            serde_json::to_string(&updated).unwrap_or_default()
-                        ));
+                for edit in &edits {
+                    if let FileEdit::Edit { path, old, new } = edit {
+                        if let Some(f) = task_req.files.iter().find(|f| f.path == *path) {
+                            let updated = f.content.replacen(old.as_str(), new.as_str(), 1);
+                            modified_files.push(format!(
+                                r#"{{"path":"{}","content":{}}}"#,
+                                path,
+                                serde_json::to_string(&updated).unwrap_or_default()
+                            ));
+                        }
                     }
                 }
 

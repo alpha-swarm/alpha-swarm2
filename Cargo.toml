@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/inference-client",
+    "crates/edit-parser",
     "crates/agent-core",
     "crates/quality-gate",
     "crates/knowledge-base",

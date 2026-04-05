@@ -1,0 +1,8 @@
+[package]
+name = "edit-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# No dependencies — works on both native and wasm32-wasip2
+[dependencies]
