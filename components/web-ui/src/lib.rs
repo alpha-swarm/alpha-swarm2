@@ -541,10 +541,19 @@ fn api_submit_run(response_out: ResponseOutparam, body: &[u8]) {
     let task = parsed.get("task").and_then(|t| t.as_str()).unwrap_or("");
     let project = parsed.get("project").and_then(|p| p.as_str()).unwrap_or("default");
 
-    // Use app-wide defaults — no per-request model/url selection
-    let ollama_url = "http://100.81.10.8:11434"; // TODO: read from config
-    let model = "codellama:34b"; // Always start with the most capable model
+    // Use app-wide defaults
+    let ollama_url = "http://100.81.10.8:11434";
+    let model = "codellama:34b";
     let files = parsed.get("files").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+
+    // Store "running" record immediately so kanban shows it
+    let store_running = format!(
+        "CREATE agent_run SET project='{}', task_description='{}', agent_id='web-ui', model_used='{}', status='running', tokens_input=0, tokens_output=0, duration_ms=0, created_at=time::now(), files_modified=[]",
+        project.replace('\'', ""),
+        task.replace('\'', "").chars().take(200).collect::<String>(),
+        model,
+    );
+    let _ = surreal_query(&store_running);
 
     // Build file context
     let mut file_context = String::new();

@@ -115,6 +115,7 @@ select.input { appearance: auto; }
 .kanban-column { min-width: 280px; max-width: 340px; flex-shrink: 0; }
 .kanban-column-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; font-size: 13px; font-weight: 600; border-bottom: 2px solid var(--border); margin-bottom: 8px; }
 .kanban-column-header .count { color: var(--muted); font-weight: 400; }
+.kanban-column.planning .kanban-column-header { border-color: var(--accent); }
 .kanban-column.running .kanban-column-header { border-color: var(--warning); }
 .kanban-column.passed .kanban-column-header { border-color: var(--success); }
 .kanban-column.failed .kanban-column-header { border-color: var(--error); }
@@ -269,7 +270,6 @@ select.input { appearance: auto; }
         The orchestrator will use the most capable model to plan, then dispatch smaller specialized agents for each sub-task automatically.
       </div>
       <button class="btn btn-primary" id="submit-btn" onclick="submitTask()" style="width:100%;justify-content:center;padding:12px">Submit Goal</button>
-      <div id="submit-result" style="margin-top:16px"></div>
     </div>
   </div>
 
@@ -335,6 +335,10 @@ function connectSSE() {
       agents[d.agent_id] = { ...d, status: d.status || 'passed' };
       renderLiveAgents();
       addRecentActivity(d);
+      // Refresh kanban if we're on a project detail page
+      if (currentPage === 'project-detail' && currentProjectName) {
+        loadProjectDetail(currentProjectName);
+      }
       setTimeout(() => { delete agents[d.agent_id]; renderLiveAgents(); }, 8000);
     } catch(e) {}
   });
@@ -345,6 +349,9 @@ function connectSSE() {
       agents[d.agent_id] = { ...d, status: 'failed' };
       renderLiveAgents();
       addRecentActivity(d);
+      if (currentPage === 'project-detail' && currentProjectName) {
+        loadProjectDetail(currentProjectName);
+      }
       setTimeout(() => { delete agents[d.agent_id]; renderLiveAgents(); }, 12000);
     } catch(e) {}
   });
@@ -571,16 +578,17 @@ function renderKanban(goals) {
 
   // Group goals into kanban columns by status
   const columns = {
+    planning: { label: 'Planning', goals: [] },
     running: { label: 'In Progress', goals: [] },
     passed: { label: 'Completed', goals: [] },
     failed: { label: 'Failed', goals: [] },
-    partial: { label: 'Partial', goals: [] },
   };
 
   goals.forEach(g => {
     const status = g.status || 'partial';
     if (columns[status]) columns[status].goals.push(g);
-    else columns.partial.goals.push(g);
+    else if (status === 'partial') columns.running.goals.push(g);
+    else columns.running.goals.push(g);
   });
 
   el.innerHTML = Object.entries(columns)
@@ -696,45 +704,26 @@ async function loadProjectDropdown() {
   }
 }
 
-// --- Submit task ---
-async function submitTask() {
-  const btn = document.getElementById('submit-btn');
-  const resultEl = document.getElementById('submit-result');
+// --- Submit task (fire-and-forget) ---
+function submitTask() {
   const project = document.getElementById('submit-project').value;
   const task = document.getElementById('submit-task').value.trim();
 
   if (!project) { alert('Select a project first'); return; }
   if (!task) { alert('Describe what you want to do'); return; }
 
-  btn.disabled = true; btn.textContent = 'Planning & executing...';
-  resultEl.innerHTML = '<div style="color:var(--muted);font-size:13px">The orchestrator is analyzing the repo and creating sub-agents...</div>';
+  // Fire the request — don't wait for it
+  fetch('/api/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task, project, files: [] }),
+  }).catch(() => {}); // silently handle — result goes to SurrealDB → SSE
 
-  const body = {
-    task: task,
-    project: project,
-    files: [],
-  };
+  // Clear the form
+  document.getElementById('submit-task').value = '';
 
-  try {
-    const res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const data = await res.json();
-
-    if (data.status === 'passed' || data.edits > 0) {
-      resultEl.innerHTML = `<div class="card" style="border-color:var(--success)">
-        <span class="badge passed">passed</span>
-        <span style="margin-left:8px;font-size:14px">${data.edits || 0} edits &middot; ${data.model || ''} &middot; ${((data.duration_ms||0)/1000).toFixed(1)}s</span>
-        ${data.modified_files?.length ? '<pre style="margin-top:12px;font-size:13px;overflow-x:auto;color:var(--text-secondary)">' + JSON.stringify(data.modified_files, null, 2).substring(0, 500) + '</pre>' : ''}
-      </div>`;
-    } else if (data.error) {
-      resultEl.innerHTML = `<div class="card" style="border-color:var(--error)"><span class="badge failed">error</span> <span style="font-size:14px;margin-left:8px">${data.error}</span></div>`;
-    } else {
-      resultEl.innerHTML = `<div class="card"><span class="badge skipped">no edits</span> <span style="font-size:14px;margin-left:8px">Model returned no changes</span></div>`;
-    }
-  } catch(e) {
-    resultEl.innerHTML = `<div class="card" style="border-color:var(--error)"><span class="badge failed">error</span> <span style="font-size:14px;margin-left:8px">${e.message}</span></div>`;
-  }
-
-  btn.disabled = false; btn.textContent = 'Submit Goal';
+  // Navigate to the project page — SSE will show the task appearing
+  navigate('project-detail', project);
 }
 
 // --- Init ---
