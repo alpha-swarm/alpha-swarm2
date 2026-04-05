@@ -12,6 +12,15 @@ interface types {
     /// Unique identifier for a repository.
     type repo-id = string;
 
+    /// Unique identifier for a project (groups repo + knowledge + toolchain).
+    type project-id = string;
+
+    /// Unique identifier for a high-level goal submitted to the swarm.
+    type goal-id = string;
+
+    /// Unique identifier for a subscription.
+    type subscription-id = string;
+
     /// Unix timestamp in milliseconds.
     type timestamp = u64;
 
@@ -36,6 +45,24 @@ interface types {
         simple,
         medium,
         complex,
+    }
+
+    /// Status of a project.
+    enum project-status {
+        initializing,
+        ready,
+        error,
+        archived,
+    }
+
+    /// Status of a high-level goal.
+    enum goal-status {
+        planning,
+        running,
+        merging,
+        done,
+        failed,
+        cancelled,
     }
 
     /// Test tier for quality gate checks.

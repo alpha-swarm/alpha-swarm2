@@ -7,6 +7,7 @@ world agent-worker {
     import alpha-swarm:virtfs/repository@0.1.0;
     import alpha-swarm:quality/gate@0.1.0;
     import alpha-swarm:knowledge/base@0.1.0;
+    import alpha-swarm:events/bus@0.1.0;
 
     import wasi:logging/logging@0.1.0;
     import wasi:clocks/wall-clock@0.2.0;
@@ -22,30 +23,45 @@ world agent-worker {
 }
 
 /// World for the orchestrator component.
-/// Decomposes high-level tasks into sub-tasks and coordinates agents.
+/// Decomposes high-level goals into sub-tasks and coordinates agents.
 world orchestrator {
     import alpha-swarm:ollama/inference@0.1.0;
     import alpha-swarm:virtfs/repository@0.1.0;
     import alpha-swarm:quality/gate@0.1.0;
     import alpha-swarm:knowledge/base@0.1.0;
+    import alpha-swarm:project/manager@0.1.0;
+    import alpha-swarm:events/bus@0.1.0;
 
     import wasi:logging/logging@0.1.0;
     import wasi:clocks/wall-clock@0.2.0;
 
     /// The orchestrator accepts a high-level goal and manages sub-tasks.
     export planner: interface {
-        use alpha-swarm:types/types.{repo-id, task, task-result, swarm-error};
+        use alpha-swarm:types/types.{project-id, task, task-result, swarm-error};
 
-        /// Decompose a high-level goal into sub-tasks.
+        /// Decompose a high-level goal into sub-tasks for a project.
         plan: func(
-            repo: repo-id,
+            project: project-id,
             goal: string,
         ) -> result<list<task>, swarm-error>;
 
-        /// Merge completed task results back into the repo.
+        /// Merge completed task results back into the project's repo.
         merge-results: func(
-            repo: repo-id,
+            project: project-id,
             results: list<task-result>,
         ) -> result<_, swarm-error>;
     };
+}
+
+/// World for the gateway component.
+/// Exposes the high-level control API to external clients.
+/// Initially serves WIT calls + NATS events.
+/// HTTP/MCP layer added later via wasi:http/incoming-handler export.
+world gateway {
+    import alpha-swarm:project/manager@0.1.0;
+    import alpha-swarm:swarm/control@0.1.0;
+    import alpha-swarm:events/bus@0.1.0;
+
+    import wasi:logging/logging@0.1.0;
+    import wasi:clocks/wall-clock@0.2.0;
 }

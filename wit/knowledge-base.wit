@@ -28,6 +28,19 @@ interface base {
         similarity: f32,
     }
 
+    // --- Namespace operations ---
+
+    /// Create a knowledge namespace for a project.
+    /// Isolates all data (tasks, runs, embeddings) per project.
+    create-namespace: func(
+        namespace: string,
+    ) -> result<_, swarm-error>;
+
+    /// Delete a knowledge namespace and all its data.
+    delete-namespace: func(
+        namespace: string,
+    ) -> result<_, swarm-error>;
+
     // --- Task operations ---
 
     /// Create a new task.

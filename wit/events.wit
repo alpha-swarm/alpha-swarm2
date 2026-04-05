@@ -1,0 +1,69 @@
+package alpha-swarm:events@0.1.0;
+
+/// Transport-agnostic event bus.
+/// Components and providers publish events; consumers subscribe.
+///
+/// Backed by NATS subjects: alpha-swarm.{project-id}.{event-kind}
+/// Can be bridged to HTTP/SSE, WebSocket, or webhooks later.
+interface bus {
+    use alpha-swarm:types/types.{
+        project-id, subscription-id, timestamp, swarm-error,
+    };
+
+    /// Kind of event emitted by the system.
+    enum event-kind {
+        project-created,
+        project-ready,
+        project-deleted,
+        goal-submitted,
+        goal-planned,
+        goal-completed,
+        goal-failed,
+        goal-cancelled,
+        task-claimed,
+        task-passed,
+        task-failed,
+        agent-started,
+        agent-finished,
+    }
+
+    /// An event emitted by the system.
+    record event {
+        /// Unique event ID.
+        id: string,
+        /// What happened.
+        kind: event-kind,
+        /// Which project this relates to.
+        project: project-id,
+        /// When it happened.
+        timestamp: timestamp,
+        /// JSON-encoded payload with event-specific data.
+        /// Schema depends on event-kind.
+        payload: string,
+    }
+
+    /// Filter for subscribing to events.
+    record event-filter {
+        /// Only events for this project. None = all projects.
+        project: option<project-id>,
+        /// Only these event kinds. Empty = all kinds.
+        kinds: list<event-kind>,
+    }
+
+    /// Publish an event to the bus.
+    publish: func(event: event) -> result<_, swarm-error>;
+
+    /// Subscribe to events matching a filter.
+    /// Returns a subscription ID for polling/unsubscribing.
+    subscribe: func(filter: event-filter) -> result<subscription-id, swarm-error>;
+
+    /// Unsubscribe and clean up.
+    unsubscribe: func(id: subscription-id) -> result<_, swarm-error>;
+
+    /// Poll for events on a subscription (pull-based, WASI-friendly).
+    /// Returns up to `max-events` events since last poll.
+    poll: func(
+        id: subscription-id,
+        max-events: u32,
+    ) -> result<list<event>, swarm-error>;
+}

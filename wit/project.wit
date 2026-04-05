@@ -1,0 +1,70 @@
+package alpha-swarm:project@0.1.0;
+
+/// Project manager — the top-level grouping abstraction.
+/// A project bundles a repository, its knowledge base namespace,
+/// detected toolchain, and all associated agent work.
+///
+/// Creating a project bootstraps everything:
+///   virtfs registers the repo, quality-gate detects the toolchain,
+///   knowledge-base gets a namespace. Callers never touch providers directly.
+interface manager {
+    use alpha-swarm:types/types.{
+        project-id, repo-id, timestamp,
+        project-status, task-status, swarm-error,
+    };
+    use alpha-swarm:quality/gate.{toolchain-config};
+    use alpha-swarm:virtfs/repository.{repo-info};
+
+    /// Configuration for creating a new project.
+    record project-config {
+        /// Human-readable project name.
+        name: string,
+        /// Local path or remote URL to the repository.
+        path-or-url: string,
+        /// Branch to use as base (e.g., "main"). None = auto-detect.
+        default-branch: option<string>,
+        /// Override auto-detected toolchain. None = auto-detect.
+        toolchain-override: option<toolchain-config>,
+    }
+
+    /// Summary of task counts by status within a project.
+    record task-counts {
+        pending: u32,
+        running: u32,
+        passed: u32,
+        failed: u32,
+    }
+
+    /// A fully initialized project.
+    record project {
+        id: project-id,
+        name: string,
+        status: project-status,
+        repo: repo-info,
+        toolchain: toolchain-config,
+        created-at: timestamp,
+        running-agents: u32,
+        tasks: task-counts,
+    }
+
+    /// Create and bootstrap a new project from a repo path or URL.
+    /// Registers the repo, detects toolchain, creates knowledge namespace.
+    create-project: func(config: project-config) -> result<project, swarm-error>;
+
+    /// Get a project by ID.
+    get-project: func(id: project-id) -> result<project, swarm-error>;
+
+    /// List all projects.
+    list-projects: func() -> result<list<project>, swarm-error>;
+
+    /// Delete a project and clean up all resources (worktrees, knowledge namespace).
+    delete-project: func(id: project-id) -> result<_, swarm-error>;
+
+    /// Fork a project — creates a cheap copy sharing the same repo
+    /// but with its own knowledge namespace and worktree space.
+    /// Useful for experiments or parallel strategies on the same codebase.
+    fork-project: func(
+        source: project-id,
+        name: string,
+    ) -> result<project, swarm-error>;
+}

@@ -1,0 +1,65 @@
+package alpha-swarm:swarm@0.1.0;
+
+/// High-level swarm control interface.
+/// Clients (CLI, dashboard, MCP server) use this to interact with the system.
+/// All operations are scoped to a project.
+interface control {
+    use alpha-swarm:types/types.{
+        project-id, goal-id, task-id, goal-status, task-status,
+        unified-diff, timestamp, swarm-error,
+    };
+    use alpha-swarm:ollama/inference.{model-info};
+    use alpha-swarm:knowledge/base.{agent-run};
+
+    /// Summary of a goal (high-level task).
+    record goal-summary {
+        id: goal-id,
+        project: project-id,
+        description: string,
+        status: goal-status,
+        task-count: u32,
+        tasks-completed: u32,
+        tasks-failed: u32,
+        submitted-at: timestamp,
+        finished-at: option<timestamp>,
+    }
+
+    /// Detailed view of a task within a goal.
+    record task-detail {
+        task-id: task-id,
+        description: string,
+        status: task-status,
+        assigned-files: list<string>,
+        run: option<agent-run>,
+        diff: option<unified-diff>,
+    }
+
+    /// Submit a high-level goal to the swarm.
+    /// The orchestrator decomposes it into tasks and dispatches agents.
+    submit-goal: func(
+        project: project-id,
+        goal: string,
+    ) -> result<goal-id, swarm-error>;
+
+    /// Get the current status of a goal.
+    get-goal-status: func(id: goal-id) -> result<goal-summary, swarm-error>;
+
+    /// List all goals for a project, optionally filtered by status.
+    list-goals: func(
+        project: project-id,
+        status: option<goal-status>,
+    ) -> result<list<goal-summary>, swarm-error>;
+
+    /// Cancel a running goal. In-flight agents finish their current task
+    /// but no new tasks are dispatched.
+    cancel-goal: func(id: goal-id) -> result<_, swarm-error>;
+
+    /// Get detailed info about a specific task (including agent run and diff).
+    get-task-detail: func(id: task-id) -> result<task-detail, swarm-error>;
+
+    /// Get the merged diff for a completed goal.
+    get-goal-diff: func(id: goal-id) -> result<unified-diff, swarm-error>;
+
+    /// List all models available across the lattice.
+    list-available-models: func() -> result<list<model-info>, swarm-error>;
+}
