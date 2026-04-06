@@ -28,6 +28,12 @@ impl ToolRegistry {
         reg.register(Box::new(crate::git::GitDiffTool));
         reg.register(Box::new(crate::git::GitStatusTool));
         reg.register(Box::new(crate::shell::RunCommandTool));
+        reg.register(Box::new(crate::tree_sitter_tools::TreeSitterRenameTool));
+        reg.register(Box::new(crate::tree_sitter_tools::TreeSitterFindTool));
+        reg.register(Box::new(crate::tree_sitter_tools::TreeSitterSignaturesTool));
+        reg.register(Box::new(crate::web::WebSearchTool));
+        reg.register(Box::new(crate::web::FetchUrlTool));
+        reg.register(Box::new(crate::web::SearchCratesTool));
         reg
     }
 

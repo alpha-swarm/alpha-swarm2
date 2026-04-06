@@ -3,6 +3,8 @@ mod grep;
 mod test_runner;
 mod git;
 mod shell;
+mod tree_sitter_tools;
+mod web;
 mod registry;
 
 pub use registry::ToolRegistry;

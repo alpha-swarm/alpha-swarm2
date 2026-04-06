@@ -132,7 +132,11 @@ impl SwarmRunner {
                 };
 
                 info!(task_id = %task.id, desc = %task.description, "Running agent");
-                let result = agent.run(&task.description, &task.files, task.complexity).await;
+
+                // Use tool-enabled loop: agent can call deterministic tools between LLM steps
+                let tools = swarm_tools::ToolRegistry::with_defaults();
+                const MAX_TOOL_STEPS: u32 = 20;
+                let result = agent.run_with_tools(&task.description, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
                 (task, result)
             });
         }
