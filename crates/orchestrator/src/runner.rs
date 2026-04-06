@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -28,18 +29,23 @@ pub struct TaskRunResult {
 }
 
 /// Runs multiple agents in parallel on a goal.
-pub struct SwarmRunner<'a> {
-    router: &'a InferenceRouter,
-    ollama: &'a OllamaBackend,
-    store: Option<&'a KnowledgeStore>,
+pub struct SwarmRunner {
+    router: Arc<InferenceRouter>,
+    ollama: Arc<OllamaBackend>,
+    store: Option<Arc<KnowledgeStore>>,
     repo_path: PathBuf,
     project: String,
+    parent_run_id: Option<String>,
+    max_concurrent: usize,
 }
 
-impl<'a> SwarmRunner<'a> {
+/// Default concurrency when not configured
+const DEFAULT_MAX_CONCURRENT: usize = 2;
+
+impl SwarmRunner {
     pub fn new(
-        router: &'a InferenceRouter,
-        ollama: &'a OllamaBackend,
+        router: Arc<InferenceRouter>,
+        ollama: Arc<OllamaBackend>,
         repo_path: impl Into<PathBuf>,
         project: impl Into<String>,
     ) -> Self {
@@ -49,15 +55,27 @@ impl<'a> SwarmRunner<'a> {
             store: None,
             repo_path: repo_path.into(),
             project: project.into(),
+            parent_run_id: None,
+            max_concurrent: DEFAULT_MAX_CONCURRENT,
         }
     }
 
-    pub fn with_store(mut self, store: &'a KnowledgeStore) -> Self {
+    pub fn with_store(mut self, store: Arc<KnowledgeStore>) -> Self {
         self.store = Some(store);
         self
     }
 
-    /// Execute a high-level goal: plan → spawn agents → merge → validate.
+    pub fn with_parent_run_id(mut self, id: impl Into<String>) -> Self {
+        self.parent_run_id = Some(id.into());
+        self
+    }
+
+    pub fn with_max_concurrent(mut self, n: usize) -> Self {
+        self.max_concurrent = n.max(1); // at least 1
+        self
+    }
+
+    /// Execute a high-level goal: plan → spawn agents in parallel → merge → validate.
     pub async fn run(&self, goal: &str) -> Result<SwarmResult> {
         let start = Instant::now();
 
@@ -66,7 +84,7 @@ impl<'a> SwarmRunner<'a> {
         info!(file_count = repo_files.len(), "Discovered repo files");
 
         // 2. Plan: decompose goal into sub-tasks
-        let tasks = plan_goal(self.router, goal, &repo_files).await
+        let tasks = plan_goal(&self.router, goal, &repo_files).await
             .context("Goal planning failed")?;
 
         info!(task_count = tasks.len(), "Goal decomposed");
@@ -81,45 +99,51 @@ impl<'a> SwarmRunner<'a> {
             agent_paths.push((task.clone(), wt_path));
         }
 
-        // 4. Run agents in parallel
-        let mut handles = Vec::new();
+        // 4. Run agents in PARALLEL using JoinSet (bounded by semaphore)
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(self.max_concurrent));
+        let mut join_set = tokio::task::JoinSet::new();
+
+        info!(max_concurrent = self.max_concurrent, tasks = agent_paths.len(), "Spawning agents");
 
         for (task, wt_path) in agent_paths {
-            let router = self.router;
-            let ollama = self.ollama;
-            let store = self.store;
+            let sem = Arc::clone(&semaphore);
+            let router = Arc::clone(&self.router);
+            let ollama = Arc::clone(&self.ollama);
+            let store = self.store.clone();
             let project = self.project.clone();
+            let parent_id = self.parent_run_id.clone();
             let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
                 .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
 
-            // Can't move references into spawn — need to use scoped tasks
-            // For now, run sequentially but with worktree isolation
-            let agent = Agent::new(router, &wt_path);
-            let agent = if let Some(kb) = store {
-                agent.with_knowledge(KnowledgeConfig {
-                    store: kb,
-                    embedder: ollama,
-                    embed_model: embed_model.clone(),
-                    project: project.clone(),
-                    skip_threshold: 0.9,
-                })
-            } else {
-                agent
-            };
+            join_set.spawn(async move {
+                let _permit = sem.acquire().await.expect("semaphore closed");
+                let agent = Agent::new(Arc::clone(&router), &wt_path);
+                let agent = if let Some(kb) = store {
+                    agent.with_knowledge(KnowledgeConfig {
+                        store: kb,
+                        embedder: ollama,
+                        embed_model,
+                        project,
+                        skip_threshold: 0.9,
+                        parent_run_id: parent_id,
+                    })
+                } else {
+                    agent
+                };
 
-            info!(task_id = %task.id, desc = %task.description, "Running agent");
-            let result = agent.run(&task.description, &task.files, task.complexity).await;
-
-            handles.push((task, result));
+                info!(task_id = %task.id, desc = %task.description, "Running agent");
+                let result = agent.run(&task.description, &task.files, task.complexity).await;
+                (task, result)
+            });
         }
 
-        // 5. Collect results
+        // 5. Collect results as they complete
         let mut results = Vec::new();
         let mut any_applied = false;
 
-        for (task, result) in handles {
-            match result {
-                Ok(agent_result) => {
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok((task, Ok(agent_result))) => {
                     if agent_result.applied {
                         any_applied = true;
                         info!(task_id = %task.id, edits = agent_result.edits.len(), "Agent completed with edits");
@@ -132,13 +156,16 @@ impl<'a> SwarmRunner<'a> {
                         error: None,
                     });
                 }
-                Err(e) => {
+                Ok((task, Err(e))) => {
                     error!(task_id = %task.id, error = %e, "Agent failed");
                     results.push(TaskRunResult {
                         task,
                         agent_result: None,
                         error: Some(e.to_string()),
                     });
+                }
+                Err(e) => {
+                    warn!("Agent task panicked: {e}");
                 }
             }
         }

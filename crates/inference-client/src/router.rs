@@ -219,12 +219,30 @@ fn best_ollama_by_size(models: &[ModelInfo], size_ok: impl Fn(u32) -> bool) -> O
     candidates.first().map(|m| (*m).clone())
 }
 
-/// Find the largest Ollama model available.
+/// Preferred model name prefixes — models known to follow structured output well.
+/// Checked in order; first match wins over a larger but less capable model.
+const PREFERRED_CODE_MODELS: &[&str] = &["deepseek-coder", "qwen2.5-coder", "qwen"];
+
+/// Find the best Ollama model: prefer known-good code models, then largest by params.
 fn largest_ollama(models: &[ModelInfo]) -> Option<ModelInfo> {
-    models.iter()
+    let ollama_ready: Vec<&ModelInfo> = models.iter()
         .filter(|m| m.backend == BackendKind::Ollama && m.ready)
+        .collect();
+
+    // First: try preferred code models (largest among them)
+    for prefix in PREFERRED_CODE_MODELS {
+        if let Some(m) = ollama_ready.iter()
+            .filter(|m| m.name.starts_with(prefix))
+            .max_by_key(|m| parse_param_size_b(&m.parameter_size))
+        {
+            return Some((*m).clone());
+        }
+    }
+
+    // Fallback: largest available
+    ollama_ready.iter()
         .max_by_key(|m| parse_param_size_b(&m.parameter_size))
-        .cloned()
+        .map(|m| (*m).clone())
 }
 
 /// Find a Claude model matching a name fragment.

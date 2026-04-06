@@ -19,7 +19,7 @@ impl Guest for WebUi {
         // Route
         match (method, path.as_str()) {
             (Method::Get, "/") | (Method::Get, "/index.html") => {
-                serve_dashboard(response_out);
+                respond_json(response_out, 200, r#"{"status":"api-only","ui":"http://localhost:3000"}"#);
             }
             (Method::Get, p) if p.starts_with("/api/models") => {
                 api_models(response_out);
@@ -66,6 +66,13 @@ impl Guest for WebUi {
             (Method::Post, "/api/run") => {
                 let body = read_body(&request);
                 api_submit_run(response_out, &body);
+            }
+            (Method::Get, p) if p.starts_with("/api/sub-runs/") => {
+                let parent_id = p.strip_prefix("/api/sub-runs/").unwrap_or("");
+                api_sub_runs(response_out, parent_id);
+            }
+            (Method::Delete, "/api/clear") => {
+                api_clear_all(response_out);
             }
             _ => {
                 respond_json(response_out, 404, r#"{"error":"not found"}"#);
@@ -288,6 +295,32 @@ fn api_delete_project(response_out: ResponseOutparam, name: &str) {
     );
     match surreal_query(&query) {
         Ok(_) => respond_json(response_out, 200, r#"{"status":"deleted"}"#),
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn api_sub_runs(response_out: ResponseOutparam, parent_id: &str) {
+    let safe_id = parent_id.replace('\'', "");
+    let query = format!(
+        "SELECT * FROM agent_run WHERE parent_run_id = '{}' ORDER BY created_at ASC",
+        safe_id
+    );
+    match surreal_query(&query) {
+        Ok(body) => {
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let runs = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(vec![]));
+            respond_json(response_out, 200, &serde_json::to_string(&runs).unwrap_or_default());
+        }
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"surrealdb: {}"}}"#, e)),
+    }
+}
+
+fn api_clear_all(response_out: ResponseOutparam) {
+    let query = "DELETE FROM agent_run; DELETE FROM project;";
+    match surreal_query(query) {
+        Ok(_) => respond_json(response_out, 200, r#"{"status":"cleared"}"#),
         Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
     }
 }
@@ -517,7 +550,7 @@ fn api_run_detail(response_out: ResponseOutparam, id: &str) {
 
 fn api_runs(response_out: ResponseOutparam, project: &str) {
     let query = format!(
-        "SELECT id, project, task_description, agent_id, model_used, status, tokens_input, tokens_output, duration_ms, created_at, error_message, quality_gate_passed, files_modified FROM agent_run WHERE project = '{}' ORDER BY created_at DESC LIMIT 20",
+        "SELECT id, project, task_description, agent_id, model_used, status, tokens_input, tokens_output, duration_ms, created_at, error_message, quality_gate_passed, files_modified, started_at, last_activity_at, attempts, progress_message FROM agent_run WHERE project = '{}' ORDER BY created_at DESC LIMIT 20",
         project.replace('\'', "")
     );
     match surreal_query(&query) {

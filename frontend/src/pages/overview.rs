@@ -16,9 +16,39 @@ pub fn OverviewPage() -> impl IntoView {
     let status_text = Signal::derive(move || if state.health_online.get() { "Online".to_string() } else { "Offline".to_string() });
     let active = Signal::derive(move || state.active_count.get().to_string());
     let model_count = Signal::derive(move || state.models.get().len().to_string());
+    let clearing = RwSignal::new(false);
+
+    let on_clear = move |_| {
+        if clearing.get() { return; }
+        let window = web_sys::window().unwrap();
+        if !window.confirm_with_message("Clear ALL projects and agent runs?").unwrap_or(false) {
+            return;
+        }
+        clearing.set(true);
+        wasm_bindgen_futures::spawn_local(async move {
+            match api::clear_all().await {
+                Ok(_) => {
+                    state.projects.set(vec![]);
+                    state.recent_activity.set(vec![]);
+                    state.live_agents.set(vec![]);
+                    state.active_count.set(0);
+                    web_sys::console::log_1(&"All data cleared".into());
+                }
+                Err(e) => {
+                    web_sys::console::error_1(&format!("Clear failed: {e}").into());
+                }
+            }
+            clearing.set(false);
+        });
+    };
 
     view! {
-        <h1>"Overview"</h1>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
+            <h1 style="flex:1">"Overview"</h1>
+            <button class="btn" style="color:var(--error);font-size:13px" on:click=on_clear>
+                {move || if clearing.get() { "Clearing..." } else { "Clear All Data" }}
+            </button>
+        </div>
         <p class="subtitle">"System status and recent activity"</p>
         <div class="grid grid-3">
             <StatCard title="System" value=status_text label="wasmCloud 2.0" />

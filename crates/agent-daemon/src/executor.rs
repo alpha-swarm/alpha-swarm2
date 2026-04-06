@@ -4,8 +4,11 @@ use anyhow::Result;
 use tracing::{info, warn, error};
 
 use inference_client::{InferenceRouter, OllamaBackend};
-use knowledge_base::{AgentRun, KnowledgeStore, RunStatus};
+use knowledge_base::{AgentRun, AttemptRecord, KnowledgeStore, RunStatus};
 use swarm_config::SwarmConfig;
+
+/// Max chars for attempt preview fields
+const ATTEMPT_PREVIEW_CHARS: usize = 500;
 use swarm_events::{EventPublisher, SwarmEvent};
 
 use crate::repo;
@@ -14,10 +17,10 @@ use crate::git_pr;
 /// Handle a single task: claim → clone repo → execute → update status → emit events.
 pub async fn handle_task(
     config: &SwarmConfig,
-    router: &InferenceRouter,
-    ollama: &OllamaBackend,
-    store: &KnowledgeStore,
-    publisher: Option<&EventPublisher>,
+    router: Arc<InferenceRouter>,
+    ollama: Arc<OllamaBackend>,
+    store: Arc<KnowledgeStore>,
+    publisher: Option<Arc<EventPublisher>>,
     task_id: &str,
     project: &str,
     goal: &str,
@@ -33,7 +36,7 @@ pub async fn handle_task(
     }
 
     // Emit agent started event
-    if let Some(pub_) = publisher {
+    if let Some(pub_) = &publisher {
         let _ = pub_.publish(&SwarmEvent::AgentStarted {
             project: project.into(),
             agent_id: format!("daemon-{}", &task_id[..task_id.len().min(8)]),
@@ -48,11 +51,11 @@ pub async fn handle_task(
     let repo_url = match store.get_project_repo(project).await {
         Ok(Some(url)) => url,
         Ok(None) => {
-            fail_task(store, publisher, task_id, project, goal, "No repo URL configured for project").await;
+            fail_task(&store, &publisher, task_id, project, goal, "No repo URL configured for project").await;
             return;
         }
         Err(e) => {
-            fail_task(store, publisher, task_id, project, goal, &format!("Failed to query project: {e}")).await;
+            fail_task(&store, &publisher, task_id, project, goal, &format!("Failed to query project: {e}")).await;
             return;
         }
     };
@@ -61,12 +64,26 @@ pub async fn handle_task(
     let repo_path = match repo::ensure_repo(project, &repo_url) {
         Ok(p) => p,
         Err(e) => {
-            fail_task(store, publisher, task_id, project, goal, &format!("Git clone failed: {e}")).await;
+            fail_task(&store, &publisher, task_id, project, goal, &format!("Git clone failed: {e}")).await;
             return;
         }
     };
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
+
+    // Helper: update progress on the running task
+    async fn update_progress(store: &KnowledgeStore, task_id: &str, msg: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let safe_msg = msg.replace('\'', "");
+        let query = if task_id.contains(':') {
+            format!("UPDATE {} SET last_activity_at = '{}', progress_message = '{}'", task_id, now, safe_msg)
+        } else {
+            format!("UPDATE type::thing('agent_run', '{}') SET last_activity_at = '{}', progress_message = '{}'", task_id, now, safe_msg)
+        };
+        let _ = store.db_query_raw(&query).await;
+    }
+
+    update_progress(&store, task_id, "Planning goal decomposition...").await;
 
     // 4. Run the swarm orchestrator with retry loop (orchestrator tier fuel)
     let tier = &config.tiers.orchestrator;
@@ -112,8 +129,18 @@ pub async fn handle_task(
             format!("{}\n\nPREVIOUS ATTEMPT FAILED:\n{}\n\nFix the issues from the previous attempt.", goal, last_errors)
         };
 
-        let mut runner = swarm_orchestrator::SwarmRunner::new(router, ollama, &repo_path, project);
-        runner = runner.with_store(store);
+        let progress_msg = if iteration > 1 {
+            format!("Retry {}/{} — replanning...", iteration, max_iterations)
+        } else {
+            "Running agents...".to_string()
+        };
+        update_progress(&store, task_id, &progress_msg).await;
+
+        let mut runner = swarm_orchestrator::SwarmRunner::new(Arc::clone(&router), Arc::clone(&ollama), &repo_path, project);
+        runner = runner
+            .with_store(Arc::clone(&store))
+            .with_parent_run_id(task_id)
+            .with_max_concurrent(config.resources.max_concurrent_agents);
 
         match runner.run(&augmented_goal).await {
             Ok(result) => {
@@ -125,6 +152,8 @@ pub async fn handle_task(
                 total_tokens_used += iter_tokens;
 
                 if result.quality_passed {
+                    let tasks_done = result.results.iter().filter(|r| r.agent_result.as_ref().is_some_and(|a| a.applied)).count();
+                    update_progress(&store, task_id, &format!("Quality passed — {} tasks done, creating PR...", tasks_done)).await;
                     info!(task_id, iteration, total_tokens_used, "Quality gate passed!");
                     final_result = Some(result);
                     break;
@@ -154,15 +183,29 @@ pub async fn handle_task(
 
     let duration = start.elapsed().as_millis() as u64;
 
+    let start_time_rfc3339 = chrono::Utc::now().checked_sub_signed(chrono::Duration::milliseconds(duration as i64))
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339();
+
     match final_result {
         Some(result) => {
-            let status = if result.quality_passed { RunStatus::Passed } else { RunStatus::Failed };
             let tasks_passed = result.results.iter().filter(|r| r.agent_result.as_ref().is_some_and(|a| a.applied)).count();
             let tasks_failed = result.results.iter().filter(|r| r.error.is_some()).count();
+            let any_work_done = tasks_passed > 0;
+
+            // A run with zero successful sub-agents is always a failure
+            let status = if !any_work_done {
+                RunStatus::Failed
+            } else if result.quality_passed {
+                RunStatus::Passed
+            } else {
+                RunStatus::Failed
+            };
 
             info!(
                 task_id, project,
                 quality_passed = result.quality_passed,
+                any_work_done,
                 tasks = result.tasks.len(),
                 tasks_passed,
                 tasks_failed,
@@ -180,19 +223,48 @@ pub async fn handle_task(
                 .collect();
             let model_str = if models_used.is_empty() { "unknown".to_string() } else { models_used.join(", ") };
 
-            // Update run record
-            let mut final_run = AgentRun::new(project, goal, "daemon", &model_str);
-            final_run.status = status;
-            final_run.duration_ms = duration;
-            final_run.quality_gate_passed = Some(result.quality_passed);
-            final_run.diff = result.merged_diff;
-
             // Aggregate token counts from sub-agents
             let (total_in, total_out) = result.results.iter()
                 .filter_map(|r| r.agent_result.as_ref())
                 .fold((0u32, 0u32), |(i, o), a| (i + a.inference_response.tokens_input, o + a.inference_response.tokens_output));
+
+            // Build run record with full tracking data
+            let mut final_run = AgentRun::new(project, goal, "daemon", &model_str);
+            final_run.status = status;
+            final_run.duration_ms = duration;
+            final_run.quality_gate_passed = Some(result.quality_passed && any_work_done);
+            final_run.diff = result.merged_diff;
             final_run.tokens_input = total_in;
             final_run.tokens_output = total_out;
+            final_run.started_at = Some(start_time_rfc3339);
+            final_run.last_activity_at = Some(chrono::Utc::now().to_rfc3339());
+
+            // Build attempts from sub-agent results (one per sub-task)
+            final_run.attempts = result.results.iter().enumerate().map(|(i, r)| {
+                AttemptRecord {
+                    attempt: (i + 1) as u32,
+                    model: r.agent_result.as_ref().map(|a| a.inference_response.model.clone()).unwrap_or_default(),
+                    prompt_preview: r.task.description.chars().take(ATTEMPT_PREVIEW_CHARS).collect(),
+                    response_preview: r.agent_result.as_ref()
+                        .map(|a| a.inference_response.content.chars().take(ATTEMPT_PREVIEW_CHARS).collect())
+                        .unwrap_or_default(),
+                    tokens_input: r.agent_result.as_ref().map(|a| a.inference_response.tokens_input).unwrap_or(0),
+                    tokens_output: r.agent_result.as_ref().map(|a| a.inference_response.tokens_output).unwrap_or(0),
+                    duration_ms: r.agent_result.as_ref().map(|a| a.inference_response.duration_ms).unwrap_or(0),
+                    quality_passed: r.agent_result.as_ref().map(|a| a.applied),
+                    error: r.error.clone(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                }
+            }).collect();
+
+            // Aggregate response text from all sub-agents
+            let responses: Vec<String> = result.results.iter()
+                .filter_map(|r| r.agent_result.as_ref())
+                .map(|a| a.inference_response.content.clone())
+                .collect();
+            if !responses.is_empty() {
+                final_run.response_text = Some(responses.join("\n---\n"));
+            }
 
             // Collect files modified from sub-agents
             final_run.files_modified = result.results.iter()
@@ -201,40 +273,47 @@ pub async fn handle_task(
                 .into_iter()
                 .collect();
 
-            if !result.quality_passed {
-                let errors: Vec<String> = result.results.iter()
-                    .filter_map(|r| r.error.as_ref())
-                    .cloned()
-                    .collect();
-                if !errors.is_empty() {
-                    final_run.error_message = Some(errors.join("\n"));
-                }
-            }
-
-            // 5. Create PR if there are changes
-            let sub_tasks_info: Vec<(String, String, String)> = result.results.iter()
-                .map(|r| {
-                    let model = r.agent_result.as_ref().map(|a| a.inference_response.model.clone()).unwrap_or_default();
-                    let status = if r.error.is_some() { "failed" } else if r.agent_result.as_ref().is_some_and(|a| a.applied) { "passed" } else { "skipped" };
-                    (r.task.description.clone(), model, status.to_string())
-                })
+            // Collect errors
+            let agent_errors: Vec<String> = result.results.iter()
+                .filter_map(|r| r.error.as_ref())
+                .cloned()
                 .collect();
 
-            match git_pr::create_pr(&repo_path, goal, &sub_tasks_info, result.quality_passed, duration, total_in, total_out) {
-                Ok(pr_url) => {
-                    info!(pr_url = %pr_url, "PR created");
-                    final_run.diff = Some(format!("PR: {}", pr_url));
-                }
-                Err(e) => {
-                    warn!("PR creation failed (non-fatal): {e}");
-                    // Still update the run — PR is optional
+            if !any_work_done {
+                final_run.error_message = Some(if agent_errors.is_empty() {
+                    "All agents completed without making changes".into()
+                } else {
+                    format!("All agents failed:\n{}", agent_errors.join("\n"))
+                });
+            } else if !result.quality_passed && !agent_errors.is_empty() {
+                final_run.error_message = Some(agent_errors.join("\n"));
+            }
+
+            // 5. Create PR if there are actual changes
+            if any_work_done {
+                let sub_tasks_info: Vec<(String, String, String)> = result.results.iter()
+                    .map(|r| {
+                        let model = r.agent_result.as_ref().map(|a| a.inference_response.model.clone()).unwrap_or_default();
+                        let st = if r.error.is_some() { "failed" } else if r.agent_result.as_ref().is_some_and(|a| a.applied) { "passed" } else { "skipped" };
+                        (r.task.description.clone(), model, st.to_string())
+                    })
+                    .collect();
+
+                match git_pr::create_pr(&repo_path, goal, &sub_tasks_info, result.quality_passed, duration, total_in, total_out) {
+                    Ok(pr_url) => {
+                        info!(pr_url = %pr_url, "PR created");
+                        final_run.diff = Some(format!("PR: {}", pr_url));
+                    }
+                    Err(e) => {
+                        warn!("PR creation failed (non-fatal): {e}");
+                    }
                 }
             }
 
             let _ = store.update_run(task_id, &final_run).await;
 
             // Emit completion event
-            if let Some(pub_) = publisher {
+            if let Some(pub_) = &publisher {
                 let _ = pub_.publish(&SwarmEvent::SwarmCompleted {
                     project: project.into(),
                     goal: goal.into(),
@@ -247,7 +326,7 @@ pub async fn handle_task(
             }
         }
         None => {
-            fail_task_with_duration(store, publisher, task_id, project, goal,
+            fail_task_with_duration(&store, &publisher, task_id, project, goal,
                 &format!("All {} iterations failed. Last error: {}", iteration, last_errors), duration).await;
         }
     }
@@ -255,15 +334,15 @@ pub async fn handle_task(
 
 async fn fail_task(
     store: &KnowledgeStore,
-    publisher: Option<&EventPublisher>,
+    publisher: &Option<Arc<EventPublisher>>,
     task_id: &str, project: &str, goal: &str, error: &str,
 ) {
-    fail_task_with_duration(store, publisher, task_id, project, goal, error, 0).await;
+    fail_task_with_duration(&store, &publisher, task_id, project, goal, error, 0).await;
 }
 
 async fn fail_task_with_duration(
     store: &KnowledgeStore,
-    publisher: Option<&EventPublisher>,
+    publisher: &Option<Arc<EventPublisher>>,
     task_id: &str, project: &str, goal: &str, error_msg: &str, duration_ms: u64,
 ) {
     error!(task_id, project, error = error_msg, "Task failed");
@@ -274,7 +353,7 @@ async fn fail_task_with_duration(
     run.duration_ms = duration_ms;
     let _ = store.update_run(task_id, &run).await;
 
-    if let Some(pub_) = publisher {
+    if let Some(pub_) = &publisher {
         let _ = pub_.publish(&SwarmEvent::AgentFailed {
             project: project.into(),
             agent_id: format!("daemon-{}", &task_id[..task_id.len().min(8)]),

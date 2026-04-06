@@ -54,6 +54,14 @@ pub async fn delete_project(name: &str) -> Result<(), String> {
     delete(&format!("/projects/{name}")).await
 }
 
+pub async fn clear_all() -> Result<(), String> {
+    delete("/clear").await
+}
+
+pub async fn get_sub_runs(parent_id: &str) -> Result<Vec<AgentRun>, String> {
+    get(&format!("/sub-runs/{parent_id}")).await
+}
+
 pub async fn list_runs(project: &str) -> Result<Vec<AgentRun>, String> {
     get(&format!("/runs/{project}")).await
 }

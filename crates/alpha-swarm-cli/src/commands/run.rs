@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use inference_client::{Complexity, InferenceRouter};
@@ -9,7 +10,7 @@ use swarm_config::SwarmConfig;
 use crate::setup;
 
 pub async fn execute(
-    router: &InferenceRouter,
+    router: Arc<InferenceRouter>,
     config: &SwarmConfig,
     repo: PathBuf,
     task: String,
@@ -27,21 +28,22 @@ pub async fn execute(
     let files = if files.is_empty() { setup::discover_files(&repo)? } else { files };
 
     let kb = if project.is_some() { setup::get_knowledge_store(config).await? } else { None };
-    let ollama = setup::get_ollama(config);
+    let ollama = Arc::new(setup::get_ollama(config));
     let events = setup::get_event_publisher(config).await?;
-
-    let mut agent = Agent::new(router, &repo);
-    if let Some(pub_) = &events {
-        agent = agent.with_events(pub_);
+    let mut agent = Agent::new(Arc::clone(&router), &repo);
+    if let Some(pub_) = events {
+        agent = agent.with_events(Arc::new(pub_));
     }
-    if let (Some(proj), Some(store)) = (&project, &kb) {
+    let kb_arc = kb.map(Arc::new);
+    if let (Some(proj), Some(store)) = (&project, &kb_arc) {
         let embed_model = config.defaults.embed_model.clone();
         agent = agent.with_knowledge(KnowledgeConfig {
-            store,
-            embedder: &ollama,
+            store: Arc::clone(store),
+            embedder: Arc::clone(&ollama),
             embed_model,
             project: proj.clone(),
             skip_threshold: 0.9,
+            parent_run_id: None,
         });
         info!(project = %proj, "Knowledge base enabled");
     }
@@ -77,7 +79,7 @@ pub async fn execute(
         let checks = quality_gate_lib::run_all(&repo, &config).await?;
         let all_passed = checks.iter().all(|c| c.passed);
 
-        if let (Some(store), Some(id)) = (&kb, &result.run_id) {
+        if let (Some(store), Some(id)) = (&kb_arc, &result.run_id) {
             let mut run = knowledge_base::AgentRun::new(
                 project.as_deref().unwrap_or(""), &task, "", &result.inference_response.model,
             );

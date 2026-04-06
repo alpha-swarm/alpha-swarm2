@@ -27,10 +27,15 @@ pub struct ResourceConfig {
     pub max_cpu_percent: f64,
     pub max_ram_percent: f64,
     pub check_interval_secs: u64,
+    /// Max parallel sub-agents per swarm run (to avoid OOM with large models).
+    #[serde(default = "default_max_concurrent_agents")]
+    pub max_concurrent_agents: usize,
     /// Monitored hosts.
     #[serde(default = "default_hosts")]
     pub hosts: Vec<HostConfig>,
 }
+
+fn default_max_concurrent_agents() -> usize { 2 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HostConfig {
@@ -188,6 +193,7 @@ impl Default for ResourceConfig {
             max_cpu_percent: 80.0,
             max_ram_percent: 80.0,
             check_interval_secs: 10,
+            max_concurrent_agents: default_max_concurrent_agents(),
             hosts: default_hosts(),
         }
     }

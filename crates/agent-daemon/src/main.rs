@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
                 let config = config.clone();
 
                 tokio::spawn(async move {
-                    executor::handle_task(&config, &router, &ollama, &store, publisher.as_deref(), &id, &project, &goal).await;
+                    executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal).await;
                 });
             }
         }
@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
                     let config = config.clone();
 
                     tokio::spawn(async move {
-                        executor::handle_task(&config, &router, &ollama, &store, publisher.as_deref(), &task_id, &project, &goal).await;
+                        executor::handle_task(&config, router, ollama, store, publisher, &task_id, &project, &goal).await;
                     });
                 }
                 Some(_) => {} // ignore other events
@@ -174,7 +174,7 @@ async fn main() -> Result<()> {
                     let config = config.clone();
 
                     tokio::spawn(async move {
-                        executor::handle_task(&config, &router, &ollama, &store, publisher.as_deref(), &id, &project, &goal).await;
+                        executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal).await;
                     });
                 }
             }

@@ -39,7 +39,7 @@ pub fn ProjectDetailPage() -> impl IntoView {
 
     let pass_rate = Signal::derive(move || format!("{}%", (metrics.get().pass_rate * 100.0) as u32));
     let total_runs = Signal::derive(move || metrics.get().total_runs.to_string());
-    let avg_dur = Signal::derive(move || format!("{:.1}s", metrics.get().avg_duration_ms as f64 / 1000.0));
+    let avg_dur = Signal::derive(move || crate::types::format_duration(metrics.get().avg_duration_ms));
 
     view! {
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
@@ -57,7 +57,7 @@ pub fn ProjectDetailPage() -> impl IntoView {
 
         <h2 style="font-size:15px;font-weight:600;margin:28px 0 12px">"Task Board"</h2>
         <div style="display:flex;gap:16px;overflow-x:auto;min-height:150px">
-            {move || view! { <KanbanBoard goals=goals.get() rerun_project=rerun_project.clone() /> }}
+            {move || view! { <KanbanBoard goals=goals.get() rerun_project=rerun_project.clone() run_detail=run_detail /> }}
         </div>
 
         <h2 style="font-size:15px;font-weight:600;margin:28px 0 12px">"Run History"</h2>
@@ -90,9 +90,9 @@ fn RunTable(runs: RwSignal<Vec<AgentRun>>, run_detail: RwSignal<Option<AgentRun>
                     let rc = r.clone();
                     let st = r.status.clone();
                     let model = r.model_used.clone();
-                    let task = if r.task_description.len() > 40 { format!("{}...", &r.task_description[..40]) } else { r.task_description.clone() };
+                    let task = if r.task_description.len() > crate::types::TASK_PREVIEW_CHARS { format!("{}...", &r.task_description[..crate::types::TASK_PREVIEW_CHARS]) } else { r.task_description.clone() };
                     let tokens = r.tokens_output;
-                    let dur = format!("{:.1}s", r.duration_secs());
+                    let dur = r.duration_human();
                     view! {
                         <tr style="cursor:pointer" on:click=move |_| {
                             let rc = rc.clone();

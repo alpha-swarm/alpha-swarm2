@@ -1,11 +1,13 @@
 use leptos::prelude::*;
 use crate::types::*;
 use crate::api;
+use crate::components::badge::StatusBadge;
 
 #[component]
 pub fn KanbanBoard(
     goals: Vec<Goal>,
     #[prop(optional, into)] rerun_project: String,
+    #[prop(optional)] run_detail: Option<RwSignal<Option<AgentRun>>>,
 ) -> impl IntoView {
     if goals.is_empty() {
         return view! { <p class="empty">"No tasks yet. Submit a task to get started."</p> }.into_any();
@@ -27,13 +29,13 @@ pub fn KanbanBoard(
         let rerun_project = rerun_project.clone();
 
         Some(view! {
-            <div style="min-width:280px;max-width:340px;flex-shrink:0">
+            <div style="min-width:320px;flex:1">
                 <div style=format!("display:flex;align-items:center;gap:8px;padding:10px 0;font-size:13px;font-weight:600;border-bottom:2px solid {color};margin-bottom:8px")>
                     {label}" "<span style="color:var(--muted);font-weight:400">{count}</span>
                 </div>
                 {col_goals.into_iter().map(|g| {
                     let rp = rerun_project.clone();
-                    view! { <GoalCard goal=g rerun_project=rp /> }
+                    view! { <GoalCard goal=g rerun_project=rp run_detail=run_detail /> }
                 }).collect_view()}
             </div>
         })
@@ -44,6 +46,7 @@ pub fn KanbanBoard(
 fn GoalCard(
     goal: Goal,
     #[prop(into)] rerun_project: String,
+    run_detail: Option<RwSignal<Option<AgentRun>>>,
 ) -> impl IntoView {
     let expanded = RwSignal::new(false);
     let goal_text = goal.goal.clone();
@@ -51,6 +54,10 @@ fn GoalCard(
     let agent_count = goal.total;
     let rerun_text = goal.goal.clone();
     let can_rerun = !rerun_project.is_empty();
+    // Show progress from the first running agent (the daemon run)
+    let progress = agents.iter()
+        .find(|a| a.status == "running")
+        .and_then(|a| a.progress_message.clone());
 
     view! {
         <div class="card" style="margin-bottom:8px;padding:12px 14px">
@@ -79,30 +86,76 @@ fn GoalCard(
                     }
                 })}
             </div>
-            <div style="font-size:12px;color:var(--muted);margin-top:4px">{agent_count}" agents"</div>
+            <div style="font-size:12px;color:var(--muted);margin-top:4px">
+                {agent_count}" agents"
+                {progress.map(|p| view! {
+                    <span style="margin-left:8px;color:var(--accent);font-style:italic">{p}</span>
+                })}
+            </div>
 
             {move || expanded.get().then(|| {
                 let agents = agents.clone();
                 view! {
                     <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px">
-                        {agents.into_iter().map(|a| {
-                            let st = a.status.clone();
-                            let st_class = format!("badge {st}");
-                            let model = a.model_used.clone();
-                            let dur = format!("{:.1}s", a.duration_secs());
-                            let agent_id = a.agent_id.clone();
-                            view! {
-                                <div style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 0">
-                                    <span class=st_class style="font-size:10px;padding:1px 6px">{st}</span>
-                                    <span>{agent_id}</span>
-                                    <span style="color:var(--muted)">{model}</span>
-                                    <span style="margin-left:auto;color:var(--muted)">{dur}</span>
-                                </div>
-                            }
-                        }).collect_view()}
+                        <SubAgentTable agents=agents run_detail=run_detail />
                     </div>
                 }
             })}
         </div>
+    }
+}
+
+#[component]
+fn SubAgentTable(
+    agents: Vec<AgentRun>,
+    run_detail: Option<RwSignal<Option<AgentRun>>>,
+) -> impl IntoView {
+    let headers = ["Status", "Model", "Task", "Tokens", "Duration"];
+
+    view! {
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <tr>
+                {headers.into_iter().map(|h| view! {
+                    <th style="text-align:left;padding:6px 8px;color:var(--muted);border-bottom:1px solid var(--border);font-weight:500">{h}</th>
+                }).collect_view()}
+            </tr>
+            {agents.into_iter().map(|a| {
+                let st = a.status.clone();
+                let model = a.model_used.clone();
+                let task = if a.task_description.len() > TASK_PREVIEW_CHARS {
+                    format!("{}...", &a.task_description[..TASK_PREVIEW_CHARS])
+                } else {
+                    a.task_description.clone()
+                };
+                let tokens = format!("{}/{}", a.tokens_input, a.tokens_output);
+                let dur = a.duration_human();
+                let clickable = run_detail.is_some();
+                let ac = a.clone();
+
+                view! {
+                    <tr
+                        style=if clickable { "cursor:pointer" } else { "" }
+                        on:click=move |_| {
+                            if let Some(rd) = run_detail {
+                                let ac = ac.clone();
+                                let id = ac.id.clone().unwrap_or_default();
+                                rd.set(Some(ac));
+                                wasm_bindgen_futures::spawn_local(async move {
+                                    if let Ok(detail) = api::get_run_detail(&id).await {
+                                        rd.set(Some(detail));
+                                    }
+                                });
+                            }
+                        }
+                    >
+                        <td style="padding:6px 8px;border-bottom:1px solid var(--border)"><StatusBadge status=st /></td>
+                        <td style="padding:6px 8px;border-bottom:1px solid var(--border)">{model}</td>
+                        <td style="padding:6px 8px;border-bottom:1px solid var(--border)">{task}</td>
+                        <td style="padding:6px 8px;border-bottom:1px solid var(--border)">{tokens}</td>
+                        <td style="padding:6px 8px;border-bottom:1px solid var(--border)">{dur}</td>
+                    </tr>
+                }
+            }).collect_view()}
+        </table>
     }
 }

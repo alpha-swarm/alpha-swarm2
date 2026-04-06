@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
@@ -18,7 +19,10 @@ fn tier_options(tier: &swarm_config::TierConfig) -> InferenceOptions {
 fn default_options() -> InferenceOptions {
     tier_options(&swarm_config::TierConfig::agent())
 }
-use knowledge_base::{AgentRun, KnowledgeStore, RunStatus};
+use knowledge_base::{AgentRun, AttemptRecord, KnowledgeStore, RunStatus};
+
+/// Max characters to store in attempt preview fields
+const ATTEMPT_PREVIEW_CHARS: usize = 500;
 use swarm_events::{EventPublisher, SwarmEvent};
 
 use crate::parser::{FileEdit, parse_edits};
@@ -36,25 +40,26 @@ pub struct AgentResult {
 }
 
 /// Configuration for knowledge-aware agent.
-pub struct KnowledgeConfig<'a> {
-    pub store: &'a KnowledgeStore,
-    pub embedder: &'a OllamaBackend,
+pub struct KnowledgeConfig {
+    pub store: Arc<KnowledgeStore>,
+    pub embedder: Arc<OllamaBackend>,
     pub embed_model: String,
     pub project: String,
     pub skip_threshold: f32,
+    pub parent_run_id: Option<String>,
 }
 
 /// A one-shot code modification agent.
-pub struct Agent<'a> {
-    router: &'a InferenceRouter,
+pub struct Agent {
+    router: Arc<InferenceRouter>,
     repo_path: PathBuf,
-    knowledge: Option<KnowledgeConfig<'a>>,
-    events: Option<&'a EventPublisher>,
+    knowledge: Option<KnowledgeConfig>,
+    events: Option<Arc<EventPublisher>>,
     project: String,
 }
 
-impl<'a> Agent<'a> {
-    pub fn new(router: &'a InferenceRouter, repo_path: impl Into<PathBuf>) -> Self {
+impl Agent {
+    pub fn new(router: Arc<InferenceRouter>, repo_path: impl Into<PathBuf>) -> Self {
         Self {
             router,
             repo_path: repo_path.into(),
@@ -64,13 +69,13 @@ impl<'a> Agent<'a> {
         }
     }
 
-    pub fn with_knowledge(mut self, config: KnowledgeConfig<'a>) -> Self {
+    pub fn with_knowledge(mut self, config: KnowledgeConfig) -> Self {
         self.project = config.project.clone();
         self.knowledge = Some(config);
         self
     }
 
-    pub fn with_events(mut self, publisher: &'a EventPublisher) -> Self {
+    pub fn with_events(mut self, publisher: Arc<EventPublisher>) -> Self {
         self.events = Some(publisher);
         self
     }
@@ -177,12 +182,20 @@ impl<'a> Agent<'a> {
             }).await;
         }
 
+        // Serialize prompt for tracking
+        let prompt_json = serde_json::to_string(&messages).unwrap_or_default();
+        let now = chrono::Utc::now().to_rfc3339();
+
         // --- Knowledge: record run start ---
         let mut run_record = None;
         let mut run_id = None;
         if let Some(kc) = &self.knowledge {
             let mut record = AgentRun::new(&kc.project, task, &agent_id, "pending");
             record.files_modified = file_paths.to_vec();
+            record.prompt_sent = Some(prompt_json.clone());
+            record.started_at = Some(now.clone());
+            record.last_activity_at = Some(now);
+            record.parent_run_id = kc.parent_run_id.clone();
             match kc.store.store_run(&record).await {
                 Ok(id) => {
                     info!(run_id = %id, "Recorded run start in knowledge base");
@@ -221,6 +234,8 @@ impl<'a> Agent<'a> {
                     record.tokens_input = response.tokens_input;
                     record.tokens_output = response.tokens_output;
                     record.duration_ms = response.duration_ms;
+                    record.response_text = Some(response.content.clone());
+                    record.last_activity_at = Some(chrono::Utc::now().to_rfc3339());
                     let _ = kc.store.update_run(id, &record).await;
 
                     // Store embedding for future reference
@@ -256,6 +271,8 @@ impl<'a> Agent<'a> {
             record.tokens_output = response.tokens_output;
             record.duration_ms = response.duration_ms;
             record.diff = Some(response.content.clone());
+            record.response_text = Some(response.content.clone());
+            record.last_activity_at = Some(chrono::Utc::now().to_rfc3339());
             let _ = kc.store.update_run(id, &record).await;
 
             // Store embedding
@@ -302,8 +319,25 @@ impl<'a> Agent<'a> {
         repo_path: &std::path::Path,
         max_attempts: u32,
     ) -> Result<AgentResult> {
+        let mut attempts = Vec::<AttemptRecord>::new();
         let mut last_result = self.run(task, file_paths, complexity).await?;
+
+        // Record attempt 1
+        attempts.push(AttemptRecord {
+            attempt: 1,
+            model: last_result.inference_response.model.clone(),
+            prompt_preview: String::new(), // already stored in prompt_sent
+            response_preview: last_result.inference_response.content.chars().take(ATTEMPT_PREVIEW_CHARS).collect(),
+            tokens_input: last_result.inference_response.tokens_input,
+            tokens_output: last_result.inference_response.tokens_output,
+            duration_ms: last_result.inference_response.duration_ms,
+            quality_passed: None,
+            error: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        });
+
         if !last_result.applied || last_result.skipped {
+            self.update_attempts(&last_result.run_id, &attempts).await;
             return Ok(last_result);
         }
 
@@ -312,7 +346,10 @@ impl<'a> Agent<'a> {
         let checks = quality_gate_lib::run_all(repo_path, &config).await?;
         let passed = checks.iter().all(|c| c.passed);
 
+        attempts.last_mut().unwrap().quality_passed = Some(passed);
+
         if passed {
+            self.update_attempts(&last_result.run_id, &attempts).await;
             return Ok(last_result);
         }
 
@@ -359,6 +396,19 @@ impl<'a> Agent<'a> {
                 Ok(e) => e,
                 Err(e) => {
                     warn!("Retry parse failed: {e}");
+                    attempts.push(AttemptRecord {
+                        attempt,
+                        model: response.model.clone(),
+                        prompt_preview: retry_task.chars().take(ATTEMPT_PREVIEW_CHARS).collect(),
+                        response_preview: response.content.chars().take(ATTEMPT_PREVIEW_CHARS).collect(),
+                        tokens_input: response.tokens_input,
+                        tokens_output: response.tokens_output,
+                        duration_ms: response.duration_ms,
+                        quality_passed: None,
+                        error: Some(format!("Parse error: {e}")),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    });
+                    self.update_attempts(&last_result.run_id, &attempts).await;
                     continue;
                 }
             };
@@ -371,6 +421,19 @@ impl<'a> Agent<'a> {
             let checks = quality_gate_lib::run_all(repo_path, &config).await?;
             let passed = checks.iter().all(|c| c.passed);
 
+            attempts.push(AttemptRecord {
+                attempt,
+                model: response.model.clone(),
+                prompt_preview: retry_task.chars().take(ATTEMPT_PREVIEW_CHARS).collect(),
+                response_preview: response.content.chars().take(ATTEMPT_PREVIEW_CHARS).collect(),
+                tokens_input: response.tokens_input,
+                tokens_output: response.tokens_output,
+                duration_ms: response.duration_ms,
+                quality_passed: Some(passed),
+                error: None,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            });
+
             last_result = AgentResult {
                 edits,
                 inference_response: response,
@@ -380,6 +443,8 @@ impl<'a> Agent<'a> {
                 attempt,
                 escalated_from: last_result.escalated_from,
             };
+
+            self.update_attempts(&last_result.run_id, &attempts).await;
 
             if passed {
                 info!(attempt, "Retry succeeded");
@@ -391,12 +456,33 @@ impl<'a> Agent<'a> {
         Ok(last_result)
     }
 
+    async fn update_attempts(&self, run_id: &Option<String>, attempts: &[AttemptRecord]) {
+        if let (Some(kc), Some(id)) = (&self.knowledge, run_id) {
+            let now = chrono::Utc::now().to_rfc3339();
+            let attempts_json = serde_json::to_string(attempts).unwrap_or_default();
+            let query = if id.contains(':') {
+                format!("UPDATE {} SET attempts = {}, last_activity_at = '{}'", id, attempts_json, now)
+            } else {
+                format!("UPDATE type::thing('agent_run', '{}') SET attempts = {}, last_activity_at = '{}'", id, attempts_json, now)
+            };
+            if let Err(e) = kc.store.db_query_raw(&query).await {
+                warn!("Failed to update attempts: {e}");
+            }
+        }
+    }
+
     fn read_files(&self, paths: &[String]) -> Result<Vec<(String, String)>> {
         let mut files = Vec::new();
         for path in paths {
             let full_path = self.repo_path.join(path);
-            let content = std::fs::read_to_string(&full_path)
-                .with_context(|| format!("Failed to read {}", full_path.display()))?;
+            let content = match std::fs::read_to_string(&full_path) {
+                Ok(c) => c,
+                Err(_) => {
+                    // File doesn't exist yet — agent may need to create it
+                    info!(path = %path, "File not found, will be available for creation");
+                    String::new()
+                }
+            };
             files.push((path.clone(), content));
         }
         Ok(files)

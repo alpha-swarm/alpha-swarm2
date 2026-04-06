@@ -34,6 +34,13 @@ impl SimilarRun {
             duration_ms: 0,
             created_at: String::new(),
             embedding: None,
+            prompt_sent: None,
+            response_text: None,
+            attempts: Vec::new(),
+            started_at: None,
+            last_activity_at: None,
+            parent_run_id: None,
+            progress_message: None,
         }
     }
 }

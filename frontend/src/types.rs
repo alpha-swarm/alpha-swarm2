@@ -48,6 +48,44 @@ pub struct AgentRun {
     pub files_modified: Vec<String>,
     #[serde(default)]
     pub diff: Option<String>,
+    #[serde(default)]
+    pub prompt_sent: Option<String>,
+    #[serde(default)]
+    pub response_text: Option<String>,
+    #[serde(default)]
+    pub attempts: Vec<AttemptRecord>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub last_activity_at: Option<String>,
+    #[serde(default)]
+    pub parent_run_id: Option<String>,
+    #[serde(default)]
+    pub progress_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct AttemptRecord {
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub prompt_preview: String,
+    #[serde(default)]
+    pub response_preview: String,
+    #[serde(default)]
+    pub tokens_input: u32,
+    #[serde(default)]
+    pub tokens_output: u32,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub quality_passed: Option<bool>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub timestamp: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -166,6 +204,10 @@ impl AgentRun {
         self.duration_ms as f64 / 1000.0
     }
 
+    pub fn duration_human(&self) -> String {
+        format_duration(self.duration_ms)
+    }
+
     pub fn is_running(&self) -> bool { self.status == "running" }
     pub fn is_passed(&self) -> bool { self.status == "passed" }
     pub fn is_failed(&self) -> bool { self.status == "failed" }
@@ -206,5 +248,53 @@ impl ModelInfo {
         } else {
             String::new()
         }
+    }
+}
+
+// Time constants (milliseconds)
+const MS_PER_SECOND: u64 = 1_000;
+const MS_PER_MINUTE: u64 = 60 * MS_PER_SECOND;
+const MS_PER_HOUR: u64 = 60 * MS_PER_MINUTE;
+const MS_PER_DAY: u64 = 24 * MS_PER_HOUR;
+
+// Zombie detection thresholds
+pub const ZOMBIE_WARNING_MS: u64 = 5 * MS_PER_MINUTE;
+pub const ZOMBIE_ACTIVE_MS: u64 = MS_PER_MINUTE;
+
+// Preview truncation limits
+pub const PREVIEW_CHARS: usize = 500;
+pub const DIFF_PREVIEW_CHARS: usize = 2_000;
+pub const TASK_PREVIEW_CHARS: usize = 40;
+
+pub fn format_duration(ms: u64) -> String {
+    match ms {
+        0 => "—".into(),
+        1..MS_PER_SECOND => format!("{}ms", ms),
+        MS_PER_SECOND..MS_PER_MINUTE => format!("{:.1}s", ms as f64 / MS_PER_SECOND as f64),
+        MS_PER_MINUTE..MS_PER_HOUR => {
+            let m = ms / MS_PER_MINUTE;
+            let s = (ms % MS_PER_MINUTE) / MS_PER_SECOND;
+            if s == 0 { format!("{}m", m) } else { format!("{}m {}s", m, s) }
+        }
+        _ => {
+            let h = ms / MS_PER_HOUR;
+            let m = (ms % MS_PER_HOUR) / MS_PER_MINUTE;
+            format!("{}h {}m", h, m)
+        }
+    }
+}
+
+pub fn format_relative_time(rfc3339: &str) -> String {
+    let then = js_sys::Date::parse(rfc3339);
+    if then.is_nan() {
+        return rfc3339.to_string();
+    }
+    let now = js_sys::Date::now();
+    let diff_ms = (now - then) as u64;
+    match diff_ms {
+        0..MS_PER_MINUTE => "just now".into(),
+        MS_PER_MINUTE..MS_PER_HOUR => format!("{}m ago", diff_ms / MS_PER_MINUTE),
+        MS_PER_HOUR..MS_PER_DAY => format!("{}h ago", diff_ms / MS_PER_HOUR),
+        _ => format!("{}d ago", diff_ms / MS_PER_DAY),
     }
 }

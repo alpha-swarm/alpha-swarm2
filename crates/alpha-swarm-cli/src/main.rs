@@ -85,14 +85,14 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let config = setup::load_config();
-    let router = setup::setup_router(&config)?;
+    let router = std::sync::Arc::new(setup::setup_router(&config)?);
 
     match cli.command {
         Commands::Run { repo, task, files, complexity, no_quality_gate, project, agent_type, retry } => {
-            commands::run::execute(&router, &config, repo, task, files, parse_complexity(&complexity), no_quality_gate, project, &agent_type, retry).await?;
+            commands::run::execute(std::sync::Arc::clone(&router), &config, repo, task, files, parse_complexity(&complexity), no_quality_gate, project, &agent_type, retry).await?;
         }
         Commands::Swarm { repo, goal, project } => {
-            commands::swarm::execute(&router, &config, repo, goal, project).await?;
+            commands::swarm::execute(std::sync::Arc::clone(&router), &config, repo, goal, project).await?;
         }
         Commands::Models => {
             let models = router.list_models().await?;

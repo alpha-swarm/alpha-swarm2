@@ -17,6 +17,35 @@ pub struct AgentRun {
     pub duration_ms: u64,
     pub created_at: String,
     pub embedding: Option<Vec<f32>>,
+    // Conversation tracking
+    #[serde(default)]
+    pub prompt_sent: Option<String>,
+    #[serde(default)]
+    pub response_text: Option<String>,
+    #[serde(default)]
+    pub attempts: Vec<AttemptRecord>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub last_activity_at: Option<String>,
+    #[serde(default)]
+    pub parent_run_id: Option<String>,
+    #[serde(default)]
+    pub progress_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttemptRecord {
+    pub attempt: u32,
+    pub model: String,
+    pub prompt_preview: String,
+    pub response_preview: String,
+    pub tokens_input: u32,
+    pub tokens_output: u32,
+    pub duration_ms: u64,
+    pub quality_passed: Option<bool>,
+    pub error: Option<String>,
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -52,6 +81,13 @@ impl AgentRun {
             duration_ms: 0,
             created_at: chrono::Utc::now().to_rfc3339(),
             embedding: None,
+            prompt_sent: None,
+            response_text: None,
+            attempts: Vec::new(),
+            started_at: None,
+            last_activity_at: None,
+            parent_run_id: None,
+            progress_message: None,
         }
     }
 }

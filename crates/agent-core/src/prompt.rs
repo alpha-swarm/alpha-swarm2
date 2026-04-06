@@ -51,7 +51,11 @@ pub fn build_prompt_with_type(
 ) -> Vec<ChatMessage> {
     let mut file_context = String::new();
     for (path, content) in files {
-        file_context.push_str(&format!("=== {path} ===\n{content}\n\n"));
+        if content.is_empty() {
+            file_context.push_str(&format!("=== {path} === [NEW FILE — does not exist yet, use <<<CREATE>>> to create it]\n\n"));
+        } else {
+            file_context.push_str(&format!("=== {path} ===\n{content}\n\n"));
+        }
     }
 
     let system = format!("{}{}", agent_type.role_description(), EDIT_FORMAT);

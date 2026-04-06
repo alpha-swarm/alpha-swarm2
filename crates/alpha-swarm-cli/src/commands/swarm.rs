@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use inference_client::InferenceRouter;
@@ -8,7 +9,7 @@ use swarm_config::SwarmConfig;
 use crate::setup;
 
 pub async fn execute(
-    router: &InferenceRouter,
+    router: Arc<InferenceRouter>,
     config: &SwarmConfig,
     repo: PathBuf,
     goal: String,
@@ -17,12 +18,12 @@ pub async fn execute(
     let repo = repo.canonicalize().context("Repository path does not exist")?;
     info!(repo = %repo.display(), goal = %goal, project = %project, "Starting swarm");
 
-    let ollama = setup::get_ollama(config);
+    let ollama = Arc::new(setup::get_ollama(config));
     let kb = setup::get_knowledge_store(config).await?;
 
-    let mut runner = swarm_orchestrator::SwarmRunner::new(router, &ollama, &repo, &project);
-    if let Some(store) = &kb {
-        runner = runner.with_store(store);
+    let mut runner = swarm_orchestrator::SwarmRunner::new(Arc::clone(&router), ollama, &repo, &project);
+    if let Some(store) = kb {
+        runner = runner.with_store(Arc::new(store));
     }
 
     let result = runner.run(&goal).await?;

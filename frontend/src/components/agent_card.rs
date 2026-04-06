@@ -7,7 +7,7 @@ pub fn AgentRow(run: AgentRun) -> impl IntoView {
     let status = run.status.clone();
     let agent_id = run.agent_id.clone();
     let model = run.model_used.clone();
-    let dur = format!("{:.1}s", run.duration_secs());
+    let dur = run.duration_human();
     let tokens = run.tokens_output;
     let task = run.task_description.clone();
     let error = run.error_message.clone();
@@ -38,10 +38,11 @@ pub fn AgentRow(run: AgentRun) -> impl IntoView {
 #[component]
 pub fn ActivityCard(run: AgentRun) -> impl IntoView {
     let status = run.status.clone();
-    let task = if run.task_description.len() > 60 { format!("{}...", &run.task_description[..60]) } else { run.task_description.clone() };
+    let limit = crate::types::TASK_PREVIEW_CHARS + 20; // activity cards get more room
+    let task = if run.task_description.len() > limit { format!("{}...", &run.task_description[..limit]) } else { run.task_description.clone() };
     let model = run.model_used.clone();
     let tokens = run.tokens_output;
-    let dur = format!("{:.1}s", run.duration_secs());
+    let dur = run.duration_human();
 
     view! {
         <div class="card" style="margin-bottom:8px;padding:12px 16px">
