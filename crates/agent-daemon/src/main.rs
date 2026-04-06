@@ -8,6 +8,7 @@ mod repo;
 mod executor;
 mod git_pr;
 pub mod resources;
+pub mod provider_client;
 
 use std::sync::Arc;
 use std::time::Duration;

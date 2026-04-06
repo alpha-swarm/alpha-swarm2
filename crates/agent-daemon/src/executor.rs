@@ -101,10 +101,11 @@ async fn handle_planning(
         }
     };
 
-    let repo_path = match repo::ensure_repo(project, &repo_url) {
-        Ok(p) => p,
+    let git = crate::provider_client::GitProviderClient::new(&config.nats.url).await;
+    let repo_path = match git.ensure_repo(project, &repo_url).await {
+        Ok(p) => std::path::PathBuf::from(p),
         Err(e) => {
-            let _ = store.db_query_raw(&format_update(task_id, &format!("SET status = 'failed', error_message = 'Git clone failed: {}'", e.to_string().replace('\'', "")))).await;
+            let _ = store.db_query_raw(&format_update(task_id, &format!("SET status = 'failed', error_message = 'Git clone failed: {}'", e.replace('\'', "")))).await;
             return;
         }
     };
@@ -242,14 +243,16 @@ async fn handle_execute(
         }
     };
 
-    // 3. Clone/update repo
-    let repo_path = match repo::ensure_repo(project, &repo_url) {
+    // 3. Clone/update repo (via git-provider NATS service, local fallback)
+    let git = crate::provider_client::GitProviderClient::new(&config.nats.url).await;
+    let repo_path_str = match git.ensure_repo(project, &repo_url).await {
         Ok(p) => p,
         Err(e) => {
             fail_task(&store, &publisher, task_id, project, goal, &format!("Git clone failed: {e}")).await;
             return;
         }
     };
+    let repo_path = std::path::PathBuf::from(&repo_path_str);
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
 
@@ -486,7 +489,7 @@ async fn handle_execute(
                     })
                     .collect();
 
-                match git_pr::create_pr(&repo_path, goal, &sub_tasks_info, result.quality_passed, duration, total_in, total_out) {
+                match git.create_pr(&repo_path_str, goal, result.quality_passed, duration, total_in, total_out).await {
                     Ok(pr_url) => {
                         info!(pr_url = %pr_url, "PR created");
                         final_run.diff = Some(format!("PR: {}", pr_url));
