@@ -62,6 +62,33 @@ pub async fn get_sub_runs(parent_id: &str) -> Result<Vec<AgentRun>, String> {
     get(&format!("/sub-runs/{parent_id}")).await
 }
 
+// --- Planning API ---
+
+pub async fn submit_plan(task: &SubmitTask) -> Result<serde_json::Value, String> {
+    post("/plan", task).await
+}
+
+pub async fn get_plans(run_id: &str) -> Result<Vec<GoalPlan>, String> {
+    get(&format!("/plans/{run_id}")).await
+}
+
+#[derive(serde::Serialize)]
+struct FeedbackBody { feedback: String }
+
+pub async fn send_plan_feedback(run_id: &str, feedback: &str) -> Result<serde_json::Value, String> {
+    post(&format!("/plans/{run_id}/feedback"), &FeedbackBody { feedback: feedback.to_string() }).await
+}
+
+pub async fn approve_plan(run_id: &str) -> Result<serde_json::Value, String> {
+    post(&format!("/plans/{run_id}/approve"), &serde_json::json!({})).await
+}
+
+pub async fn edit_plan(run_id: &str, sub_tasks: &[PlannedTask]) -> Result<serde_json::Value, String> {
+    #[derive(serde::Serialize)]
+    struct EditBody<'a> { sub_tasks: &'a [PlannedTask] }
+    post(&format!("/plans/{run_id}/edit"), &EditBody { sub_tasks }).await
+}
+
 pub async fn list_runs(project: &str) -> Result<Vec<AgentRun>, String> {
     get(&format!("/runs/{project}")).await
 }

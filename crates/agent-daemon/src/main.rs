@@ -132,7 +132,8 @@ async fn main() -> Result<()> {
                 let id = task.id.clone().unwrap_or_default();
                 let project = task.project.clone();
                 let goal = task.task_description.clone();
-                info!(id = %id, project = %project, goal = %goal, "Processing pending task");
+                let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
+                info!(id = %id, project = %project, status = %status, goal = %goal, "Processing task");
 
                 let store = Arc::clone(&store);
                 let router = Arc::clone(&router);
@@ -141,7 +142,7 @@ async fn main() -> Result<()> {
                 let config = config.clone();
 
                 tokio::spawn(async move {
-                    executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal).await;
+                    executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal, &status).await;
                 });
             }
         }
@@ -165,7 +166,7 @@ async fn main() -> Result<()> {
                     let config = config.clone();
 
                     tokio::spawn(async move {
-                        executor::handle_task(&config, router, ollama, store, publisher, &task_id, &project, &goal).await;
+                        executor::handle_task(&config, router, ollama, store, publisher, &task_id, &project, &goal, "pending").await;
                     });
                 }
                 Some(_) => {} // ignore other events
@@ -188,6 +189,7 @@ async fn main() -> Result<()> {
                     let id = task.id.clone().unwrap_or_default();
                     let project = task.project.clone();
                     let goal = task.task_description.clone();
+                    let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
 
                     let store = Arc::clone(&store);
                     let router = Arc::clone(&router);
@@ -196,7 +198,7 @@ async fn main() -> Result<()> {
                     let config = config.clone();
 
                     tokio::spawn(async move {
-                        executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal).await;
+                        executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal, &status).await;
                     });
                 }
             }

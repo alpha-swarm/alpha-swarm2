@@ -14,8 +14,187 @@ use swarm_events::{EventPublisher, SwarmEvent};
 use crate::repo;
 use crate::git_pr;
 
-/// Handle a single task: claim → clone repo → execute → update status → emit events.
+fn format_update(task_id: &str, set_clause: &str) -> String {
+    if task_id.contains(':') {
+        format!("UPDATE {} {}", task_id, set_clause)
+    } else {
+        format!("UPDATE type::thing('agent_run', '{}') {}", task_id, set_clause)
+    }
+}
+
+fn format_update_where(task_id: &str, set_clause: &str, where_clause: &str) -> String {
+    if task_id.contains(':') {
+        format!("UPDATE {} {} WHERE {}", task_id, set_clause, where_clause)
+    } else {
+        format!("UPDATE type::thing('agent_run', '{}') {} WHERE {}", task_id, set_clause, where_clause)
+    }
+}
+
+fn discover_source_files(repo_path: &std::path::Path) -> Vec<String> {
+    let mut files = Vec::new();
+    let extensions = ["rs", "ts", "js", "go", "py"];
+    fn walk(dir: &std::path::Path, base: &std::path::Path, ext: &[&str], out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                if name.starts_with('.') || name == "target" || name == "node_modules" || name == "dist" { continue; }
+                walk(&path, base, ext, out);
+            } else if let Some(e) = path.extension().and_then(|e| e.to_str()) {
+                if ext.contains(&e) {
+                    if let Ok(rel) = path.strip_prefix(base) {
+                        out.push(rel.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+    walk(repo_path, repo_path, &extensions, &mut files);
+    files.sort();
+    files
+}
+
+/// Dispatch a task based on its status: planning, approved, or pending (legacy).
 pub async fn handle_task(
+    config: &SwarmConfig,
+    router: Arc<InferenceRouter>,
+    ollama: Arc<OllamaBackend>,
+    store: Arc<KnowledgeStore>,
+    publisher: Option<Arc<EventPublisher>>,
+    task_id: &str,
+    project: &str,
+    goal: &str,
+    status: &str,
+) {
+    match status {
+        "planning" => handle_planning(config, router, ollama, store, task_id, project, goal).await,
+        "approved" => handle_approved(config, router, ollama, store, publisher, task_id, project, goal).await,
+        _ => handle_execute(config, router, ollama, store, publisher, task_id, project, goal).await,
+    }
+}
+
+/// Planning-only: generate plan, store it, set status to 'planned', STOP.
+async fn handle_planning(
+    config: &SwarmConfig,
+    router: Arc<InferenceRouter>,
+    ollama: Arc<OllamaBackend>,
+    store: Arc<KnowledgeStore>,
+    task_id: &str,
+    project: &str,
+    goal: &str,
+) {
+    use crate::repo;
+    info!(task_id, project, goal, "Planning only (no execution)");
+
+    // Claim
+    let now = chrono::Utc::now().to_rfc3339();
+    let claim = format_update(task_id, &format!("SET status = 'running', agent_id = 'planner', last_activity_at = '{}', progress_message = 'Planning goal decomposition...'", now));
+    if store.db_query_raw(&claim).await.is_err() { return; }
+
+    // Look up repo
+    let repo_url = match store.get_project_repo(project).await {
+        Ok(Some(url)) => url,
+        _ => {
+            let _ = store.db_query_raw(&format_update(task_id, "SET status = 'failed', error_message = 'No repo URL for project'")).await;
+            return;
+        }
+    };
+
+    let repo_path = match repo::ensure_repo(project, &repo_url) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = store.db_query_raw(&format_update(task_id, &format!("SET status = 'failed', error_message = 'Git clone failed: {}'", e.to_string().replace('\'', "")))).await;
+            return;
+        }
+    };
+
+    // Discover files and plan
+    let repo_files = discover_source_files(&repo_path);
+    let start = std::time::Instant::now();
+
+    // Check for previous feedback
+    let feedback = match store.get_latest_plan(task_id).await {
+        Ok(Some(prev)) => prev.user_feedback.clone(),
+        _ => None,
+    };
+    let version = match store.get_latest_plan(task_id).await {
+        Ok(Some(prev)) => prev.version + 1,
+        _ => 1,
+    };
+
+    // Build planning prompt with feedback if re-planning
+    let plan_goal = if let Some(fb) = &feedback {
+        format!("{}\n\nUSER FEEDBACK ON PREVIOUS PLAN:\n{}\n\nGenerate an improved plan addressing the feedback.", goal, fb)
+    } else {
+        goal.to_string()
+    };
+
+    match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files).await {
+        Ok(tasks) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+
+            // Convert SubTasks to PlannedTasks
+            let sub_tasks: Vec<knowledge_base::PlannedTask> = tasks.iter().map(|t| {
+                knowledge_base::PlannedTask {
+                    id: t.id.clone(),
+                    description: t.description.clone(),
+                    files: t.files.clone(),
+                    complexity: format!("{:?}", t.complexity),
+                    rationale: String::new(),
+                }
+            }).collect();
+
+            let plan = knowledge_base::GoalPlan {
+                id: None,
+                run_id: task_id.to_string(),
+                project: project.to_string(),
+                goal: goal.to_string(),
+                version,
+                sub_tasks,
+                model_used: config.tiers.orchestrator.model.clone(),
+                tokens_input: 0,
+                tokens_output: 0,
+                duration_ms,
+                user_feedback: feedback,
+                status: "draft".to_string(),
+                context_files: repo_files,
+                web_searches: vec![],
+                reasoning: format!("Decomposed into {} sub-tasks", tasks.len()),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+
+            let _ = store.store_plan(&plan).await;
+            let msg = format!("Plan v{} ready — {} sub-tasks. Waiting for approval.", version, tasks.len());
+            let _ = store.db_query_raw(&format_update(task_id, &format!("SET status = 'planned', progress_message = '{}'", msg.replace('\'', "")))).await;
+            info!(task_id, version, tasks = tasks.len(), "Plan generated, awaiting approval");
+        }
+        Err(e) => {
+            let _ = store.db_query_raw(&format_update(task_id, &format!("SET status = 'failed', error_message = 'Planning failed: {}'", e.to_string().replace('\'', "")))).await;
+        }
+    }
+}
+
+/// Execute with an approved plan — load plan, skip re-planning, run agents.
+async fn handle_approved(
+    config: &SwarmConfig,
+    router: Arc<InferenceRouter>,
+    ollama: Arc<OllamaBackend>,
+    store: Arc<KnowledgeStore>,
+    publisher: Option<Arc<EventPublisher>>,
+    task_id: &str,
+    project: &str,
+    goal: &str,
+) {
+    info!(task_id, project, "Executing approved plan");
+    // For now, delegate to the standard executor which will re-plan internally.
+    // TODO: Load approved plan's sub_tasks and pass directly to SwarmRunner
+    // to skip the planning step. For MVP, re-running is acceptable.
+    handle_execute(config, router, ollama, store, publisher, task_id, project, goal).await;
+}
+
+/// Standard execution: claim → plan → execute → PR.
+async fn handle_execute(
     config: &SwarmConfig,
     router: Arc<InferenceRouter>,
     ollama: Arc<OllamaBackend>,
@@ -27,16 +206,13 @@ pub async fn handle_task(
 ) {
     info!(task_id, project, goal, "Starting task execution");
 
-    // 1. Claim the task atomically (only if still pending)
-    let claim_query = if task_id.contains(':') {
-        format!("UPDATE {} SET status = 'running', agent_id = 'daemon', last_activity_at = '{}' WHERE status = 'pending'", task_id, chrono::Utc::now().to_rfc3339())
-    } else {
-        format!("UPDATE type::thing('agent_run', '{}') SET status = 'running', agent_id = 'daemon', last_activity_at = '{}' WHERE status = 'pending'", task_id, chrono::Utc::now().to_rfc3339())
-    };
+    // 1. Claim the task atomically
+    let now = chrono::Utc::now().to_rfc3339();
+    let claim_query = format_update_where(task_id, &format!("SET status = 'running', agent_id = 'daemon', last_activity_at = '{}'", now), "status IN ['pending', 'approved']");
     match store.db_query_raw(&claim_query).await {
         Ok(_) => {}
         Err(e) => {
-            warn!(task_id, "Failed to claim task (likely claimed by another daemon): {e}");
+            warn!(task_id, "Failed to claim task: {e}");
             return;
         }
     }

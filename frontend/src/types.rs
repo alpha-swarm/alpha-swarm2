@@ -251,6 +251,48 @@ impl ModelInfo {
     }
 }
 
+// --- Goal Plan types ---
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct GoalPlan {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub sub_tasks: Vec<PlannedTask>,
+    #[serde(default)]
+    pub model_used: String,
+    #[serde(default)]
+    pub reasoning: String,
+    #[serde(default)]
+    pub user_feedback: Option<String>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub context_files: Vec<String>,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct PlannedTask {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub complexity: String,
+    #[serde(default)]
+    pub rationale: String,
+}
+
 // Time constants (milliseconds)
 const MS_PER_SECOND: u64 = 1_000;
 const MS_PER_MINUTE: u64 = 60 * MS_PER_SECOND;

@@ -40,7 +40,9 @@ impl KnowledgeStore {
             "DEFINE TABLE IF NOT EXISTS agent_run SCHEMALESS;
              DEFINE INDEX IF NOT EXISTS idx_project ON TABLE agent_run FIELDS project;
              DEFINE INDEX IF NOT EXISTS idx_status ON TABLE agent_run FIELDS status;
-             DEFINE INDEX IF NOT EXISTS idx_project_status ON TABLE agent_run FIELDS project, status;"
+             DEFINE INDEX IF NOT EXISTS idx_project_status ON TABLE agent_run FIELDS project, status;
+             DEFINE TABLE IF NOT EXISTS goal_plan SCHEMALESS;
+             DEFINE INDEX IF NOT EXISTS idx_plan_run ON TABLE goal_plan FIELDS run_id;"
         )
         .await
         .context("Failed to initialize schema")?;
@@ -142,7 +144,7 @@ impl KnowledgeStore {
     /// Get all pending tasks across all projects.
     pub async fn list_pending(&self) -> Result<Vec<AgentRun>> {
         let mut result = self.db
-            .query("SELECT * FROM agent_run WHERE status = 'pending' ORDER BY created_at ASC LIMIT 20")
+            .query("SELECT * FROM agent_run WHERE status IN ['pending', 'planning', 'approved'] ORDER BY created_at ASC LIMIT 20")
             .await
             .context("Failed to list pending runs")?;
 
@@ -247,6 +249,53 @@ impl KnowledgeStore {
             .filter_map(|v| serde_json::from_value(v).ok())
             .collect();
         Ok(errors)
+    }
+
+    // --- Goal Plan CRUD ---
+
+    /// Store a new plan version. Returns the record ID.
+    pub async fn store_plan(&self, plan: &GoalPlan) -> Result<String> {
+        let mut json = serde_json::to_value(plan)?;
+        if let serde_json::Value::Object(ref mut map) = json {
+            map.remove("id");
+        }
+        let mut result = self.db
+            .query("CREATE goal_plan CONTENT $data RETURN id")
+            .bind(("data", json))
+            .await
+            .context("Failed to store goal plan")?;
+
+        let created: Vec<serde_json::Value> = result.take(0)?;
+        let id = created.first()
+            .and_then(|v| v.get("id").map(|id| id.to_string().trim_matches('"').to_string()))
+            .unwrap_or_else(|| "unknown".into());
+        Ok(id)
+    }
+
+    /// Get all plan versions for a run, ordered by version.
+    pub async fn get_plans(&self, run_id: &str) -> Result<Vec<GoalPlan>> {
+        let run_id = run_id.to_string();
+        let mut result = self.db
+            .query("SELECT * FROM goal_plan WHERE run_id = $run_id ORDER BY version ASC")
+            .bind(("run_id", run_id))
+            .await
+            .context("Failed to get plans")?;
+
+        let rows: Vec<serde_json::Value> = result.take(0)?;
+        Ok(rows.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect())
+    }
+
+    /// Get the latest plan for a run.
+    pub async fn get_latest_plan(&self, run_id: &str) -> Result<Option<GoalPlan>> {
+        let run_id = run_id.to_string();
+        let mut result = self.db
+            .query("SELECT * FROM goal_plan WHERE run_id = $run_id ORDER BY version DESC LIMIT 1")
+            .bind(("run_id", run_id))
+            .await
+            .context("Failed to get latest plan")?;
+
+        let rows: Vec<serde_json::Value> = result.take(0)?;
+        Ok(rows.into_iter().next().and_then(|v| serde_json::from_value(v).ok()))
     }
 
     /// Store an embedding for a run.

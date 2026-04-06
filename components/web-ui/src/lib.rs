@@ -71,6 +71,28 @@ impl Guest for WebUi {
                 let parent_id = p.strip_prefix("/api/sub-runs/").unwrap_or("");
                 api_sub_runs(response_out, parent_id);
             }
+            (Method::Post, "/api/plan") => {
+                let body = read_body(&request);
+                api_submit_plan(response_out, &body);
+            }
+            (Method::Get, p) if p.starts_with("/api/plans/") => {
+                let run_id = p.strip_prefix("/api/plans/").unwrap_or("");
+                api_get_plans(response_out, run_id);
+            }
+            (Method::Post, p) if p.ends_with("/feedback") && p.starts_with("/api/plans/") => {
+                let run_id = p.strip_prefix("/api/plans/").unwrap_or("").strip_suffix("/feedback").unwrap_or("");
+                let body = read_body(&request);
+                api_plan_feedback(response_out, run_id, &body);
+            }
+            (Method::Post, p) if p.ends_with("/approve") && p.starts_with("/api/plans/") => {
+                let run_id = p.strip_prefix("/api/plans/").unwrap_or("").strip_suffix("/approve").unwrap_or("");
+                api_plan_approve(response_out, run_id);
+            }
+            (Method::Post, p) if p.ends_with("/edit") && p.starts_with("/api/plans/") => {
+                let run_id = p.strip_prefix("/api/plans/").unwrap_or("").strip_suffix("/edit").unwrap_or("");
+                let body = read_body(&request);
+                api_plan_edit(response_out, run_id, &body);
+            }
             (Method::Delete, "/api/clear") => {
                 api_clear_all(response_out);
             }
@@ -641,6 +663,98 @@ fn api_submit_run(response_out: ResponseOutparam, body: &[u8]) {
         Err(e) => {
             respond_json(response_out, 502, &format!(r#"{{"error":"failed to store task: {}"}}"#, e));
         }
+    }
+}
+
+fn api_submit_plan(response_out: ResponseOutparam, body: &[u8]) {
+    let body_str = String::from_utf8_lossy(body);
+    let parsed: serde_json::Value = match serde_json::from_str(&body_str) {
+        Ok(v) => v,
+        Err(e) => { respond_json(response_out, 400, &format!(r#"{{"error":"invalid json: {}"}}"#, e)); return; }
+    };
+
+    let task = parsed.get("task").and_then(|t| t.as_str()).unwrap_or("");
+    let project = parsed.get("project").and_then(|p| p.as_str()).unwrap_or("default");
+    if task.is_empty() { respond_json(response_out, 400, r#"{"error":"task is required"}"#); return; }
+
+    let query = format!(
+        "CREATE agent_run SET project='{}', task_description='{}', agent_id='pending', model_used='auto', status='planning', tokens_input=0, tokens_output=0, duration_ms=0, created_at=time::now(), files_modified=[]",
+        project.replace('\'', ""),
+        task.replace('\'', "").chars().take(500).collect::<String>(),
+    );
+
+    match surreal_query(&query) {
+        Ok(_) => respond_json(response_out, 202, &format!(r#"{{"status":"planning","project":"{}","task":"{}"}}"#, project, task.chars().take(80).collect::<String>())),
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn api_get_plans(response_out: ResponseOutparam, run_id: &str) {
+    let safe_id = run_id.replace('\'', "");
+    let query = format!("SELECT * FROM goal_plan WHERE run_id = '{}' ORDER BY version ASC", safe_id);
+    match surreal_query(&query) {
+        Ok(body) => {
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let plans = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result"))
+                .cloned().unwrap_or(serde_json::Value::Array(vec![]));
+            respond_json(response_out, 200, &serde_json::to_string(&plans).unwrap_or_default());
+        }
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn api_plan_feedback(response_out: ResponseOutparam, run_id: &str, body: &[u8]) {
+    let body_str = String::from_utf8_lossy(body);
+    let parsed: serde_json::Value = serde_json::from_str(&body_str).unwrap_or_default();
+    let feedback = parsed.get("feedback").and_then(|f| f.as_str()).unwrap_or("");
+
+    if feedback.is_empty() { respond_json(response_out, 400, r#"{"error":"feedback is required"}"#); return; }
+
+    let safe_id = run_id.replace('\'', "");
+    let safe_fb = feedback.replace('\'', "");
+
+    // Set run status back to 'planning' and store feedback on the latest plan
+    let query = format!(
+        "UPDATE agent_run SET status = 'planning', progress_message = 'Re-planning with feedback...' WHERE id = '{}' OR id = type::thing('agent_run', '{}');
+         UPDATE goal_plan SET user_feedback = '{}' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
+        safe_id, safe_id, safe_fb, safe_id
+    );
+    match surreal_query(&query) {
+        Ok(_) => respond_json(response_out, 200, r#"{"status":"replanning"}"#),
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn api_plan_approve(response_out: ResponseOutparam, run_id: &str) {
+    let safe_id = run_id.replace('\'', "");
+    let query = format!(
+        "UPDATE agent_run SET status = 'approved', progress_message = 'Plan approved, starting execution...' WHERE id = '{}' OR id = type::thing('agent_run', '{}');
+         UPDATE goal_plan SET status = 'approved' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
+        safe_id, safe_id, safe_id
+    );
+    match surreal_query(&query) {
+        Ok(_) => respond_json(response_out, 200, r#"{"status":"approved"}"#),
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn api_plan_edit(response_out: ResponseOutparam, run_id: &str, body: &[u8]) {
+    let body_str = String::from_utf8_lossy(body);
+    let parsed: serde_json::Value = serde_json::from_str(&body_str).unwrap_or_default();
+    let sub_tasks = parsed.get("sub_tasks").cloned().unwrap_or(serde_json::Value::Array(vec![]));
+    let safe_id = run_id.replace('\'', "");
+    let tasks_json = serde_json::to_string(&sub_tasks).unwrap_or_else(|_| "[]".into());
+
+    // Create a new plan version with the edited tasks, mark as approved
+    let query = format!(
+        "LET $latest = (SELECT version FROM goal_plan WHERE run_id = '{}' ORDER BY version DESC LIMIT 1);
+         CREATE goal_plan SET run_id = '{}', version = IF $latest THEN $latest[0].version + 1 ELSE 1 END, sub_tasks = {}, status = 'approved', user_feedback = 'manual edit', model_used = 'user', reasoning = 'User-edited plan', created_at = time::now(), project = '', goal = '', tokens_input = 0, tokens_output = 0, duration_ms = 0, context_files = [], web_searches = [];
+         UPDATE agent_run SET status = 'approved', progress_message = 'User-edited plan approved' WHERE id = '{}' OR id = type::thing('agent_run', '{}')",
+        safe_id, safe_id, tasks_json, safe_id, safe_id
+    );
+    match surreal_query(&query) {
+        Ok(_) => respond_json(response_out, 200, r#"{"status":"approved"}"#),
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
     }
 }
 

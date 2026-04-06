@@ -9,8 +9,8 @@ pub fn SubmitPage() -> impl IntoView {
     let task_text = RwSignal::new(String::new());
     let selected_project = RwSignal::new(String::new());
     let submitting = RwSignal::new(false);
+    let plan_first = RwSignal::new(true);
 
-    // Load projects for dropdown
     wasm_bindgen_futures::spawn_local(async move {
         if let Ok(projects) = api::list_projects().await {
             if let Some(first) = projects.first() {
@@ -27,17 +27,30 @@ pub fn SubmitPage() -> impl IntoView {
 
         submitting.set(true);
         let project_clone = project.clone();
+        let use_plan = plan_first.get();
 
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = api::submit_task(&api::SubmitTask {
+            let submit_task = api::SubmitTask {
                 task,
                 project: project_clone.clone(),
                 files: vec![],
-            }).await;
-            task_text.set(String::new());
+            };
+            let result = if use_plan {
+                api::submit_plan(&submit_task).await
+            } else {
+                api::submit_task(&submit_task).await
+            };
+            match result {
+                Ok(_) => {
+                    task_text.set(String::new());
+                    let nav = use_navigate();
+                    nav(&format!("/project/{project_clone}"), Default::default());
+                }
+                Err(e) => {
+                    web_sys::console::error_1(&format!("Submit failed: {e}").into());
+                }
+            }
             submitting.set(false);
-            let nav = use_navigate();
-            nav(&format!("/project/{project_clone}"), Default::default());
         });
     };
 
@@ -69,8 +82,27 @@ pub fn SubmitPage() -> impl IntoView {
                     }).collect_view()}
                 </select>
             </div>
+
+            // Plan first toggle
+            <div style="margin-bottom:16px;display:flex;align-items:center;gap:8px">
+                <input
+                    type="checkbox"
+                    prop:checked=move || plan_first.get()
+                    on:change=move |ev| plan_first.set(event_target_checked(&ev))
+                    style="width:16px;height:16px"
+                />
+                <label style="font-size:13px;font-weight:500;color:var(--text-secondary)">
+                    "Plan first"
+                    <span style="font-weight:400;color:var(--muted)">" — review the plan before agents start executing"</span>
+                </label>
+            </div>
+
             <div style="padding:12px 0;font-size:13px;color:var(--muted)">
-                "The orchestrator will use the most capable model to plan, then dispatch smaller specialized agents for each sub-task automatically."
+                {move || if plan_first.get() {
+                    "The orchestrator will generate a plan for your review. You can refine it with feedback before approving."
+                } else {
+                    "The orchestrator will plan and execute immediately. Agents will start working right away."
+                }}
             </div>
             <button
                 class="btn btn-primary"
@@ -78,7 +110,7 @@ pub fn SubmitPage() -> impl IntoView {
                 on:click=on_submit
                 disabled=move || submitting.get()
             >
-                {move || if submitting.get() { "Submitting..." } else { "Submit Goal" }}
+                {move || if submitting.get() { "Submitting..." } else if plan_first.get() { "Submit for Planning" } else { "Submit & Execute" }}
             </button>
         </div>
     }

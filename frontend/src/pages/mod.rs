@@ -13,3 +13,6 @@ pub use agents::AgentsPage;
 pub use models::ModelsPage;
 pub use resources::ResourcesPage;
 pub use submit::SubmitPage;
+
+mod plan_review;
+pub use plan_review::PlanReviewPage;
