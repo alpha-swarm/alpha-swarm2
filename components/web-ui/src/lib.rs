@@ -97,15 +97,14 @@ fn read_body(request: &IncomingRequest) -> Vec<u8> {
 }
 
 fn api_resources(response_out: ResponseOutparam) {
-    // Read latest resource snapshot from SurrealDB (written by daemon)
-    match surreal_query("SELECT * FROM resource_snapshot ORDER BY timestamp DESC LIMIT 1") {
+    // Read all host snapshots from SurrealDB (written by daemon)
+    match surreal_query("SELECT host, host_type, cpu_percent, ram_total_mb, ram_used_mb, ram_percent, disk_total_gb, disk_free_gb, disk_percent, ollama_models, timestamp FROM resource_snapshot ORDER BY host ASC") {
         Ok(body) => {
             let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-            let snap = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result"))
-                .and_then(|r| r.as_array()).and_then(|a| a.first())
+            let hosts = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result"))
                 .cloned()
-                .unwrap_or(serde_json::json!({"error": "no data yet — is the daemon running?"}));
-            respond_json(response_out, 200, &serde_json::to_string(&snap).unwrap_or_default());
+                .unwrap_or(serde_json::Value::Array(vec![]));
+            respond_json(response_out, 200, &serde_json::to_string(&hosts).unwrap_or_default());
         }
         Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
     }

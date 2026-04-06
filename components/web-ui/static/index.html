@@ -311,31 +311,12 @@ select.input { appearance: auto; }
   <!-- Resources -->
   <div class="page" id="page-resources">
     <h1>Resources</h1>
-    <p class="subtitle">System resource usage — daemon defers tasks when thresholds exceeded</p>
-    <div class="grid grid-3" id="resource-cards">
-      <div class="card">
-        <h3>CPU</h3>
-        <div class="value" id="res-cpu">--</div>
-        <div class="label">usage</div>
-        <div style="margin-top:8px;height:8px;background:var(--border);border-radius:4px;overflow:hidden"><div id="res-cpu-bar" style="height:100%;background:var(--success);width:0%;transition:width 0.5s;border-radius:4px"></div></div>
-      </div>
-      <div class="card">
-        <h3>RAM</h3>
-        <div class="value" id="res-ram">--</div>
-        <div class="label" id="res-ram-detail">--</div>
-        <div style="margin-top:8px;height:8px;background:var(--border);border-radius:4px;overflow:hidden"><div id="res-ram-bar" style="height:100%;background:var(--success);width:0%;transition:width 0.5s;border-radius:4px"></div></div>
-      </div>
-      <div class="card">
-        <h3>Disk</h3>
-        <div class="value" id="res-disk">--</div>
-        <div class="label" id="res-disk-detail">--</div>
-        <div style="margin-top:8px;height:8px;background:var(--border);border-radius:4px;overflow:hidden"><div id="res-disk-bar" style="height:100%;background:var(--success);width:0%;transition:width 0.5s;border-radius:4px"></div></div>
-      </div>
-    </div>
-    <div class="section-title">Scheduling Thresholds</div>
+    <p class="subtitle">Multi-machine resource monitoring — daemon defers tasks when thresholds exceeded</p>
+    <div id="resource-hosts"><p class="empty">Loading resources...</p></div>
+    <div class="section-title">Scheduling</div>
     <div class="card" style="max-width:400px">
-      <div class="detail-row"><span class="detail-label">Max CPU</span><span class="detail-value">50%</span></div>
-      <div class="detail-row"><span class="detail-label">Max RAM</span><span class="detail-value">50%</span></div>
+      <div class="detail-row"><span class="detail-label">Max CPU</span><span class="detail-value">80%</span></div>
+      <div class="detail-row"><span class="detail-label">Max RAM</span><span class="detail-value">80%</span></div>
       <div class="detail-row"><span class="detail-label">Status</span><span class="detail-value" id="res-schedule-status">--</span></div>
     </div>
   </div>
@@ -1113,33 +1094,79 @@ async function loadModels() {
 async function loadResources() {
   try {
     const res = await fetch('/api/resources');
-    const r = await res.json();
-    if (r.error) { return; }
+    const hosts = await res.json();
+    const el = document.getElementById('resource-hosts');
 
-    const cpu = r.cpu_percent || 0;
-    const ram = r.ram_percent || 0;
-    const disk = r.disk_percent || 0;
+    if (!Array.isArray(hosts) || !hosts.length) {
+      el.innerHTML = '<p class="empty">No resource data — is the daemon running?</p>';
+      return;
+    }
 
-    document.getElementById('res-cpu').textContent = cpu.toFixed(1) + '%';
-    document.getElementById('res-ram').textContent = ram.toFixed(1) + '%';
-    document.getElementById('res-ram-detail').textContent = `${r.ram_used_mb || 0} / ${r.ram_total_mb || 0} MB`;
-    document.getElementById('res-disk').textContent = disk.toFixed(1) + '%';
-    document.getElementById('res-disk-detail').textContent = `${(r.disk_free_gb || 0).toFixed(1)} GB free`;
-
-    // Color bars based on thresholds
     const barColor = (pct) => pct > 80 ? 'var(--error)' : pct > 50 ? 'var(--warning)' : 'var(--success)';
-    document.getElementById('res-cpu-bar').style.width = cpu + '%';
-    document.getElementById('res-cpu-bar').style.background = barColor(cpu);
-    document.getElementById('res-ram-bar').style.width = ram + '%';
-    document.getElementById('res-ram-bar').style.background = barColor(ram);
-    document.getElementById('res-disk-bar').style.width = disk + '%';
-    document.getElementById('res-disk-bar').style.background = barColor(disk);
+    const bar = (pct) => `<div style="margin-top:6px;height:6px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;background:${barColor(pct)};width:${Math.min(pct,100)}%;transition:width 0.5s;border-radius:3px"></div></div>`;
+
+    el.innerHTML = hosts.map(h => {
+      const isLocal = h.host_type === 'local';
+      const isOllama = h.host_type === 'ollama';
+      const cpu = h.cpu_percent || 0;
+      const ram = h.ram_percent || 0;
+      const ramUsed = h.ram_used_mb || 0;
+      const ramTotal = h.ram_total_mb || 0;
+      const diskFree = h.disk_free_gb || 0;
+      const diskPct = h.disk_percent || 0;
+      const models = h.ollama_models || [];
+
+      return `<div class="card" style="margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div>
+            <span style="font-size:16px;font-weight:600">${h.host || '?'}</span>
+            <span class="badge ${isOllama ? 'agent' : 'worker'}" style="margin-left:8px;font-size:11px">${h.host_type}</span>
+          </div>
+        </div>
+        ${isLocal ? `
+          <div class="grid grid-3">
+            <div>
+              <div style="font-size:12px;color:var(--muted)">CPU</div>
+              <div style="font-size:20px;font-weight:600">${cpu.toFixed(1)}%</div>
+              ${bar(cpu)}
+            </div>
+            <div>
+              <div style="font-size:12px;color:var(--muted)">RAM</div>
+              <div style="font-size:20px;font-weight:600">${ram.toFixed(1)}%</div>
+              <div style="font-size:12px;color:var(--muted)">${ramUsed} / ${ramTotal} MB</div>
+              ${bar(ram)}
+            </div>
+            <div>
+              <div style="font-size:12px;color:var(--muted)">Disk</div>
+              <div style="font-size:20px;font-weight:600">${diskPct.toFixed(1)}%</div>
+              <div style="font-size:12px;color:var(--muted)">${diskFree.toFixed(1)} GB free</div>
+              ${bar(diskPct)}
+            </div>
+          </div>
+        ` : ''}
+        ${isOllama ? `
+          <div style="margin-bottom:8px">
+            <div style="font-size:12px;color:var(--muted)">Loaded Models (VRAM)</div>
+            <div style="font-size:20px;font-weight:600">${ramUsed ? (ramUsed/1024).toFixed(1) + ' GB' : 'idle'}</div>
+          </div>
+          ${models.length ? `
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              ${models.map(m => `<span style="font-size:12px;padding:3px 10px;border-radius:12px;background:var(--accent-bg);color:var(--accent)">${m.name} (${(m.size_mb/1024).toFixed(1)}GB)</span>`).join('')}
+            </div>
+          ` : '<div style="font-size:13px;color:var(--muted)">No models loaded in memory</div>'}
+          <div style="margin-top:8px;font-size:12px;color:var(--muted)">${Math.round(diskFree)} models available</div>
+        ` : ''}
+      </div>`;
+    }).join('');
 
     // Scheduling status
-    const canSchedule = cpu <= 50 && ram <= 50;
-    const statusEl = document.getElementById('res-schedule-status');
-    statusEl.textContent = canSchedule ? 'Ready to schedule' : 'Deferred (threshold exceeded)';
-    statusEl.style.color = canSchedule ? 'var(--success)' : 'var(--error)';
+    const localHost = hosts.find(h => h.host_type === 'local');
+    if (localHost) {
+      const canSchedule = (localHost.cpu_percent || 0) <= 80 && (localHost.ram_percent || 0) <= 80;
+      const statusEl = document.getElementById('res-schedule-status');
+      statusEl.textContent = canSchedule ? 'Ready to schedule' : 'Deferred (threshold exceeded)';
+      statusEl.style.color = canSchedule ? 'var(--success)' : 'var(--error)';
+    }
   } catch(e) {}
 }
 

@@ -24,3 +24,4 @@ knowledge-base = { path = "../knowledge-base" }
 quality-gate-lib = { path = "../quality-gate" }
 swarm-events = { path = "../events" }
 sysinfo = "0.33"
+reqwest = { version = "0.12", features = ["json"] }

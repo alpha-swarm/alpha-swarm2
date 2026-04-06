@@ -24,12 +24,29 @@ pub struct SwarmConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ResourceConfig {
-    /// Don't start new tasks if CPU usage exceeds this percent.
     pub max_cpu_percent: f64,
-    /// Don't start new tasks if RAM usage exceeds this percent.
     pub max_ram_percent: f64,
-    /// How often to check resource usage (seconds).
     pub check_interval_secs: u64,
+    /// Monitored hosts.
+    #[serde(default = "default_hosts")]
+    pub hosts: Vec<HostConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HostConfig {
+    pub name: String,
+    /// "local" (sysinfo) or "ollama" (query Ollama API)
+    #[serde(rename = "type")]
+    pub host_type: String,
+    /// Ollama URL (for type=ollama)
+    #[serde(default)]
+    pub ollama_url: String,
+}
+
+fn default_hosts() -> Vec<HostConfig> {
+    vec![
+        HostConfig { name: "local".into(), host_type: "local".into(), ollama_url: String::new() },
+    ]
 }
 
 /// Per-tier configuration for the agent hierarchy.
@@ -168,9 +185,10 @@ impl Default for SwarmConfig {
 impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
-            max_cpu_percent: 50.0,
-            max_ram_percent: 50.0,
-            check_interval_secs: 5,
+            max_cpu_percent: 80.0,
+            max_ram_percent: 80.0,
+            check_interval_secs: 10,
+            hosts: default_hosts(),
         }
     }
 }

@@ -59,23 +59,30 @@ async fn main() -> Result<()> {
         Err(e) => { warn!("NATS unavailable for subscription: {e}"); None }
     };
 
-    // 0. Start resource heartbeat (writes snapshots to SurrealDB)
+    // 0. Start resource heartbeat (writes per-host snapshots to SurrealDB)
     {
         let store = Arc::clone(&store);
-        let interval = config.resources.check_interval_secs;
+        let res_config = config.resources.clone();
         tokio::spawn(async move {
             loop {
-                let snap = resources::check_resources();
-                let query = format!(
-                    "DELETE FROM resource_snapshot; CREATE resource_snapshot SET cpu_percent={:.1}, ram_total_mb={}, ram_used_mb={}, ram_percent={:.1}, disk_total_gb={:.1}, disk_free_gb={:.1}, disk_percent={:.1}, timestamp=time::now()",
-                    snap.cpu_percent, snap.ram_total_mb, snap.ram_used_mb, snap.ram_percent,
-                    snap.disk_total_gb, snap.disk_free_gb, snap.disk_percent
-                );
-                let _ = store.db_query_raw(&query).await;
-                tokio::time::sleep(Duration::from_secs(interval)).await;
+                let snapshots = resources::check_all_hosts(&res_config).await;
+                // Clear old snapshots and write new ones
+                let _ = store.db_query_raw("DELETE FROM resource_snapshot").await;
+                for snap in &snapshots {
+                    let models_json = serde_json::to_string(&snap.ollama_models).unwrap_or_else(|_| "[]".into());
+                    let query = format!(
+                        "CREATE resource_snapshot SET host='{}', host_type='{}', cpu_percent={:.1}, ram_total_mb={}, ram_used_mb={}, ram_percent={:.1}, disk_total_gb={:.1}, disk_free_gb={:.1}, disk_percent={:.1}, ollama_models={}, timestamp=time::now()",
+                        snap.host, snap.host_type,
+                        snap.cpu_percent, snap.ram_total_mb, snap.ram_used_mb, snap.ram_percent,
+                        snap.disk_total_gb, snap.disk_free_gb, snap.disk_percent,
+                        models_json,
+                    );
+                    let _ = store.db_query_raw(&query).await;
+                }
+                tokio::time::sleep(Duration::from_secs(res_config.check_interval_secs)).await;
             }
         });
-        info!("Resource heartbeat started (every {}s)", config.resources.check_interval_secs);
+        info!(hosts = config.resources.hosts.len(), "Resource heartbeat started");
     }
 
     // 1. Reset zombie tasks (running but daemon died)

@@ -48,9 +48,18 @@ max_context_files = 50
 # --- Resource Limits ---
 # Daemon won't start new tasks if resource usage exceeds these thresholds
 [resources]
-max_cpu_percent = 50.0    # don't schedule if CPU > 50%
-max_ram_percent = 50.0    # don't schedule if RAM > 50%
-check_interval_secs = 5   # how often to check resources
+max_cpu_percent = 80.0
+max_ram_percent = 80.0
+check_interval_secs = 10
+
+[[resources.hosts]]
+name = "local"
+type = "local"
+
+[[resources.hosts]]
+name = "csatapaci"
+type = "ollama"
+ollama_url = "http://100.81.10.8:11434"
 
 [tiers.worker]
 model = "qwen2.5-coder:7b"
