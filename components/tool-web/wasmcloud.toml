@@ -1,0 +1,10 @@
+[package]
+name = "tool-web"
+version = "0.1.0"
+
+[build]
+command = "cargo build --target wasm32-wasip2 --release && cp ../../target/wasm32-wasip2/release/tool_web.wasm tool-web.wasm"
+artifact = "tool-web.wasm"
+
+[dev]
+http_listen_address = "0.0.0.0:8082"

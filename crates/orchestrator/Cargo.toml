@@ -17,3 +17,4 @@ quality-gate-lib = { path = "../quality-gate" }
 knowledge-base = { path = "../knowledge-base" }
 swarm-config = { path = "../config" }
 swarm-tools = { path = "../tools" }
+async-nats = "0.38"

@@ -37,6 +37,7 @@ pub struct SwarmRunner {
     project: String,
     parent_run_id: Option<String>,
     max_concurrent: usize,
+    nats_client: Option<async_nats::Client>,
 }
 
 /// Default concurrency when not configured
@@ -57,6 +58,7 @@ impl SwarmRunner {
             project: project.into(),
             parent_run_id: None,
             max_concurrent: DEFAULT_MAX_CONCURRENT,
+            nats_client: None,
         }
     }
 
@@ -71,7 +73,12 @@ impl SwarmRunner {
     }
 
     pub fn with_max_concurrent(mut self, n: usize) -> Self {
-        self.max_concurrent = n.max(1); // at least 1
+        self.max_concurrent = n.max(1);
+        self
+    }
+
+    pub fn with_nats_client(mut self, client: async_nats::Client) -> Self {
+        self.nats_client = Some(client);
         self
     }
 
@@ -112,6 +119,7 @@ impl SwarmRunner {
             let store = self.store.clone();
             let project = self.project.clone();
             let parent_id = self.parent_run_id.clone();
+            let nats_client = self.nats_client.clone();
             let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
                 .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
 
@@ -134,7 +142,12 @@ impl SwarmRunner {
                 info!(task_id = %task.id, desc = %task.description, "Running agent");
 
                 // Use tool-enabled loop: agent can call deterministic tools between LLM steps
-                let tools = swarm_tools::ToolRegistry::with_defaults();
+                // NATS dispatch tries remote WASI workers first, local fallback
+                let mut tools = swarm_tools::ToolRegistry::with_defaults();
+                if let Some(client) = nats_client {
+                    let dispatcher = swarm_tools::nats_dispatch::NatsToolDispatcher::new(client, "swarm.tools");
+                    tools = tools.with_nats_dispatcher(dispatcher);
+                }
                 const MAX_TOOL_STEPS: u32 = 20;
                 let result = agent.run_with_tools(&task.description, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
                 (task, result)

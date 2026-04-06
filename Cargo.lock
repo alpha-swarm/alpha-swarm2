@@ -43,6 +43,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "anyhow",
+ "async-nats",
  "chrono",
  "futures",
  "inference-client",
@@ -4573,6 +4574,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "anyhow",
+ "async-nats",
  "inference-client",
  "knowledge-base",
  "quality-gate-lib",
@@ -5069,6 +5071,15 @@ dependencies = [
 
 [[package]]
 name = "tool-search"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
+name = "tool-web"
 version = "0.1.0"
 dependencies = [
  "serde",

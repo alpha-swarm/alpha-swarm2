@@ -324,6 +324,11 @@ async fn handle_execute(
             .with_parent_run_id(task_id)
             .with_max_concurrent(config.resources.max_concurrent_agents);
 
+        // Connect to NATS for distributed tool dispatch (best-effort)
+        if let Ok(nats_client) = async_nats::connect(&config.nats.url).await {
+            runner = runner.with_nats_client(nats_client);
+        }
+
         match runner.run(&augmented_goal).await {
             Ok(result) => {
                 // Track token usage

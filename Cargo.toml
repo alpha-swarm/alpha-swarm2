@@ -16,6 +16,7 @@ members = [
     "components/agent-worker",
     "components/web-ui",
     "components/tool-search",
+    "components/tool-web",
 ]
 resolver = "2"
 
