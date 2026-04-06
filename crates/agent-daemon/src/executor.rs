@@ -68,12 +68,14 @@ pub async fn handle_task(
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
 
-    // 4. Run the swarm orchestrator with retry loop (fuel from config)
+    // 4. Run the swarm orchestrator with retry loop (orchestrator tier fuel)
+    let tier = &config.tiers.orchestrator;
     let start = std::time::Instant::now();
-    let max_iterations = config.fuel.max_iterations;
-    let time_limit_ms: u64 = config.fuel.time_limit_secs * 1000;
-    let token_limit: u32 = config.fuel.token_limit;
-    let max_backoff = config.fuel.max_backoff_secs;
+    let max_iterations = tier.max_iterations;
+    let time_limit_ms: u64 = tier.time_limit_secs * 1000;
+    let token_limit: u32 = tier.token_limit;
+    let max_backoff = tier.max_backoff_secs;
+    info!(task_id, model = %tier.model, time_limit = tier.time_limit_secs, token_limit, max_iterations, "Using orchestrator tier");
     let mut total_tokens_used: u32 = 0;
     let mut iteration = 0;
     let mut last_errors = String::new();

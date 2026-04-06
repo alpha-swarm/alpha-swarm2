@@ -5,13 +5,18 @@ use tracing::{info, warn};
 
 use inference_client::{Complexity, InferenceOptions, InferenceResponse, InferenceRouter, OllamaBackend};
 
-/// Default inference options — reads context window from config.
-fn default_options() -> InferenceOptions {
-    let ctx = swarm_config::InferenceConfig::default().context_window;
+/// Inference options for a given tier.
+fn tier_options(tier: &swarm_config::TierConfig) -> InferenceOptions {
     InferenceOptions {
-        max_tokens: Some(ctx),
+        max_tokens: Some(tier.context_window),
+        preferred_model: Some(tier.model.clone()),
         ..Default::default()
     }
+}
+
+/// Default inference options — agent tier.
+fn default_options() -> InferenceOptions {
+    tier_options(&swarm_config::TierConfig::agent())
 }
 use knowledge_base::{AgentRun, KnowledgeStore, RunStatus};
 use swarm_events::{EventPublisher, SwarmEvent};

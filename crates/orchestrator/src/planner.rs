@@ -52,8 +52,10 @@ pub async fn plan_goal(
     ];
 
     // Use complex tier for planning — needs good reasoning
+    let orch_tier = swarm_config::TierConfig::orchestrator();
     let options = InferenceOptions {
-        max_tokens: Some(32768),
+        max_tokens: Some(orch_tier.context_window),
+        preferred_model: Some(orch_tier.model.clone()),
         ..Default::default()
     };
 

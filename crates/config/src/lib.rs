@@ -16,14 +16,26 @@ pub struct SwarmConfig {
     pub nats: NatsConfig,
     pub claude: ClaudeConfig,
     pub defaults: DefaultsConfig,
-    pub fuel: FuelConfig,
-    pub inference: InferenceConfig,
+    pub tiers: TiersConfig,
 }
 
-/// Fuel budget for goal retry loops.
+/// Per-tier configuration for the agent hierarchy.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct FuelConfig {
+pub struct TiersConfig {
+    pub orchestrator: TierConfig,
+    pub agent: TierConfig,
+    pub worker: TierConfig,
+}
+
+/// Configuration for a single agent tier.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TierConfig {
+    /// Preferred model name for this tier.
+    pub model: String,
+    /// Context window size (num_ctx for Ollama).
+    pub context_window: u32,
     /// Max wall-clock time in seconds.
     pub time_limit_secs: u64,
     /// Max total tokens across all iterations.
@@ -32,14 +44,6 @@ pub struct FuelConfig {
     pub max_iterations: u32,
     /// Max backoff between retries in seconds.
     pub max_backoff_secs: u64,
-}
-
-/// Inference settings.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct InferenceConfig {
-    /// Context window size (num_ctx for Ollama).
-    pub context_window: u32,
     /// Max files to include as context.
     pub max_context_files: usize,
 }
@@ -142,29 +146,62 @@ impl Default for SwarmConfig {
             nats: NatsConfig::default(),
             claude: ClaudeConfig::default(),
             defaults: DefaultsConfig::default(),
-            fuel: FuelConfig::default(),
-            inference: InferenceConfig::default(),
+            tiers: TiersConfig::default(),
         }
     }
 }
 
-impl Default for FuelConfig {
+impl Default for TiersConfig {
     fn default() -> Self {
         Self {
-            time_limit_secs: 14400, // 4 hours
-            token_limit: 100_000,
+            orchestrator: TierConfig::orchestrator(),
+            agent: TierConfig::agent(),
+            worker: TierConfig::worker(),
+        }
+    }
+}
+
+impl TierConfig {
+    pub fn orchestrator() -> Self {
+        Self {
+            model: "codellama:34b".into(),
+            context_window: 32768,
+            time_limit_secs: 14400,     // 4 hours
+            token_limit: 1_000_000,     // 1M tokens
             max_iterations: 20,
             max_backoff_secs: 60,
+            max_context_files: 100,
+        }
+    }
+
+    pub fn agent() -> Self {
+        Self {
+            model: "deepseek-coder:33b".into(),
+            context_window: 16384,
+            time_limit_secs: 1800,      // 30 min
+            token_limit: 300_000,       // 300K tokens
+            max_iterations: 10,
+            max_backoff_secs: 30,
+            max_context_files: 50,
+        }
+    }
+
+    pub fn worker() -> Self {
+        Self {
+            model: "qwen2.5-coder:7b".into(),
+            context_window: 8192,
+            time_limit_secs: 300,       // 5 min
+            token_limit: 100_000,       // 100K tokens
+            max_iterations: 5,
+            max_backoff_secs: 10,
+            max_context_files: 20,
         }
     }
 }
 
-impl Default for InferenceConfig {
+impl Default for TierConfig {
     fn default() -> Self {
-        Self {
-            context_window: 32768,
-            max_context_files: 100,
-        }
+        Self::agent() // sensible middle ground
     }
 }
 

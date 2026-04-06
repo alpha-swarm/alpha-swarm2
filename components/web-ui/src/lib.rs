@@ -91,10 +91,10 @@ fn read_body(request: &IncomingRequest) -> Vec<u8> {
 
 fn api_model_roles(response_out: ResponseOutparam) {
     let roles = r#"[
-        {"name":"qwen2.5-coder:7b","role":"Fast code edits","good_for":["lint fixes","rename","add simple function","formatting"],"complexity":"simple"},
-        {"name":"deepseek-coder:33b","role":"Medium complexity","good_for":["refactoring","add features","write tests","error handling"],"complexity":"medium"},
-        {"name":"codellama:34b","role":"Complex reasoning","good_for":["architecture","algorithms","multi-file edits","debugging"],"complexity":"complex"},
-        {"name":"claude-sonnet-4-20250514","role":"Orchestration","good_for":["task decomposition","code review","complex refactors","design"],"complexity":"complex"}
+        {"name":"qwen2.5-coder:7b","role":"Worker tier","good_for":["lint fixes","rename","add simple function","formatting"],"complexity":"worker","tier":"worker","fuel":"5min / 100K tokens / 5 iters"},
+        {"name":"deepseek-coder:33b","role":"Agent tier","good_for":["refactoring","add features","write tests","error handling"],"complexity":"agent","tier":"agent","fuel":"30min / 300K tokens / 10 iters"},
+        {"name":"codellama:34b","role":"Orchestrator tier","good_for":["architecture","algorithms","multi-file edits","task planning"],"complexity":"orchestrator","tier":"orchestrator","fuel":"4h / 1M tokens / 20 iters"},
+        {"name":"claude-sonnet-4-20250514","role":"Orchestrator tier","good_for":["task decomposition","code review","complex refactors","design"],"complexity":"orchestrator","tier":"orchestrator","fuel":"4h / 1M tokens / 20 iters"}
     ]"#;
     respond_json(response_out, 200, roles);
 }

@@ -76,7 +76,7 @@ pub fn discover_files(repo: &std::path::Path) -> Result<Vec<String>> {
     walk(repo, repo, &extensions, &mut files);
     files.sort();
 
-    let max_files = swarm_config::InferenceConfig::default().max_context_files;
+    let max_files = swarm_config::TierConfig::agent().max_context_files;
     if files.len() > max_files {
         info!("Found {} files, taking first {}", files.len(), max_files);
         files.truncate(max_files);

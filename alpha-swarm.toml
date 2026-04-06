@@ -23,12 +23,33 @@ embed_model = "qwen2.5-coder:7b"
 simple_model = "qwen2.5-coder:7b"
 project = "default"
 
-[fuel]
-time_limit_secs = 14400  # 4 hours max per goal
-token_limit = 100000     # 100K tokens max
-max_iterations = 20      # up to 20 retry attempts
-max_backoff_secs = 60    # cap backoff at 60s
+# --- Agent Tiers ---
+# Orchestrator: top-level goal planner, uses the biggest model
+[tiers.orchestrator]
+model = "codellama:34b"
+context_window = 32768
+time_limit_secs = 14400         # 4 hours
+token_limit = 1000000           # 1M tokens
+max_iterations = 20
+max_backoff_secs = 60
+max_context_files = 100
 
-[inference]
-context_window = 32768   # 32K context for Ollama
-max_context_files = 100  # send up to 100 files as context
+# Agent: sub-task executor, medium model
+[tiers.agent]
+model = "deepseek-coder:33b"
+context_window = 16384
+time_limit_secs = 1800          # 30 min
+token_limit = 300000            # 300K tokens
+max_iterations = 10
+max_backoff_secs = 30
+max_context_files = 50
+
+# Worker: small focused tasks, fast model
+[tiers.worker]
+model = "qwen2.5-coder:7b"
+context_window = 8192
+time_limit_secs = 300           # 5 min
+token_limit = 100000            # 100K tokens
+max_iterations = 5
+max_backoff_secs = 10
+max_context_files = 20
