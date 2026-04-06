@@ -17,4 +17,5 @@ quality-gate-lib = { path = "../quality-gate" }
 swarm-events = { path = "../events" }
 swarm-config = { path = "../config", default-features = false }
 knowledge-base = { path = "../knowledge-base" }
+swarm-tools = { path = "../tools" }
 chrono = "0.4"

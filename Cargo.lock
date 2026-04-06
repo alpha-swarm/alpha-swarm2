@@ -31,6 +31,7 @@ dependencies = [
  "serde_json",
  "swarm-config",
  "swarm-events",
+ "swarm-tools",
  "tokio",
  "tracing",
  "uuid",
@@ -4573,6 +4574,19 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "swarm-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "glob",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -471,6 +471,158 @@ impl Agent {
         }
     }
 
+    /// Run a task using the tool-use loop: model outputs tool calls, we execute them,
+    /// feed results back, repeat until <<<DONE>>> or max_steps reached.
+    pub async fn run_with_tools(
+        &self,
+        task: &str,
+        file_paths: &[String],
+        complexity: Complexity,
+        tools: &swarm_tools::ToolRegistry,
+        max_steps: u32,
+    ) -> Result<AgentResult> {
+        use crate::parser::{parse_actions, AgentAction};
+        use std::time::Duration;
+
+        let files = self.read_files(file_paths)?;
+        let tool_prompt = tools.tools_prompt();
+        let system = format!(
+            "{}\n\n{}\n\nAfter completing all work, output <<<DONE\\nsummary of what was done\\n>>> to finish.",
+            crate::prompt::AgentType::General.system_prompt(),
+            tool_prompt,
+        );
+
+        let user_msg = {
+            let mut file_context = String::new();
+            for (path, content) in &files {
+                if content.is_empty() {
+                    file_context.push_str(&format!("=== {path} === [NEW FILE]\n\n"));
+                } else {
+                    file_context.push_str(&format!("=== {path} ===\n{content}\n\n"));
+                }
+            }
+            format!("TASK: {task}\n\nFILES:\n{file_context}")
+        };
+
+        let mut messages = vec![
+            inference_client::ChatMessage::system(&system),
+            inference_client::ChatMessage::user(&user_msg),
+        ];
+
+        let ctx = swarm_tools::ToolContext {
+            repo_path: self.repo_path.clone(),
+            project: self.project.clone(),
+            timeout: Duration::from_secs(60),
+        };
+
+        let options = default_options();
+        let mut total_tokens_in = 0u32;
+        let mut total_tokens_out = 0u32;
+        let mut total_duration = 0u64;
+        let mut all_edits = Vec::new();
+        let mut step = 0u32;
+
+        loop {
+            step += 1;
+            if step > max_steps {
+                info!(step, max_steps, "Tool loop: max steps reached");
+                break;
+            }
+
+            let response = self.router.chat(&messages, complexity, &options).await
+                .context("Tool loop inference failed")?;
+
+            total_tokens_in += response.tokens_input;
+            total_tokens_out += response.tokens_output;
+            total_duration += response.duration_ms;
+
+            info!(step, model = %response.model, tokens_out = response.tokens_output, "Tool loop step");
+
+            let actions = match parse_actions(&response.content) {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!("Failed to parse actions at step {step}: {e}");
+                    break;
+                }
+            };
+
+            if actions.is_empty() {
+                // Model didn't output any structured blocks — treat as done
+                info!(step, "No actions parsed, treating as done");
+                break;
+            }
+
+            // Add assistant message to conversation
+            messages.push(inference_client::ChatMessage::assistant(&response.content));
+
+            let mut feedback_parts = Vec::new();
+            let mut done = false;
+
+            for action in &actions {
+                match action {
+                    AgentAction::Tool(call) => {
+                        let params: serde_json::Value = serde_json::from_str(&call.params_json)
+                            .unwrap_or(serde_json::Value::Object(Default::default()));
+                        let result = tools.execute(&call.name, params, &ctx).await;
+                        let prefix = if result.is_error { "ERROR" } else { "OK" };
+                        feedback_parts.push(format!("[{} {}] {}", call.name, prefix, result.content));
+                    }
+                    AgentAction::Edit(edit) => {
+                        all_edits.push(edit.clone());
+                        // Apply edit immediately
+                        if let Err(e) = self.apply_edits(&[edit.clone()]) {
+                            feedback_parts.push(format!("[edit ERROR] {e}"));
+                        } else {
+                            feedback_parts.push("[edit OK] Applied".to_string());
+                        }
+                    }
+                    AgentAction::Agent { description, files, complexity: _ } => {
+                        // For now, run as a sub-task via normal agent (no recursive tool loop)
+                        feedback_parts.push(format!("[agent] Sub-agent requested: {description} on {:?} — executing via LLM", files));
+                        match self.run(description, files, complexity).await {
+                            Ok(sub_result) => {
+                                all_edits.extend(sub_result.edits);
+                                feedback_parts.push(format!("[agent OK] Applied {} edits", sub_result.inference_response.tokens_output));
+                            }
+                            Err(e) => {
+                                feedback_parts.push(format!("[agent ERROR] {e}"));
+                            }
+                        }
+                    }
+                    AgentAction::Done { summary } => {
+                        info!(step, summary = %summary, "Tool loop: model signaled done");
+                        done = true;
+                    }
+                }
+            }
+
+            if done { break; }
+
+            // Feed results back as a user message
+            let feedback = feedback_parts.join("\n");
+            messages.push(inference_client::ChatMessage::user(&format!("TOOL RESULTS:\n{feedback}\n\nContinue with the next action, or output <<<DONE>>> if complete.")));
+        }
+
+        let applied = !all_edits.is_empty();
+
+        Ok(AgentResult {
+            edits: all_edits,
+            inference_response: inference_client::InferenceResponse {
+                content: String::new(),
+                model: String::new(),
+                backend: inference_client::BackendKind::Ollama,
+                tokens_input: total_tokens_in,
+                tokens_output: total_tokens_out,
+                duration_ms: total_duration,
+            },
+            applied,
+            skipped: false,
+            run_id: None,
+            attempt: 1,
+            escalated_from: None,
+        })
+    }
+
     fn read_files(&self, paths: &[String]) -> Result<Vec<(String, String)>> {
         let mut files = Vec::new();
         for path in paths {

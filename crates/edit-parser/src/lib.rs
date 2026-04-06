@@ -15,6 +15,22 @@ pub enum FileEdit {
     },
 }
 
+/// A tool call parsed from the model's response.
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    pub name: String,
+    pub params_json: String,
+}
+
+/// An agent action — either a tool call, a file edit, or a sub-agent spawn.
+#[derive(Debug, Clone)]
+pub enum AgentAction {
+    Tool(ToolCall),
+    Edit(FileEdit),
+    Agent { description: String, files: Vec<String>, complexity: String },
+    Done { summary: String },
+}
+
 /// Error type for parse failures (no external deps).
 #[derive(Debug)]
 pub struct ParseError(pub String);
@@ -59,6 +75,87 @@ pub fn parse_edits(response: &str) -> Result<Vec<FileEdit>, ParseError> {
     }
 
     Ok(edits)
+}
+
+/// Parse all action blocks from a model response: TOOL, EDIT, CREATE, DELETE, AGENT, DONE.
+pub fn parse_actions(response: &str) -> Result<Vec<AgentAction>, ParseError> {
+    let mut actions = Vec::new();
+    let mut pos = 0;
+
+    while pos < response.len() {
+        let Some(start) = response[pos..].find("<<<") else { break };
+        let block_start = pos + start + 3;
+
+        let Some(end_offset) = response[block_start..].find(">>>") else {
+            return Err(ParseError(format!(
+                "Unclosed block starting at position {}", pos + start
+            )));
+        };
+        let block_end = block_start + end_offset;
+        let block = response[block_start..block_end].trim();
+
+        let first_newline = block.find('\n').unwrap_or(block.len());
+        let header = block[..first_newline].trim();
+        let body = if first_newline < block.len() { &block[first_newline + 1..] } else { "" };
+
+        if let Some(tool_name) = header.strip_prefix("TOOL ") {
+            actions.push(AgentAction::Tool(ToolCall {
+                name: tool_name.trim().to_string(),
+                params_json: body.trim().to_string(),
+            }));
+        } else if header.starts_with("EDIT ") || header.starts_with("CREATE ") || header.starts_with("DELETE ") {
+            let edit = parse_single_block(block)?;
+            actions.push(AgentAction::Edit(edit));
+        } else if header == "AGENT" {
+            // Parse agent spawn: {"description": "...", "files": [...], "complexity": "..."}
+            let desc = extract_json_field(body, "description");
+            let complexity = extract_json_field(body, "complexity");
+            let files: Vec<String> = extract_json_array(body, "files");
+            actions.push(AgentAction::Agent { description: desc, files, complexity });
+        } else if header == "DONE" {
+            actions.push(AgentAction::Done { summary: body.trim().to_string() });
+        } else {
+            // Try as edit block for backwards compatibility
+            match parse_single_block(block) {
+                Ok(edit) => actions.push(AgentAction::Edit(edit)),
+                Err(_) => {} // Skip unknown blocks
+            }
+        }
+
+        pos = block_end + 3;
+    }
+
+    Ok(actions)
+}
+
+/// Simple JSON field extraction (no serde dependency in edit-parser).
+fn extract_json_field(json: &str, field: &str) -> String {
+    let needle = format!("\"{}\"", field);
+    let Some(idx) = json.find(&needle) else { return String::new() };
+    let after_key = &json[idx + needle.len()..];
+    let Some(colon) = after_key.find(':') else { return String::new() };
+    let after_colon = after_key[colon + 1..].trim_start();
+    if after_colon.starts_with('"') {
+        let content = &after_colon[1..];
+        let end = content.find('"').unwrap_or(content.len());
+        content[..end].to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn extract_json_array(json: &str, field: &str) -> Vec<String> {
+    let needle = format!("\"{}\"", field);
+    let Some(idx) = json.find(&needle) else { return Vec::new() };
+    let after_key = &json[idx + needle.len()..];
+    let Some(bracket) = after_key.find('[') else { return Vec::new() };
+    let after_bracket = &after_key[bracket + 1..];
+    let Some(end) = after_bracket.find(']') else { return Vec::new() };
+    let inner = &after_bracket[..end];
+    inner.split(',')
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn parse_single_block(block: &str) -> Result<FileEdit, ParseError> {

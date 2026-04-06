@@ -23,6 +23,11 @@ impl AgentType {
         }
     }
 
+    /// Get the system prompt for this agent type (role description only, no output format).
+    pub fn system_prompt(self) -> &'static str {
+        self.role_description()
+    }
+
     fn role_description(self) -> &'static str {
         match self {
             Self::General => "You are a code modification agent. You receive a task description and file contents, then output precise file edits.\n\nRULES:\n- Only modify files that need to change\n- Do not add unnecessary changes, comments, or formatting\n- If the task is unclear or impossible, explain why instead of guessing",
