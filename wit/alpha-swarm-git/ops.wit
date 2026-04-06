@@ -1,0 +1,58 @@
+/// Git operations provider — wraps git CLI and gh CLI.
+/// Runs natively on machines with repo access.
+/// Components import this interface to perform git operations.
+package alpha-swarm:git@0.1.0;
+
+interface ops {
+    /// Result of cloning a repository.
+    record clone-result {
+        path: string,
+        branch: string,
+    }
+
+    /// Result of creating a PR.
+    record pr-result {
+        url: string,
+        branch: string,
+    }
+
+    /// Clone or update a repository for a project.
+    /// Returns the local path.
+    ensure-repo: func(project: string, url: string) -> result<string, string>;
+
+    /// Create an isolated git worktree for an agent.
+    /// Returns the worktree path.
+    create-worktree: func(repo-path: string, agent-id: string) -> result<string, string>;
+
+    /// Remove a worktree after the agent is done.
+    remove-worktree: func(repo-path: string, agent-id: string) -> result<_, string>;
+
+    /// Apply a diff from an agent's worktree onto the main repo.
+    /// Returns the unified diff that was applied.
+    apply-diff: func(repo-path: string, agent-id: string) -> result<string, string>;
+
+    /// Extract the diff between an agent's worktree and the main branch.
+    extract-diff: func(repo-path: string, agent-id: string) -> result<string, string>;
+
+    /// Create a branch, commit, push, and open a PR.
+    create-pr: func(
+        repo-path: string,
+        goal: string,
+        quality-passed: bool,
+        duration-ms: u64,
+        tokens-in: u32,
+        tokens-out: u32,
+    ) -> result<pr-result, string>;
+
+    /// Get git status (short format).
+    status: func(repo-path: string) -> result<string, string>;
+
+    /// Get git diff (uncommitted changes).
+    diff: func(repo-path: string) -> result<string, string>;
+
+    /// Reset working tree to clean state.
+    reset: func(repo-path: string) -> result<_, string>;
+
+    /// List source files in repo (filtered by common extensions).
+    list-source-files: func(repo-path: string) -> result<list<string>, string>;
+}

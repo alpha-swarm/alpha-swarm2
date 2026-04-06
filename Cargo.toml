@@ -17,6 +17,8 @@ members = [
     "components/web-ui",
     "components/tool-search",
     "components/tool-web",
+    "providers/git-provider",
+    "providers/test-provider",
 ]
 resolver = "2"
 

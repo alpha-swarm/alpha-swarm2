@@ -1,0 +1,35 @@
+/// Test runner provider — wraps cargo/npm/go test execution.
+/// Runs natively on machines with build toolchains installed.
+/// Components import this interface to run quality checks.
+package alpha-swarm:test@0.1.0;
+
+interface runner {
+    /// Result of a single test/check execution.
+    record check-result {
+        check-name: string,
+        passed: bool,
+        stdout: string,
+        stderr: string,
+        exit-code: s32,
+        duration-ms: u64,
+    }
+
+    /// Detected toolchain info.
+    record toolchain-info {
+        name: string,
+        checks: list<string>,
+    }
+
+    /// Detect which toolchain a repo uses (cargo, npm, go).
+    detect-toolchain: func(repo-path: string) -> result<toolchain-info, string>;
+
+    /// Run all quality checks (fmt, lint, build, test).
+    /// Returns results for each check.
+    run-all: func(repo-path: string) -> result<list<check-result>, string>;
+
+    /// Run a single named check.
+    run-check: func(repo-path: string, check-name: string) -> result<check-result, string>;
+
+    /// Run tests with an optional filter pattern.
+    run-tests: func(repo-path: string, pattern: string) -> result<check-result, string>;
+}
