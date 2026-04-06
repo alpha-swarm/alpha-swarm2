@@ -124,7 +124,7 @@ fn api_events_impl(response_out: ResponseOutparam) {
     events.push_str("event: status\ndata: {\"active_agents\":0,\"message\":\"web-ui connected\"}\n\n");
 
     // 2. Query running agents from SurrealDB
-    let running_query = "SELECT * FROM agent_run WHERE status = 'running' ORDER BY created_at DESC LIMIT 10";
+    let running_query = "SELECT id, project, task_description, agent_id, model_used, status, tokens_input, tokens_output, duration_ms, created_at, error_message, quality_gate_passed, files_modified FROM agent_run WHERE status = 'running' ORDER BY created_at DESC LIMIT 10";
     if let Ok(body) = surreal_query(running_query) {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
             if let Some(runs) = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
@@ -149,7 +149,7 @@ fn api_events_impl(response_out: ResponseOutparam) {
     }
 
     // 3. Query recent completed/failed/pending runs — include ALL fields for detail view
-    let recent_query = "SELECT * FROM agent_run WHERE status != 'running' ORDER BY created_at DESC LIMIT 20";
+    let recent_query = "SELECT id, project, task_description, agent_id, model_used, status, tokens_input, tokens_output, duration_ms, created_at, error_message, quality_gate_passed, files_modified FROM agent_run WHERE status != 'running' ORDER BY created_at DESC LIMIT 20";
     if let Ok(body) = surreal_query(recent_query) {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
             if let Some(runs) = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
@@ -203,7 +203,7 @@ fn api_events_impl(response_out: ResponseOutparam) {
 }
 
 fn api_list_projects(response_out: ResponseOutparam) {
-    match surreal_query("SELECT * FROM project ORDER BY created_at DESC") {
+    match surreal_query("SELECT id, name, repo_url, branch, description, status, created_at FROM project ORDER BY created_at DESC") {
         Ok(body) => {
             let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
             let projects = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result"))
@@ -364,7 +364,16 @@ fn surreal_raw_query_no_headers(query: &str) -> Result<String, String> {
     let mut bytes = Vec::new();
     loop {
         match resp_stream.read(65536) {
-            Ok(chunk) if chunk.is_empty() => break,
+            Ok(chunk) if chunk.is_empty() => {
+                // Might need to wait for more data
+                resp_stream.subscribe().block();
+                // Try once more after blocking
+                match resp_stream.read(65536) {
+                    Ok(chunk) if chunk.is_empty() => break,
+                    Ok(chunk) => bytes.extend_from_slice(&chunk),
+                    Err(_) => break,
+                }
+            }
             Ok(chunk) => bytes.extend_from_slice(&chunk),
             Err(_) => break,
         }
@@ -466,7 +475,7 @@ fn surreal_raw_query(query: &str) -> Result<String, String> {
 
 fn api_runs(response_out: ResponseOutparam, project: &str) {
     let query = format!(
-        "SELECT * FROM agent_run WHERE project = '{}' ORDER BY created_at DESC LIMIT 50",
+        "SELECT id, project, task_description, agent_id, model_used, status, tokens_input, tokens_output, duration_ms, created_at, error_message, quality_gate_passed, files_modified FROM agent_run WHERE project = '{}' ORDER BY created_at DESC LIMIT 20",
         project.replace('\'', "")
     );
     match surreal_query(&query) {

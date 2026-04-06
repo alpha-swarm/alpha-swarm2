@@ -133,6 +133,12 @@ impl KnowledgeStore {
         self.list_runs(project, Some(RunStatus::Running)).await
     }
 
+    /// Execute a raw SurrealQL query (for admin operations).
+    pub async fn db_query_raw(&self, query: &str) -> Result<()> {
+        self.db.query(query).await.context("Raw query failed")?;
+        Ok(())
+    }
+
     /// Get all pending tasks across all projects.
     pub async fn list_pending(&self) -> Result<Vec<AgentRun>> {
         let mut result = self.db

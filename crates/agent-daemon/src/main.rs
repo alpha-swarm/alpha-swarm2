@@ -58,7 +58,17 @@ async fn main() -> Result<()> {
         Err(e) => { warn!("NATS unavailable for subscription: {e}"); None }
     };
 
-    // 1. Process any pending tasks from before daemon started
+    // 1. Reset zombie tasks (running but daemon died)
+    info!("Recovering zombie tasks (status=running from previous daemon)...");
+    let reset_result = store.db_query_raw(
+        "UPDATE agent_run SET status = 'pending', agent_id = 'recovered' WHERE status = 'running'"
+    ).await;
+    match reset_result {
+        Ok(_) => info!("Zombie tasks reset to pending"),
+        Err(e) => warn!("Failed to reset zombies: {e}"),
+    }
+
+    // 2. Process any pending tasks
     info!("Checking for pending tasks...");
     match store.list_pending().await {
         Ok(pending) => {
