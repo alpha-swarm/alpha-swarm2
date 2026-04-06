@@ -12,16 +12,16 @@ pub fn Sidebar() -> impl IntoView {
     view! {
         <nav class="sidebar">
             <div class="logo"><span>"alpha"</span>"-swarm"</div>
-            <A href="/" class="nav-item">
+            <A href="/" attr:class="nav-item">
                 <span class="nav-icon">"📊"</span>
                 " Overview"
                 <span class="health-dot" class:offline=move || !is_online()></span>
             </A>
-            <A href="/projects" class="nav-item">
+            <A href="/projects" attr:class="nav-item">
                 <span class="nav-icon">"📁"</span>
                 " Projects"
             </A>
-            <A href="/agents" class="nav-item">
+            <A href="/agents" attr:class="nav-item">
                 <span class="nav-icon">"🤖"</span>
                 " Agents"
                 {move || {
@@ -29,15 +29,15 @@ pub fn Sidebar() -> impl IntoView {
                     (count > 0).then(|| view! { <span class="badge-count">{count}</span> })
                 }}
             </A>
-            <A href="/models" class="nav-item">
+            <A href="/models" attr:class="nav-item">
                 <span class="nav-icon">"⬡"</span>
                 " Models"
             </A>
-            <A href="/resources" class="nav-item">
+            <A href="/resources" attr:class="nav-item">
                 <span class="nav-icon">"📦"</span>
                 " Resources"
             </A>
-            <A href="/submit" class="nav-item">
+            <A href="/submit" attr:class="nav-item">
                 <span class="nav-icon">"+"</span>
                 " Submit Task"
             </A>
