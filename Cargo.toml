@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["frontend"]
 members = [
     "crates/config",
     "crates/inference-client",
