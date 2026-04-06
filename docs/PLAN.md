@@ -569,18 +569,51 @@ The orchestrator loop:
 
 The existing fuel system in `executor.rs` (time, tokens, iterations) applies to the tool-use loop. Tools are "free" (0 tokens) but still count against time. This naturally incentivizes the model to use tools over LLM calls.
 
+### Tool Calling Protocol
+
+**Primary: Ollama Native Tool Use** (implemented)
+
+Models that support the Ollama `tools` API parameter (qwen2.5 family) use the native protocol:
+- Tools passed as JSON schema in the `tools` field of `/api/chat`
+- Model returns `tool_calls` array in the response message
+- Results fed back as `role: "tool"` messages
+- Compact, no extra tokens wasted on format overhead
+- Model is trained on this format → higher accuracy
+
+**Fallback: Text-Based <<<TOOL>>> Protocol** (implemented)
+
+For models that don't support native tools (deepseek-coder, codellama):
+- Tools described in the system prompt as text
+- Model outputs `<<<TOOL tool_name\n{params}\n>>>` blocks
+- Results concatenated and fed back as user messages
+- Less token-efficient but works with any model
+
+**Future Options (documented for later)**
+
+1. **Context Window Management**: Keep rolling window of last N tool results, summarize older ones into a single history message. Prevents context from growing unboundedly.
+
+2. **Structured Result Truncation**: Instead of full file contents, return signatures and relevant sections. E.g., `read_file` returns: "234 lines, 8 functions (main, parse, apply). Lines 45-67: [relevant section]".
+
+3. **Tool Result Caching**: Cache results of deterministic tools (read_file, list_files) within a session. Skip re-execution if params haven't changed.
+
+4. **Streaming Tool Results**: For long-running tools (tests, builds), stream partial results back to model to enable early abort.
+
+5. **MCP Protocol**: Full Model Context Protocol compatibility for external tool servers. Would allow connecting to any MCP-compatible tool provider.
+
 ### Implementation Order
 
-1. **`crates/tools/` crate**: `Tool` trait, `ToolRegistry`, `ToolContext`, `ToolResult`
-2. **Filesystem tools**: `read_file`, `write_file`, `delete_file`, `list_files`, `grep`
-3. **Git tools**: `diff`, `status`, `commit`
-4. **Test runner tools**: `run_tests`, `run_test`, `run_affected`
-5. **Tree-sitter tools**: `rename_symbol`, `find_symbol`, `extract_signatures` (Rust first)
-6. **Tool-use loop in agent-core**: parse `<<<TOOL>>>` blocks, execute, feed back results
-7. **LSP tools**: start rust-analyzer, query diagnostics/references/rename
-8. **Web search tools**: `web_search`, `fetch_url`
-9. **Update orchestrator prompt**: include tool descriptions, teach model to choose
-10. **Dashboard**: show tool calls in agent detail (tool name, params, result, duration)
+1. ✅ **`crates/tools/` crate**: `Tool` trait, `ToolRegistry`, `ToolContext`, `ToolResult`
+2. ✅ **Filesystem tools**: `read_file`, `write_file`, `delete_file`, `list_files`, `grep`
+3. ✅ **Git tools**: `diff`, `status`
+4. ✅ **Test runner tools**: `run_tests` (auto-detect cargo/npm/go)
+5. ✅ **Shell tool**: `run_command` (allowlisted commands)
+6. ✅ **Tool-use loop in agent-core**: `run_with_tools()` with text-based protocol
+7. ✅ **Ollama native tool calling**: `chat_with_tools()` with `tools` API parameter
+8. **Tree-sitter tools**: `rename_symbol`, `find_symbol`, `extract_signatures` (Rust first)
+9. **LSP tools**: start rust-analyzer, query diagnostics/references/rename
+10. **Web search tools**: `web_search`, `fetch_url`
+11. **Wire into orchestrator**: runner uses `run_with_tools` instead of `run` for tool-capable models
+12. **Dashboard**: show tool calls in agent detail (tool name, params, result, duration)
 
 ### Dependencies
 

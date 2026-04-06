@@ -74,6 +74,23 @@ impl ToolRegistry {
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
     }
+
+    /// Convert all tools to Ollama-compatible tool definitions for native tool calling.
+    pub fn to_ollama_tools(&self) -> Vec<serde_json::Value> {
+        let mut names: Vec<&str> = self.tools.keys().map(|s| s.as_str()).collect();
+        names.sort();
+        names.iter().map(|name| {
+            let tool = &self.tools[*name];
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name(),
+                    "description": tool.description(),
+                    "parameters": tool.parameters_schema(),
+                }
+            })
+        }).collect()
+    }
 }
 
 impl Default for ToolRegistry {

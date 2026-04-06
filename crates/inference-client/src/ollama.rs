@@ -63,12 +63,17 @@ struct ChatRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<OllamaOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OllamaTool>>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct OllamaMessage {
-    role: String,
-    content: String,
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OllamaMessage {
+    pub role: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<OllamaToolCall>>,
 }
 
 #[derive(Serialize)]
@@ -79,6 +84,33 @@ struct OllamaOptions {
     num_ctx: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop: Option<Vec<String>>,
+}
+
+/// Ollama tool definition (OpenAI-compatible format).
+#[derive(Serialize, Clone, Debug)]
+pub struct OllamaTool {
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub function: OllamaToolFunction,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct OllamaToolFunction {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// A tool call returned by the model.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OllamaToolCall {
+    pub function: OllamaToolCallFunction,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OllamaToolCallFunction {
+    pub name: String,
+    pub arguments: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -148,6 +180,7 @@ impl InferenceBackend for OllamaBackend {
             .map(|m| OllamaMessage {
                 role: m.role.clone(),
                 content: m.content.clone(),
+                tool_calls: None,
             })
             .collect();
 
@@ -160,6 +193,7 @@ impl InferenceBackend for OllamaBackend {
                 num_ctx: options.max_tokens.map(|t| t.max(4096)),
                 stop: options.stop.clone(),
             }),
+            tools: None,
         };
 
         let start = Instant::now();
@@ -194,6 +228,59 @@ impl InferenceBackend for OllamaBackend {
             tokens_output: resp.eval_count,
             duration_ms,
         })
+    }
+}
+
+impl OllamaBackend {
+    /// Chat with native tool support. Returns the assistant message (may contain tool_calls),
+    /// plus token counts and duration.
+    pub async fn chat_with_tools(
+        &self,
+        model: &str,
+        messages: &[OllamaMessage],
+        tools: &[OllamaTool],
+        options: &InferenceOptions,
+    ) -> Result<(OllamaMessage, u32, u32, u64)> {
+        let request = ChatRequest {
+            model: model.to_string(),
+            messages: messages.to_vec(),
+            stream: false,
+            options: Some(OllamaOptions {
+                temperature: options.temperature,
+                num_ctx: options.max_tokens.map(|t| t.max(4096)),
+                stop: options.stop.clone(),
+            }),
+            tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
+        };
+
+        let start = Instant::now();
+        let response = self.client
+            .post(format!("{}/api/chat", self.base_url))
+            .json(&request)
+            .send()
+            .await
+            .context("Ollama chat_with_tools request failed")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            if body.contains("does not support tools") {
+                bail!("Model {model} does not support native tool calling");
+            }
+            bail!("Ollama API error {status}: {body}");
+        }
+
+        let resp: ChatResponse = response.json().await
+            .context("Failed to parse Ollama chat_with_tools response")?;
+
+        let msg = resp.message.unwrap_or(OllamaMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_calls: None,
+        });
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        Ok((msg, resp.prompt_eval_count, resp.eval_count, duration_ms))
     }
 }
 
