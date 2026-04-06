@@ -777,6 +777,174 @@ System recovers from daemon crashes, network partitions, database outages, and d
 
 ---
 
+## Phase 10: WASI Tool Workers — Distributed, Sandboxed Tool Execution (Future)
+
+**Goal**: Each tool runs as a WASI component on wasmCloud. Tools are sandboxed, distributable across the lattice, and hot-deployable. The daemon dispatches tool calls over NATS; any machine with the right capabilities can execute them.
+
+### Why
+
+Current tool execution has three problems:
+
+1. **Locality**: Tools run on the daemon's machine. If the model runs on csatapaci but files are on the local machine, every `read_file` call crosses the network twice (tool call → daemon → read → result → model). Moving tool execution to where the data lives eliminates this.
+
+2. **No sandboxing**: `run_command` and `write_file` have direct host access. A malicious model response could `rm -rf /` (we have an allowlist, but it's defense-in-depth). WASI components are sandboxed by default — they can only access explicitly granted capabilities.
+
+3. **No scalability**: 10 parallel agents calling `run_tests` all compete for the same machine's CPU. With WASI workers distributed across the lattice, each `run_tests` call can run on a different machine.
+
+### Architecture
+
+```
+Model (csatapaci, Ollama)
+  │
+  │ "call read_file(src/main.rs)"
+  │
+  ▼
+Agent Loop (daemon, any machine)
+  │
+  │ Publishes tool call to NATS subject: swarm.tools.read_file
+  │
+  ▼
+NATS (cluster)
+  │
+  │ Routed to nearest machine with file access
+  │
+  ▼
+Tool Worker (WASI component on wasmCloud)
+  │
+  ├── wasi:filesystem → reads src/main.rs (sandboxed to repo dir)
+  │
+  │ Returns result via NATS reply
+  │
+  ▼
+Agent Loop (receives result, feeds to model)
+```
+
+### WASI Component Per Tool Category
+
+```
+components/
+├── tool-fs/              ← read_file, write_file, delete_file, list_files
+│   ├── wit/tool-fs.wit   ← uses wasi:filesystem
+│   └── src/lib.rs
+├── tool-git/             ← git_diff, git_status, git_commit
+│   ├── wit/tool-git.wit  ← uses wasi:cli/run (sandboxed to git commands)
+│   └── src/lib.rs
+├── tool-test/            ← run_tests
+│   ├── wit/tool-test.wit ← uses wasi:cli/run (sandboxed to cargo/npm/go)
+│   └── src/lib.rs
+├── tool-search/          ← grep, ts_find, ts_rename, ts_signatures
+│   ├── wit/tool-search.wit ← pure computation, no host access needed
+│   └── src/lib.rs
+├── tool-web/             ← web_search, fetch_url, search_crates
+│   ├── wit/tool-web.wit  ← uses wasi:http/outgoing-handler
+│   └── src/lib.rs
+```
+
+### WIT Interface for Tools
+
+Each tool component implements a common interface:
+
+```wit
+package swarm:tools@0.1.0;
+
+interface tool-executor {
+    record tool-params {
+        name: string,
+        params-json: string,
+        repo-path: string,
+        project: string,
+        timeout-ms: u64,
+    }
+
+    record tool-result {
+        content: string,
+        is-error: bool,
+        duration-ms: u64,
+    }
+
+    execute: func(params: tool-params) -> tool-result;
+}
+```
+
+### Dispatch: NATS-Based Tool Routing
+
+The agent loop (daemon or WASI component) publishes tool calls to NATS:
+
+```
+Subject: swarm.tools.{tool_name}
+Payload: { "params": {...}, "repo_path": "/tmp/alpha-swarm/repos/myproject", "timeout_ms": 60000 }
+Reply: { "content": "...", "is_error": false, "duration_ms": 12 }
+```
+
+wasmCloud routes the message to the nearest component with the right capabilities:
+- `tool-fs` must run on a machine with access to the repo directory
+- `tool-web` can run anywhere with internet
+- `tool-search` (tree-sitter, grep) can run anywhere with the repo data
+
+### Capability Grants (Security)
+
+Each WASI tool component gets minimal capabilities:
+
+| Component | Capabilities Granted |
+|-----------|---------------------|
+| tool-fs | `wasi:filesystem` (read/write to repo dir only) |
+| tool-git | `wasi:cli/run` (git binary only), `wasi:filesystem` |
+| tool-test | `wasi:cli/run` (cargo/npm/go only), `wasi:filesystem` |
+| tool-search | None (pure computation — tree-sitter runs in WASM) |
+| tool-web | `wasi:http/outgoing-handler` (HTTP only) |
+
+A compromised tool-web component cannot read files. A compromised tool-fs component cannot make network requests. Defense in depth.
+
+### Migration Path from Current Architecture
+
+1. **Phase 10a**: Keep existing `Tool` trait implementations, add NATS dispatch as an alternative execution backend. Tools can run locally OR via NATS.
+
+```rust
+enum ToolExecutor {
+    Local(Box<dyn Tool>),
+    Remote { nats: NatsClient, subject: String },
+}
+```
+
+2. **Phase 10b**: Compile tool implementations to WASI components. Deploy on wasmCloud alongside existing web-ui component.
+
+3. **Phase 10c**: Remove local tool execution from daemon. All tools go through NATS → WASI workers. Daemon becomes a pure orchestration loop.
+
+### Hot Deployment
+
+New tools can be deployed without restarting anything:
+- Write a new WASI component implementing `swarm:tools/tool-executor`
+- Deploy via `wash` to the lattice
+- Agent loop discovers new tools via NATS subscription
+- Model's tool prompt auto-updates with new tool descriptions
+
+### Implementation Order
+
+1. Define `swarm:tools` WIT interface
+2. Implement `tool-search` WASI component (tree-sitter is pure computation, easiest to port)
+3. Implement `tool-web` WASI component (HTTP only, no filesystem)
+4. Add NATS tool dispatch to ToolRegistry (parallel to local execution)
+5. Implement `tool-fs` WASI component with sandboxed filesystem
+6. Implement `tool-git` and `tool-test` with sandboxed CLI
+7. Remove local tool execution, all tools go through WASI workers
+8. Hot-deployment: auto-register new tools from lattice
+
+### Dependencies
+
+```toml
+# Each tool component
+[dependencies]
+wit-bindgen = "0.36"
+serde_json = "1"
+```
+
+Tree-sitter compiles to WASM (it's C code with WASM support). The `tree-sitter-rust` grammar also compiles to WASM.
+
+### Milestone: "Distributed Tool Execution"
+Tools run as sandboxed WASI components across the wasmCloud lattice. Each machine contributes its capabilities (filesystem, network, CPU) to the swarm. New tools deployed without restart. Security via capability grants — no tool can access more than it needs.
+
+---
+
 ## Risk Register
 
 | Risk | Impact | Mitigation |
@@ -789,3 +957,6 @@ System recovers from daemon crashes, network partitions, database outages, and d
 | Tree-sitter grammar coverage | LOW | Start with Rust only; TypeScript/Go/Python grammars are well-maintained |
 | LSP startup latency | MEDIUM | Keep server alive across tool calls; cache per-project |
 | Concurrent daemon task claiming | HIGH | Atomic conditional update in SurrealDB (Phase 9) |
+| WASI component cold start | LOW | wasmCloud pre-warms components; sub-10ms startup for most tools |
+| Tree-sitter in WASM performance | LOW | C code compiles to WASM efficiently; parsing is CPU-bound, not I/O-bound |
+| NATS tool dispatch latency | LOW | Sub-1ms for local NATS; <5ms across Tailscale; tool execution dominates |
