@@ -141,15 +141,9 @@ impl SwarmRunner {
 
                 info!(task_id = %task.id, desc = %task.description, "Running agent");
 
-                // Use tool-enabled loop: agent can call deterministic tools between LLM steps
-                // NATS dispatch tries remote WASI workers first, local fallback
-                let mut tools = swarm_tools::ToolRegistry::with_defaults();
-                if let Some(client) = nats_client {
-                    let dispatcher = swarm_tools::nats_dispatch::NatsToolDispatcher::new(client, "swarm.tools");
-                    tools = tools.with_nats_dispatcher(dispatcher);
-                }
-                const MAX_TOOL_STEPS: u32 = 20;
-                let result = agent.run_with_tools(&task.description, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
+                // Use standard run() — generates <<<EDIT>>>/<<<CREATE>>> blocks
+                // TODO: switch to run_with_tools() when models support structured tool calling
+                let result = agent.run(&task.description, &task.files, task.complexity).await;
                 (task, result)
             });
         }
