@@ -52,6 +52,10 @@ impl Guest for WebUi {
                 let name = p.strip_prefix("/api/projects/").unwrap_or("");
                 api_delete_project(response_out, name);
             }
+            (Method::Get, p) if p.starts_with("/api/run-detail/") => {
+                let id = p.strip_prefix("/api/run-detail/").unwrap_or("");
+                api_run_detail(response_out, id);
+            }
             (Method::Get, p) if p.starts_with("/api/goals/") => {
                 let project = p.strip_prefix("/api/goals/").unwrap_or("default");
                 api_goals(response_out, project);
@@ -277,7 +281,7 @@ fn api_goals(response_out: ResponseOutparam, project: &str) {
     // Sub-agents are individual runs under that goal.
     let safe = project.replace('\'', "");
     let query = format!(
-        "SELECT task_description, status, model_used, agent_id, tokens_output, duration_ms, created_at FROM agent_run WHERE project = '{}' ORDER BY created_at DESC LIMIT 100",
+        "SELECT task_description, status, model_used, agent_id, tokens_input, tokens_output, duration_ms, created_at, error_message, quality_gate_passed, files_modified FROM agent_run WHERE project = '{}' ORDER BY created_at DESC LIMIT 50",
         safe
     );
     match surreal_query(&query) {
@@ -471,6 +475,27 @@ fn surreal_raw_query(query: &str) -> Result<String, String> {
     let _ = IncomingBody::finish(resp_body);
 
     String::from_utf8(bytes).map_err(|e| format!("utf8: {e}"))
+}
+
+fn api_run_detail(response_out: ResponseOutparam, id: &str) {
+    // Fetch a single run including the diff field (for detail view)
+    let safe_id = id.replace('\'', "").replace('"', "");
+    let query = if safe_id.contains(':') {
+        format!("SELECT * FROM {}", safe_id)
+    } else {
+        format!("SELECT * FROM agent_run:{}", safe_id)
+    };
+    match surreal_query(&query) {
+        Ok(body) => {
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let run = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result"))
+                .and_then(|r| r.as_array()).and_then(|a| a.first())
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            respond_json(response_out, 200, &serde_json::to_string(&run).unwrap_or_default());
+        }
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
+    }
 }
 
 fn api_runs(response_out: ResponseOutparam, project: &str) {
