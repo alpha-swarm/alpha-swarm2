@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -9,6 +9,13 @@ use tracing::debug;
 use crate::backend::InferenceBackend;
 use crate::types::*;
 
+/// Hard timeout for inference requests (chat/generate)
+const INFERENCE_TIMEOUT: Duration = Duration::from_secs(600); // 10 minutes
+/// Hard timeout for embedding requests
+const EMBED_TIMEOUT: Duration = Duration::from_secs(120); // 2 minutes
+/// Hard timeout for metadata requests (tags, ps)
+const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct OllamaBackend {
     client: Client,
     base_url: String,
@@ -17,7 +24,11 @@ pub struct OllamaBackend {
 impl OllamaBackend {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(INFERENCE_TIMEOUT)
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             base_url: base_url.into(),
         }
     }
@@ -102,9 +113,10 @@ impl InferenceBackend for OllamaBackend {
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let resp: TagsResponse = self.client
             .get(format!("{}/api/tags", self.base_url))
+            .timeout(METADATA_TIMEOUT)
             .send()
             .await
-            .context("Failed to list Ollama models")?
+            .context("Failed to list Ollama models (timeout or unreachable)")?
             .json()
             .await
             .context("Failed to parse Ollama tags response")?;
@@ -208,10 +220,11 @@ impl OllamaBackend {
 
         let response = self.client
             .post(format!("{}/api/embed", self.base_url))
+            .timeout(EMBED_TIMEOUT)
             .json(&request)
             .send()
             .await
-            .context("Failed to send embed request to Ollama")?;
+            .context("Ollama embed request failed (timeout or unreachable)")?;
 
         let status = response.status();
         if !status.is_success() {

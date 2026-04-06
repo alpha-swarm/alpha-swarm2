@@ -95,6 +95,28 @@ async fn main() -> Result<()> {
         Err(e) => warn!("Failed to reset zombies: {e}"),
     }
 
+    // 1b. Periodic zombie recovery (every 5 minutes)
+    {
+        let store = Arc::clone(&store);
+        const ZOMBIE_CHECK_INTERVAL_SECS: u64 = 300; // 5 minutes
+        const ZOMBIE_STALE_MINUTES: u64 = 10;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(ZOMBIE_CHECK_INTERVAL_SECS)).await;
+                // Reset tasks that have been "running" with no activity for ZOMBIE_STALE_MINUTES
+                let query = format!(
+                    "UPDATE agent_run SET status = 'failed', error_message = 'Zombie: no activity for {}m', agent_id = 'zombie-recovery' WHERE status = 'running' AND last_activity_at != NONE AND time::now() - <datetime>last_activity_at > {}m",
+                    ZOMBIE_STALE_MINUTES, ZOMBIE_STALE_MINUTES
+                );
+                match store.db_query_raw(&query).await {
+                    Ok(_) => {}
+                    Err(e) => warn!("Zombie recovery check failed: {e}"),
+                }
+            }
+        });
+        info!("Periodic zombie recovery started (every {}s, stale after {}m)", ZOMBIE_CHECK_INTERVAL_SECS, ZOMBIE_STALE_MINUTES);
+    }
+
     // 2. Process any pending tasks
     info!("Checking for pending tasks...");
     match store.list_pending().await {

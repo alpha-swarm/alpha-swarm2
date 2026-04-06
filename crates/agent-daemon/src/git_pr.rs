@@ -158,11 +158,19 @@ fn build_pr_body(
     body
 }
 
+/// Timeout for git operations (push can be slow over network)
+const GIT_TIMEOUT_SECS: u64 = 60;
+
 fn run_git(repo_path: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new("git")
+    let child = Command::new("git")
         .args(args)
         .current_dir(repo_path)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("git {} failed to start", args.join(" ")))?;
+
+    let output = child.wait_with_output()
         .with_context(|| format!("git {} failed", args.join(" ")))?;
 
     if !output.status.success() {

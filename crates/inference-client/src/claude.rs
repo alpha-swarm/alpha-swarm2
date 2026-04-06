@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -9,6 +9,9 @@ use tracing::debug;
 use crate::backend::InferenceBackend;
 use crate::types::*;
 
+/// Hard timeout for Claude API requests
+const CLAUDE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
+
 pub struct ClaudeBackend {
     client: Client,
     api_key: String,
@@ -18,7 +21,11 @@ pub struct ClaudeBackend {
 impl ClaudeBackend {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(CLAUDE_TIMEOUT)
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             api_key: api_key.into(),
             default_model: "claude-sonnet-4-20250514".into(),
         }

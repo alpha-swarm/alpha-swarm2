@@ -27,12 +27,18 @@ pub async fn handle_task(
 ) {
     info!(task_id, project, goal, "Starting task execution");
 
-    // 1. Claim the task (set to running)
-    let mut run = AgentRun::new(project, goal, "daemon", "pending");
-    run.status = RunStatus::Running;
-    if let Err(e) = store.update_run(task_id, &run).await {
-        warn!(task_id, "Failed to claim task: {e}");
-        return;
+    // 1. Claim the task atomically (only if still pending)
+    let claim_query = if task_id.contains(':') {
+        format!("UPDATE {} SET status = 'running', agent_id = 'daemon', last_activity_at = '{}' WHERE status = 'pending'", task_id, chrono::Utc::now().to_rfc3339())
+    } else {
+        format!("UPDATE type::thing('agent_run', '{}') SET status = 'running', agent_id = 'daemon', last_activity_at = '{}' WHERE status = 'pending'", task_id, chrono::Utc::now().to_rfc3339())
+    };
+    match store.db_query_raw(&claim_query).await {
+        Ok(_) => {}
+        Err(e) => {
+            warn!(task_id, "Failed to claim task (likely claimed by another daemon): {e}");
+            return;
+        }
     }
 
     // Emit agent started event
