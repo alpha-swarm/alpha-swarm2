@@ -1,0 +1,32 @@
+/// Shared interface for distributed tool execution.
+/// Tool workers implement this interface; the daemon dispatches calls via NATS.
+package swarm:tools@0.1.0;
+
+interface tool-executor {
+    /// Parameters for a tool call.
+    record tool-request {
+        /// Tool name (e.g., "ts_find", "grep", "web_search").
+        name: string,
+        /// JSON-encoded parameters specific to this tool.
+        params-json: string,
+        /// Path to the repository root (for filesystem-based tools).
+        repo-path: string,
+        /// Project name (for logging and context).
+        project: string,
+        /// Hard timeout in milliseconds.
+        timeout-ms: u64,
+    }
+
+    /// Result of a tool execution.
+    record tool-response {
+        /// Output content to feed back to the model.
+        content: string,
+        /// Whether the tool encountered an error.
+        is-error: bool,
+        /// Wall-clock time the tool took (milliseconds).
+        duration-ms: u64,
+    }
+
+    /// Execute a tool with the given parameters.
+    execute: func(req: tool-request) -> tool-response;
+}

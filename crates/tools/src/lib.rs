@@ -6,6 +6,7 @@ mod shell;
 mod tree_sitter_tools;
 mod web;
 mod registry;
+pub mod nats_dispatch;
 
 pub use registry::ToolRegistry;
 

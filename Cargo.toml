@@ -15,6 +15,7 @@ members = [
     "crates/alpha-swarm-cli",
     "components/agent-worker",
     "components/web-ui",
+    "components/tool-search",
 ]
 resolver = "2"
 

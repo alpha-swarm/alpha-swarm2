@@ -1,0 +1,18 @@
+package alpha-swarm:tool-search@0.1.0;
+
+/// Tool worker for code search operations: tree-sitter AST queries and grep.
+/// Receives tool calls as HTTP POST requests, returns results as JSON.
+/// Sandboxed: no outgoing network, only filesystem access to the repo.
+
+world tool-search {
+    /// HTTP types for request/response handling
+    import wasi:http/types@0.2.0;
+
+    /// IO primitives
+    import wasi:io/streams@0.2.0;
+    import wasi:io/poll@0.2.0;
+    import wasi:io/error@0.2.0;
+
+    /// Handle incoming HTTP requests (tool call dispatch)
+    export wasi:http/incoming-handler@0.2.0;
+}

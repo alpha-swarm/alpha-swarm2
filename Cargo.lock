@@ -4590,6 +4590,7 @@ name = "swarm-tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-nats",
  "async-trait",
  "glob",
  "reqwest 0.12.28",
@@ -5064,6 +5065,15 @@ dependencies = [
  "bytes",
  "prost",
  "tonic",
+]
+
+[[package]]
+name = "tool-search"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.41.0",
 ]
 
 [[package]]
