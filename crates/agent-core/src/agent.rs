@@ -5,10 +5,11 @@ use tracing::{info, warn};
 
 use inference_client::{Complexity, InferenceOptions, InferenceResponse, InferenceRouter, OllamaBackend};
 
-/// Default inference options — large context window for full repo context.
+/// Default inference options — reads context window from config.
 fn default_options() -> InferenceOptions {
+    let ctx = swarm_config::InferenceConfig::default().context_window;
     InferenceOptions {
-        max_tokens: Some(32768),
+        max_tokens: Some(ctx),
         ..Default::default()
     }
 }

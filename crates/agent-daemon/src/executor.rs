@@ -68,11 +68,12 @@ pub async fn handle_task(
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
 
-    // 4. Run the swarm orchestrator with retry loop
+    // 4. Run the swarm orchestrator with retry loop (fuel from config)
     let start = std::time::Instant::now();
-    let max_iterations = 5;
-    let time_limit_ms: u64 = 600_000; // 10 minutes
-    let token_limit: u32 = 50_000;
+    let max_iterations = config.fuel.max_iterations;
+    let time_limit_ms: u64 = config.fuel.time_limit_secs * 1000;
+    let token_limit: u32 = config.fuel.token_limit;
+    let max_backoff = config.fuel.max_backoff_secs;
     let mut total_tokens_used: u32 = 0;
     let mut iteration = 0;
     let mut last_errors = String::new();
@@ -97,7 +98,7 @@ pub async fn handle_task(
 
         // Exponential backoff between retries
         if iteration > 1 {
-            let backoff = std::cmp::min(2u64.pow(iteration as u32 - 1), 60);
+            let backoff = std::cmp::min(2u64.pow(iteration as u32 - 1), max_backoff);
             info!(task_id, iteration, backoff_secs = backoff, errors = %last_errors.chars().take(100).collect::<String>(), "Retrying after backoff");
             tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
         }

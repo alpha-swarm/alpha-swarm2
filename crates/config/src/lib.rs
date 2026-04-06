@@ -16,6 +16,32 @@ pub struct SwarmConfig {
     pub nats: NatsConfig,
     pub claude: ClaudeConfig,
     pub defaults: DefaultsConfig,
+    pub fuel: FuelConfig,
+    pub inference: InferenceConfig,
+}
+
+/// Fuel budget for goal retry loops.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct FuelConfig {
+    /// Max wall-clock time in seconds.
+    pub time_limit_secs: u64,
+    /// Max total tokens across all iterations.
+    pub token_limit: u32,
+    /// Max retry iterations.
+    pub max_iterations: u32,
+    /// Max backoff between retries in seconds.
+    pub max_backoff_secs: u64,
+}
+
+/// Inference settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct InferenceConfig {
+    /// Context window size (num_ctx for Ollama).
+    pub context_window: u32,
+    /// Max files to include as context.
+    pub max_context_files: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -116,6 +142,28 @@ impl Default for SwarmConfig {
             nats: NatsConfig::default(),
             claude: ClaudeConfig::default(),
             defaults: DefaultsConfig::default(),
+            fuel: FuelConfig::default(),
+            inference: InferenceConfig::default(),
+        }
+    }
+}
+
+impl Default for FuelConfig {
+    fn default() -> Self {
+        Self {
+            time_limit_secs: 14400, // 4 hours
+            token_limit: 100_000,
+            max_iterations: 20,
+            max_backoff_secs: 60,
+        }
+    }
+}
+
+impl Default for InferenceConfig {
+    fn default() -> Self {
+        Self {
+            context_window: 32768,
+            max_context_files: 100,
         }
     }
 }

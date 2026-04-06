@@ -15,4 +15,5 @@ inference-client = { path = "../inference-client" }
 edit-parser = { path = "../edit-parser" }
 quality-gate-lib = { path = "../quality-gate" }
 swarm-events = { path = "../events" }
+swarm-config = { path = "../config", default-features = false }
 knowledge-base = { path = "../knowledge-base" }
