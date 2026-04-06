@@ -44,6 +44,7 @@ dependencies = [
  "agent-core",
  "anyhow",
  "chrono",
+ "futures",
  "inference-client",
  "knowledge-base",
  "quality-gate-lib",
@@ -57,6 +58,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
-/// Agent daemon: watches SurrealDB for pending tasks and executes them.
+/// Agent daemon: distributed task executor coordinated via NATS KV.
 ///
-/// Event-driven: polls pending on startup, then subscribes to NATS for
-/// real-time task notifications. Each task runs in a tokio::spawn.
+/// Primary mode: NATS KV scheduler (watch for tasks, claim via leases, heartbeat).
+/// Fallback mode: SurrealDB polling (if NATS unavailable).
 ///
 /// Usage: cargo run -p agent-daemon
 mod repo;
@@ -13,12 +13,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 use inference_client::{ClaudeBackend, InferenceRouter, OllamaBackend};
-use knowledge_base::{KnowledgeStore, RunStatus};
+use knowledge_base::KnowledgeStore;
 use swarm_config::SwarmConfig;
-use swarm_events::{EventPublisher, EventSubscriber, SwarmEvent};
+use futures::StreamExt;
+use swarm_events::{EventPublisher, NatsScheduler, scheduler::HostResources};
+
+/// How often to poll SurrealDB in fallback mode.
+const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// How often to publish resource snapshots.
+const RESOURCE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+/// How often to renew leases for running tasks.
+const LEASE_RENEWAL_INTERVAL: Duration = Duration::from_secs(120);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,7 +35,8 @@ async fn main() -> Result<()> {
         .init();
 
     let config = SwarmConfig::load();
-    info!("Agent daemon starting");
+    let daemon_id = format!("daemon-{}-{}", hostname(), &uuid::Uuid::new_v4().to_string()[..8]);
+    info!(daemon_id = %daemon_id, "Agent daemon starting");
     info!(ollama = %config.ollama.url, surrealdb = %config.surrealdb.url, nats = %config.nats.url);
 
     // Setup inference router
@@ -36,37 +45,44 @@ async fn main() -> Result<()> {
         info!(model = %config.claude.model, "Claude backend enabled");
         router = router.add_backend(ClaudeBackend::new(&config.claude.api_key).with_model(&config.claude.model));
     }
-    info!(url = %config.ollama.url, "Ollama backend enabled");
     router = router.add_backend(OllamaBackend::new(&config.ollama.url));
     let router = Arc::new(router);
-
     let ollama = Arc::new(OllamaBackend::new(&config.ollama.url));
 
-    // Connect to SurrealDB
+    // Connect to SurrealDB (always needed for run storage)
     let store = Arc::new(
-        KnowledgeStore::connect(&config.surrealdb.url, &config.surrealdb.namespace, &config.surrealdb.database)
-            .await?
+        KnowledgeStore::connect(&config.surrealdb.url, &config.surrealdb.namespace, &config.surrealdb.database).await?
     );
 
     // Connect to NATS for events
     let publisher = match EventPublisher::connect(&config.nats.url).await {
         Ok(p) => { info!("NATS publisher connected"); Some(Arc::new(p)) }
-        Err(e) => { warn!("NATS unavailable: {e}"); None }
+        Err(e) => { warn!("NATS publisher unavailable: {e}"); None }
     };
 
-    let subscriber = match EventSubscriber::connect(&config.nats.url).await {
-        Ok(s) => { info!("NATS subscriber connected"); Some(s) }
-        Err(e) => { warn!("NATS unavailable for subscription: {e}"); None }
+    // Try NATS KV scheduler (primary mode)
+    let scheduler = match NatsScheduler::connect(&config.nats.url, &daemon_id).await {
+        Ok(s) => { info!("NATS KV scheduler connected"); Some(Arc::new(s)) }
+        Err(e) => { warn!("NATS KV unavailable, will use SurrealDB polling: {e}"); None }
     };
 
-    // 0. Start resource heartbeat (writes per-host snapshots to SurrealDB)
+    // Reset zombie tasks from previous daemon instance
+    info!("Recovering zombie tasks...");
+    let _ = store.db_query_raw(
+        "UPDATE agent_run SET status = 'pending', agent_id = 'recovered' WHERE status = 'running'"
+    ).await;
+
+    // Start resource heartbeat
     {
         let store = Arc::clone(&store);
+        let scheduler = scheduler.clone();
         let res_config = config.resources.clone();
+        let daemon_id = daemon_id.clone();
         tokio::spawn(async move {
             loop {
                 let snapshots = resources::check_all_hosts(&res_config).await;
-                // Clear old snapshots and write new ones
+
+                // Write to SurrealDB (for web-ui dashboard)
                 let _ = store.db_query_raw("DELETE FROM resource_snapshot").await;
                 for snap in &snapshots {
                     let models_json = serde_json::to_string(&snap.ollama_models).unwrap_or_else(|_| "[]".into());
@@ -79,54 +95,56 @@ async fn main() -> Result<()> {
                     );
                     let _ = store.db_query_raw(&query).await;
                 }
-                tokio::time::sleep(Duration::from_secs(res_config.check_interval_secs)).await;
-            }
-        });
-        info!(hosts = config.resources.hosts.len(), "Resource heartbeat started");
-    }
 
-    // 1. Reset zombie tasks (running but daemon died)
-    info!("Recovering zombie tasks (status=running from previous daemon)...");
-    let reset_result = store.db_query_raw(
-        "UPDATE agent_run SET status = 'pending', agent_id = 'recovered' WHERE status = 'running'"
-    ).await;
-    match reset_result {
-        Ok(_) => info!("Zombie tasks reset to pending"),
-        Err(e) => warn!("Failed to reset zombies: {e}"),
-    }
-
-    // 1b. Periodic zombie recovery (every 5 minutes)
-    {
-        let store = Arc::clone(&store);
-        const ZOMBIE_CHECK_INTERVAL_SECS: u64 = 300; // 5 minutes
-        const ZOMBIE_STALE_MINUTES: u64 = 10;
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(ZOMBIE_CHECK_INTERVAL_SECS)).await;
-                // Reset tasks that have been "running" with no activity for ZOMBIE_STALE_MINUTES
-                let query = format!(
-                    "UPDATE agent_run SET status = 'failed', error_message = 'Zombie: no activity for {}m', agent_id = 'zombie-recovery' WHERE status = 'running' AND last_activity_at != NONE AND time::now() - <datetime>last_activity_at > {}m",
-                    ZOMBIE_STALE_MINUTES, ZOMBIE_STALE_MINUTES
-                );
-                match store.db_query_raw(&query).await {
-                    Ok(_) => {}
-                    Err(e) => warn!("Zombie recovery check failed: {e}"),
+                // Also publish to NATS KV (for distributed scheduling)
+                if let Some(sched) = &scheduler {
+                    let local = snapshots.iter().find(|s| s.host_type == "local");
+                    if let Some(snap) = local {
+                        let _ = sched.publish_resources(&HostResources {
+                            daemon_id: daemon_id.clone(),
+                            host: snap.host.clone(),
+                            cpu_percent: snap.cpu_percent,
+                            ram_percent: snap.ram_percent,
+                            disk_percent: snap.disk_percent,
+                            available_models: snap.ollama_models.iter().map(|m| m.name.clone()).collect(),
+                            updated_at: chrono::Utc::now().to_rfc3339(),
+                        }).await;
+                    }
                 }
+
+                tokio::time::sleep(RESOURCE_HEARTBEAT_INTERVAL).await;
             }
         });
-        info!("Periodic zombie recovery started (every {}s, stale after {}m)", ZOMBIE_CHECK_INTERVAL_SECS, ZOMBIE_STALE_MINUTES);
     }
 
-    // Backpressure: limit concurrent task executions
-    let task_semaphore = Arc::new(tokio::sync::Semaphore::new(config.resources.max_concurrent_agents));
+    // Process initial pending tasks
+    process_pending(&config, &router, &ollama, &store, &publisher, &scheduler).await;
 
-    // 2. Process any pending tasks
-    info!("Checking for pending tasks...");
+    // Main loop: NATS KV watch (primary) or SurrealDB polling (fallback)
+    if let Some(sched) = &scheduler {
+        info!("Primary mode: watching NATS KV for tasks");
+        run_nats_kv_loop(&config, &router, &ollama, &store, &publisher, sched).await;
+    } else {
+        info!("Fallback mode: polling SurrealDB every {:?}", FALLBACK_POLL_INTERVAL);
+        run_surreal_poll_loop(&config, &router, &ollama, &store, &publisher).await;
+    }
+
+    Ok(())
+}
+
+/// Process any tasks already pending in SurrealDB.
+async fn process_pending(
+    config: &SwarmConfig,
+    router: &Arc<InferenceRouter>,
+    ollama: &Arc<OllamaBackend>,
+    store: &Arc<KnowledgeStore>,
+    publisher: &Option<Arc<EventPublisher>>,
+    scheduler: &Option<Arc<NatsScheduler>>,
+) {
     match store.list_pending().await {
         Ok(pending) => {
             info!(count = pending.len(), "Found pending tasks");
             for task in pending {
-                // Check resources before scheduling
                 if !resources::can_schedule(&config.resources) {
                     info!("Deferring remaining tasks until resources free up");
                     break;
@@ -136,83 +154,156 @@ async fn main() -> Result<()> {
                 let project = task.project.clone();
                 let goal = task.task_description.clone();
                 let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
-                info!(id = %id, project = %project, status = %status, goal = %goal, "Processing task");
 
-                let store = Arc::clone(&store);
-                let router = Arc::clone(&router);
-                let ollama = Arc::clone(&ollama);
-                let publisher = publisher.clone();
-                let config = config.clone();
-                let sem = Arc::clone(&task_semaphore);
+                // Try to claim via NATS KV first
+                if let Some(sched) = scheduler {
+                    if !sched.try_claim(&id).await.unwrap_or(false) {
+                        continue; // Another daemon claimed it
+                    }
+                }
 
-                tokio::spawn(async move {
-                    let _permit = sem.acquire().await.expect("semaphore closed");
-                    executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal, &status).await;
-                });
+                spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), scheduler.clone(), id, project, goal, status);
             }
         }
         Err(e) => warn!("Failed to query pending tasks: {e}"),
     }
+}
 
-    // 2. Subscribe to NATS for real-time task events
-    if let Some(sub) = subscriber {
-        info!("Listening for task submissions via NATS...");
-        let mut stream = sub.subscribe_all().await?;
+/// Primary mode: watch NATS KV for new tasks.
+async fn run_nats_kv_loop(
+    config: &SwarmConfig,
+    router: &Arc<InferenceRouter>,
+    ollama: &Arc<OllamaBackend>,
+    store: &Arc<KnowledgeStore>,
+    publisher: &Option<Arc<EventPublisher>>,
+    scheduler: &Arc<NatsScheduler>,
+) {
 
-        loop {
-            match stream.next().await {
-                Some(SwarmEvent::TaskSubmitted { project, task_id, goal, .. }) => {
-                    info!(task_id = %task_id, project = %project, "Received task submission");
-
-                    let store = Arc::clone(&store);
-                    let router = Arc::clone(&router);
-                    let ollama = Arc::clone(&ollama);
-                    let publisher = publisher.clone();
-                    let config = config.clone();
-                    let sem = Arc::clone(&task_semaphore);
-
-                    tokio::spawn(async move {
-                        let _permit = sem.acquire().await.expect("semaphore closed");
-                        executor::handle_task(&config, router, ollama, store, publisher, &task_id, &project, &goal, "pending").await;
-                    });
-                }
-                Some(_) => {} // ignore other events
-                None => {
-                    warn!("NATS stream closed, reconnecting in 5s...");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    break;
-                }
-            }
+    let watcher = match scheduler.watch_tasks().await {
+        Ok(w) => w,
+        Err(e) => {
+            warn!("Failed to watch NATS KV tasks, falling back to polling: {e}");
+            run_surreal_poll_loop(config, router, ollama, store, publisher).await;
+            return;
         }
-    } else {
-        // No NATS — fall back to polling SurrealDB
-        info!("No NATS available, falling back to SurrealDB polling (every 5s)");
-        loop {
-            tokio::time::sleep(Duration::from_secs(config.resources.check_interval_secs)).await;
-            if !resources::can_schedule(&config.resources) { continue; }
-            if let Ok(pending) = store.list_pending().await {
-                for task in pending {
-                    if !resources::can_schedule(&config.resources) { break; }
-                    let id = task.id.clone().unwrap_or_default();
-                    let project = task.project.clone();
-                    let goal = task.task_description.clone();
-                    let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
+    };
 
-                    let store = Arc::clone(&store);
-                    let router = Arc::clone(&router);
-                    let ollama = Arc::clone(&ollama);
-                    let publisher = publisher.clone();
-                    let config = config.clone();
-                    let sem = Arc::clone(&task_semaphore);
+    info!("Watching NATS KV for new tasks...");
 
-                    tokio::spawn(async move {
-                        let _permit = sem.acquire().await.expect("semaphore closed");
-                        executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal, &status).await;
-                    });
+    tokio::pin!(watcher);
+
+    // Also poll SurrealDB periodically for tasks submitted directly (web-ui → SurrealDB)
+    let mut poll_interval = tokio::time::interval(FALLBACK_POLL_INTERVAL);
+
+    loop {
+        tokio::select! {
+            Some(task_entry) = watcher.next() => {
+                let id = task_entry.run_id.clone();
+                info!(run_id = %id, "New task from NATS KV");
+
+                if !resources::can_schedule(&config.resources) {
+                    info!("Resources full, skipping task {id}");
+                    continue;
+                }
+
+                if !scheduler.try_claim(&id).await.unwrap_or(false) {
+                    continue;
+                }
+
+                spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), Some(Arc::clone(scheduler)), id, task_entry.project, task_entry.goal, task_entry.status);
+            }
+            _ = poll_interval.tick() => {
+                // Check SurrealDB for tasks submitted via web-ui (not through NATS KV)
+                if let Ok(pending) = store.list_pending().await {
+                    for task in pending {
+                        if !resources::can_schedule(&config.resources) { break; }
+                        let id = task.id.clone().unwrap_or_default();
+
+                        if !scheduler.try_claim(&id).await.unwrap_or(false) {
+                            continue;
+                        }
+
+                        let project = task.project.clone();
+                        let goal = task.task_description.clone();
+                        let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
+
+                        spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), Some(Arc::clone(scheduler)), id, project, goal, status);
+                    }
                 }
             }
         }
     }
+}
 
-    Ok(())
+/// Fallback mode: poll SurrealDB when NATS is unavailable.
+async fn run_surreal_poll_loop(
+    config: &SwarmConfig,
+    router: &Arc<InferenceRouter>,
+    ollama: &Arc<OllamaBackend>,
+    store: &Arc<KnowledgeStore>,
+    publisher: &Option<Arc<EventPublisher>>,
+) {
+    loop {
+        tokio::time::sleep(FALLBACK_POLL_INTERVAL).await;
+        if !resources::can_schedule(&config.resources) { continue; }
+
+        if let Ok(pending) = store.list_pending().await {
+            for task in pending {
+                if !resources::can_schedule(&config.resources) { break; }
+                let id = task.id.clone().unwrap_or_default();
+                let project = task.project.clone();
+                let goal = task.task_description.clone();
+                let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
+
+                spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), None, id, project, goal, status);
+            }
+        }
+    }
+}
+
+/// Spawn a task with lease management.
+fn spawn_task(
+    config: SwarmConfig,
+    router: Arc<InferenceRouter>,
+    ollama: Arc<OllamaBackend>,
+    store: Arc<KnowledgeStore>,
+    publisher: Option<Arc<EventPublisher>>,
+    scheduler: Option<Arc<NatsScheduler>>,
+    id: String,
+    project: String,
+    goal: String,
+    status: String,
+) {
+    tokio::spawn(async move {
+        // Start lease renewal heartbeat
+        let lease_handle = if let Some(sched) = &scheduler {
+            let sched = Arc::clone(sched);
+            let id = id.clone();
+            Some(tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(LEASE_RENEWAL_INTERVAL).await;
+                    if sched.renew_lease(&id).await.is_err() { break; }
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Execute the task
+        executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal, &status).await;
+
+        // Release lease
+        if let Some(sched) = &scheduler {
+            let _ = sched.release_lease(&id).await;
+        }
+        if let Some(handle) = lease_handle {
+            handle.abort();
+        }
+    });
+}
+
+fn hostname() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "unknown".into())
 }
