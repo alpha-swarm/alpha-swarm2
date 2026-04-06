@@ -549,9 +549,14 @@ fn surreal_raw_query(query: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| format!("utf8: {e}"))
 }
 
+/// Sanitize an ID to prevent SQL injection — only allow alphanumeric, colon, underscore, hyphen.
+fn sanitize_id(id: &str) -> String {
+    id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ':' || *c == '_' || *c == '-').collect()
+}
+
 fn api_run_detail(response_out: ResponseOutparam, id: &str) {
     // Fetch a single run including the diff field (for detail view)
-    let safe_id = id.replace('\'', "").replace('"', "");
+    let safe_id = sanitize_id(id);
     let query = if safe_id.contains(':') {
         format!("SELECT * FROM {}", safe_id)
     } else {

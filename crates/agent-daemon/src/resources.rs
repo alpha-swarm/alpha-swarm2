@@ -136,5 +136,10 @@ pub fn can_schedule(config: &ResourceConfig) -> bool {
         warn!(ram = format!("{:.1}%", snap.ram_percent), limit = format!("{:.1}%", config.max_ram_percent), "RAM too high");
         return false;
     }
+    const MAX_DISK_PERCENT: f64 = 90.0;
+    if snap.disk_percent > MAX_DISK_PERCENT {
+        warn!(disk = format!("{:.1}%", snap.disk_percent), limit = format!("{:.1}%", MAX_DISK_PERCENT), "Disk too full");
+        return false;
+    }
     true
 }

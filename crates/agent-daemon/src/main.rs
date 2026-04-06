@@ -117,6 +117,9 @@ async fn main() -> Result<()> {
         info!("Periodic zombie recovery started (every {}s, stale after {}m)", ZOMBIE_CHECK_INTERVAL_SECS, ZOMBIE_STALE_MINUTES);
     }
 
+    // Backpressure: limit concurrent task executions
+    let task_semaphore = Arc::new(tokio::sync::Semaphore::new(config.resources.max_concurrent_agents));
+
     // 2. Process any pending tasks
     info!("Checking for pending tasks...");
     match store.list_pending().await {
@@ -140,8 +143,10 @@ async fn main() -> Result<()> {
                 let ollama = Arc::clone(&ollama);
                 let publisher = publisher.clone();
                 let config = config.clone();
+                let sem = Arc::clone(&task_semaphore);
 
                 tokio::spawn(async move {
+                    let _permit = sem.acquire().await.expect("semaphore closed");
                     executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal, &status).await;
                 });
             }
@@ -164,8 +169,10 @@ async fn main() -> Result<()> {
                     let ollama = Arc::clone(&ollama);
                     let publisher = publisher.clone();
                     let config = config.clone();
+                    let sem = Arc::clone(&task_semaphore);
 
                     tokio::spawn(async move {
+                        let _permit = sem.acquire().await.expect("semaphore closed");
                         executor::handle_task(&config, router, ollama, store, publisher, &task_id, &project, &goal, "pending").await;
                     });
                 }
@@ -196,8 +203,10 @@ async fn main() -> Result<()> {
                     let ollama = Arc::clone(&ollama);
                     let publisher = publisher.clone();
                     let config = config.clone();
+                    let sem = Arc::clone(&task_semaphore);
 
                     tokio::spawn(async move {
+                        let _permit = sem.acquire().await.expect("semaphore closed");
                         executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal, &status).await;
                     });
                 }

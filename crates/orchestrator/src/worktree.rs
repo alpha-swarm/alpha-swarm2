@@ -128,8 +128,13 @@ impl WorktreeManager {
         let output = child.wait_with_output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(agent = agent_id, "git apply failed: {stderr}");
-            bail!("Failed to apply diff from agent {agent_id}: {stderr}");
+            warn!(agent = agent_id, "git apply failed, rolling back: {stderr}");
+            // Rollback any partial changes
+            let _ = Command::new("git")
+                .args(["checkout", "."])
+                .current_dir(&self.repo_path)
+                .output();
+            bail!("Failed to apply diff from agent {agent_id} (rolled back): {stderr}");
         }
 
         info!(agent = agent_id, "Applied diff to main repo");

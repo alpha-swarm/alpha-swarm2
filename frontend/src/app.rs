@@ -18,6 +18,15 @@ pub fn App() -> impl IntoView {
             <div class="app" style="display:flex;min-height:100vh">
                 <Sidebar />
                 <main class="main" style="flex:1;padding:24px 32px;min-width:0">
+                    // Global error toast
+                    {move || state.error_message.get().map(|e| view! {
+                        <div
+                            style="position:fixed;top:16px;right:16px;z-index:100;background:var(--error-bg);color:var(--error);padding:12px 20px;border-radius:var(--radius);border:1px solid var(--error);font-size:13px;max-width:400px;cursor:pointer"
+                            on:click=move |_| state.error_message.set(None)
+                        >
+                            {e}" "(click to dismiss)"
+                        </div>
+                    })}
                     <Routes fallback=|| view! { <p>"Page not found"</p> }>
                         <Route path=path!("/") view=OverviewPage />
                         <Route path=path!("/projects") view=ProjectsPage />

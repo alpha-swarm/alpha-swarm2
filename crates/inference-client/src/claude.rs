@@ -155,7 +155,18 @@ impl InferenceBackend for ClaudeBackend {
 
         let status = response.status();
         if !status.is_success() {
+            let retry_after = response.headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
             let body = response.text().await.unwrap_or_default();
+            if status.as_u16() == 429 {
+                let wait = retry_after.unwrap_or(60);
+                bail!("Claude API rate limited (429) — retry after {wait}s: {body}");
+            }
+            if status.as_u16() == 529 {
+                bail!("Claude API overloaded (529) — retry later: {body}");
+            }
             bail!("Claude API error {status}: {body}");
         }
 

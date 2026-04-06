@@ -23,6 +23,7 @@ pub struct AppState {
     pub health_online: RwSignal<bool>,
     pub selected_run: RwSignal<Option<AgentRun>>,
     pub selected_goal: RwSignal<Option<Goal>>,
+    pub error_message: RwSignal<Option<String>>,
 }
 
 impl AppState {
@@ -41,6 +42,7 @@ impl AppState {
             health_online: RwSignal::new(false),
             selected_run: RwSignal::new(None),
             selected_goal: RwSignal::new(None),
+            error_message: RwSignal::new(None),
         }
     }
 
