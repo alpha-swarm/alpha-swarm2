@@ -1,0 +1,15 @@
+[Unit]
+Description=Alpha-Swarm Test Provider
+After=network.target nats-server.service
+Wants=nats-server.service
+
+[Service]
+Type=simple
+User=markkovari
+Environment=NATS_URL=nats://127.0.0.1:4223
+ExecStart=/Users/markkovari/alpha-swarm/test-provider
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

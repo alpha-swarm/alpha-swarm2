@@ -910,6 +910,13 @@ enum ToolExecutor {
 
 3. **Phase 10c**: Remove local tool execution from daemon. All tools go through NATS → WASI workers. Daemon becomes a pure orchestration loop.
 
+4. **Phase 10d**: Convert NATS service providers (git-provider, test-provider) to proper wasmCloud native capability providers using `wasmcloud-provider-sdk`. This gives:
+   - wasmCloud-managed lifecycle (start, health check, scale, restart)
+   - Automatic lattice routing via wRPC (no manual NATS subscribe/reply)
+   - Link definitions for capability security (component X can call provider Y)
+   - The WIT interfaces (`alpha-swarm:git/ops`, `alpha-swarm:test/runner`) are already defined
+   - Migration is boilerplate: replace NATS subscribe loop with `wit-bindgen-wrpc` trait impl
+
 ### Hot Deployment
 
 New tools can be deployed without restarting anything:

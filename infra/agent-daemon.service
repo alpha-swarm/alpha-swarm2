@@ -1,0 +1,15 @@
+[Unit]
+Description=Alpha-Swarm Agent Daemon
+After=network.target nats-server.service
+Wants=nats-server.service
+
+[Service]
+Type=simple
+User=markkovari
+WorkingDirectory=/Users/markkovari/alpha-swarm
+ExecStart=/Users/markkovari/alpha-swarm/agent-daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
