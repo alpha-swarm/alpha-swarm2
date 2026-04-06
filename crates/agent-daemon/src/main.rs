@@ -7,6 +7,7 @@
 mod repo;
 mod executor;
 mod git_pr;
+pub mod resources;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,6 +59,25 @@ async fn main() -> Result<()> {
         Err(e) => { warn!("NATS unavailable for subscription: {e}"); None }
     };
 
+    // 0. Start resource heartbeat (writes snapshots to SurrealDB)
+    {
+        let store = Arc::clone(&store);
+        let interval = config.resources.check_interval_secs;
+        tokio::spawn(async move {
+            loop {
+                let snap = resources::check_resources();
+                let query = format!(
+                    "DELETE FROM resource_snapshot; CREATE resource_snapshot SET cpu_percent={:.1}, ram_total_mb={}, ram_used_mb={}, ram_percent={:.1}, disk_total_gb={:.1}, disk_free_gb={:.1}, disk_percent={:.1}, timestamp=time::now()",
+                    snap.cpu_percent, snap.ram_total_mb, snap.ram_used_mb, snap.ram_percent,
+                    snap.disk_total_gb, snap.disk_free_gb, snap.disk_percent
+                );
+                let _ = store.db_query_raw(&query).await;
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+            }
+        });
+        info!("Resource heartbeat started (every {}s)", config.resources.check_interval_secs);
+    }
+
     // 1. Reset zombie tasks (running but daemon died)
     info!("Recovering zombie tasks (status=running from previous daemon)...");
     let reset_result = store.db_query_raw(
@@ -74,6 +94,12 @@ async fn main() -> Result<()> {
         Ok(pending) => {
             info!(count = pending.len(), "Found pending tasks");
             for task in pending {
+                // Check resources before scheduling
+                if !resources::can_schedule(&config.resources) {
+                    info!("Deferring remaining tasks until resources free up");
+                    break;
+                }
+
                 let id = task.id.clone().unwrap_or_default();
                 let project = task.project.clone();
                 let goal = task.task_description.clone();
@@ -125,9 +151,11 @@ async fn main() -> Result<()> {
         // No NATS — fall back to polling SurrealDB
         info!("No NATS available, falling back to SurrealDB polling (every 5s)");
         loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(config.resources.check_interval_secs)).await;
+            if !resources::can_schedule(&config.resources) { continue; }
             if let Ok(pending) = store.list_pending().await {
                 for task in pending {
+                    if !resources::can_schedule(&config.resources) { break; }
                     let id = task.id.clone().unwrap_or_default();
                     let project = task.project.clone();
                     let goal = task.task_description.clone();

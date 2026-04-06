@@ -24,6 +24,9 @@ impl Guest for WebUi {
             (Method::Get, p) if p.starts_with("/api/models") => {
                 api_models(response_out);
             }
+            (Method::Get, "/api/resources") => {
+                api_resources(response_out);
+            }
             (Method::Get, "/api/model-roles") => {
                 api_model_roles(response_out);
             }
@@ -91,6 +94,21 @@ fn read_body(request: &IncomingRequest) -> Vec<u8> {
     drop(stream);
     let _ = IncomingBody::finish(body);
     bytes
+}
+
+fn api_resources(response_out: ResponseOutparam) {
+    // Read latest resource snapshot from SurrealDB (written by daemon)
+    match surreal_query("SELECT * FROM resource_snapshot ORDER BY timestamp DESC LIMIT 1") {
+        Ok(body) => {
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let snap = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result"))
+                .and_then(|r| r.as_array()).and_then(|a| a.first())
+                .cloned()
+                .unwrap_or(serde_json::json!({"error": "no data yet — is the daemon running?"}));
+            respond_json(response_out, 200, &serde_json::to_string(&snap).unwrap_or_default());
+        }
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
+    }
 }
 
 fn api_model_roles(response_out: ResponseOutparam) {

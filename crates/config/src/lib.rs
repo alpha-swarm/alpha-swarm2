@@ -17,6 +17,19 @@ pub struct SwarmConfig {
     pub claude: ClaudeConfig,
     pub defaults: DefaultsConfig,
     pub tiers: TiersConfig,
+    pub resources: ResourceConfig,
+}
+
+/// Resource usage thresholds for scheduling.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ResourceConfig {
+    /// Don't start new tasks if CPU usage exceeds this percent.
+    pub max_cpu_percent: f64,
+    /// Don't start new tasks if RAM usage exceeds this percent.
+    pub max_ram_percent: f64,
+    /// How often to check resource usage (seconds).
+    pub check_interval_secs: u64,
 }
 
 /// Per-tier configuration for the agent hierarchy.
@@ -147,6 +160,17 @@ impl Default for SwarmConfig {
             claude: ClaudeConfig::default(),
             defaults: DefaultsConfig::default(),
             tiers: TiersConfig::default(),
+            resources: ResourceConfig::default(),
+        }
+    }
+}
+
+impl Default for ResourceConfig {
+    fn default() -> Self {
+        Self {
+            max_cpu_percent: 50.0,
+            max_ram_percent: 50.0,
+            check_interval_secs: 5,
         }
     }
 }
