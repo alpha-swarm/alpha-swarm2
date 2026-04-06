@@ -329,160 +329,418 @@ Agents float to the machine with the best resources. No single point of failure.
 
 ---
 
-## Phase 7: Tool-Use Agents + MCP-style Tools (Future)
+## Phase 7: Tool-Use Agents — Tree-Sitter, LSP, Tests as Leaf Nodes (Future)
 
-**Goal**: Agents use structured tools instead of generating raw diffs. A reasoning model orchestrates tools and sub-agents dynamically.
+**Goal**: Leaf-node agents use deterministic tools (tree-sitter, LSP, test runners, grep, web search) instead of LLM inference for mechanical operations. The orchestrator model decides WHEN to use a tool vs when to use an LLM sub-agent. This makes simple operations instant, accurate, and free — LLM tokens are only spent on reasoning and creative code generation.
 
 ### Why
 
-Current agents do everything via LLM text generation → parse edits. This is:
-- Slow (LLM generates entire file diffs for simple renames)
-- Error-prone (OLD block matching fails on whitespace)
-- Wasteful (don't need AI to delete a variable or rename a function)
+Current agents do everything via LLM text generation → parse `<<<EDIT>>>` blocks. This is:
+- **Slow**: LLM generates 500 tokens to rename a variable (tree-sitter does it in 2ms)
+- **Error-prone**: `--- OLD` block matching fails on whitespace, indentation, encoding
+- **Wasteful**: don't need AI to delete a file, run tests, or find references
+- **Blind**: agents don't know if the code compiles until the quality gate runs — too late
 
-### Architecture: Reasoning Model + Tools
+### Key Insight: Leaf Nodes Are Tools, Not Agents
+
+The orchestrator decomposes a goal into a tree:
 
 ```
-Orchestrator (big model: codellama:34b / claude)
+Goal: "refactor auth module — rename UserAuth to AuthService, add tests"
   │
-  │  "I need to rename `foo` to `bar` in 3 files"
+  Orchestrator (qwen2.5:72b — reasoning, planning)
   │
-  ├── Tool: rename_symbol("foo", "bar")      ← instant, no LLM
-  ├── Tool: lsp_find_references("foo")        ← LSP query
-  ├── Tool: grep("foo", "src/")               ← filesystem search
-  ├── Tool: read_file("src/main.rs")          ← read context
-  ├── Tool: write_file("src/main.rs", ...)    ← apply change
-  ├── Tool: run_tests()                       ← quality gate
-  ├── Tool: web_search("rust error E0308")    ← internet
+  ├── 🔧 tree_sitter_rename("UserAuth", "AuthService")     ← instant, 0 tokens
+  │     └── Finds all usages across AST, renames precisely
   │
-  └── Sub-Agent: "implement the auth module"  ← complex, needs LLM
-        └── uses same tools recursively
+  ├── 🔧 lsp_diagnostics("src/auth/")                       ← 50ms, 0 tokens
+  │     └── Reports compile errors after rename
+  │
+  ├── 🤖 LLM Agent: "fix compile errors from rename"        ← LLM, ~200 tokens
+  │     └── reads diagnostics, generates targeted fix
+  │
+  ├── 🔧 run_tests("cargo test auth")                       ← deterministic
+  │     └── Returns pass/fail + output
+  │
+  ├── 🤖 LLM Agent: "write unit tests for AuthService"      ← LLM, ~1000 tokens
+  │     └── needs creativity → LLM is the right tool
+  │
+  ├── 🔧 run_tests("cargo test auth")                       ← verify new tests pass
+  │
+  └── 🔧 web_search("rust best practices auth service")     ← network, 0 tokens
+        └── context for the orchestrator's next decision
 ```
 
-### Tool Categories
+The model CHOOSES between `🔧 tool` and `🤖 agent` at each step. Simple/mechanical → tool. Creative/ambiguous → LLM agent.
 
-**Structured tools (no LLM, instant):**
-- `read_file(path)` — read file content
-- `write_file(path, content)` — write file
-- `delete_file(path)` — delete
-- `rename_symbol(old, new, scope)` — find & replace with scope awareness
-- `list_files(glob)` — file discovery
-- `git_diff()` — current changes
-- `git_commit(msg)` — commit
-- `run_command(cmd, args)` — shell exec
+### Architecture
 
-**LSP tools (fast, structured):**
-- `find_references(symbol)` — where is this used?
-- `go_to_definition(symbol)` — where is this defined?
-- `diagnostics(file)` — current errors/warnings
-- `completions(file, pos)` — what fits here?
-- `rename(old, new)` — semantic rename across project
+```
+crates/tools/                    ← NEW crate
+├── src/
+│   ├── lib.rs                   ← Tool trait + ToolRegistry
+│   ├── fs.rs                    ← read_file, write_file, delete_file, list_files
+│   ├── grep.rs                  ← grep, ripgrep wrapper
+│   ├── tree_sitter.rs           ← parse, rename_symbol, find_references, extract_functions
+│   ├── lsp.rs                   ← diagnostics, go_to_definition, completions, rename
+│   ├── test_runner.rs           ← run_tests, run_single_test, test_coverage
+│   ├── git.rs                   ← diff, commit, branch, status
+│   ├── web.rs                   ← web_search, fetch_url, search_crates, search_docs
+│   └── shell.rs                 ← run_command (sandboxed)
+```
 
-**Search tools (network):**
-- `web_search(query)` — internet search for docs/errors
-- `fetch_url(url)` — read a web page
-- `search_crates(query)` — find Rust crates
-- `search_docs(crate, query)` — search docs.rs
-
-**Agent tools (LLM-powered, slow):**
-- `implement(description, files)` — write new code (current agent-core)
-- `review(diff)` — code review
-- `explain(code)` — explain what code does
-- `fix_error(error, files)` — diagnose and fix
-
-### MCP-style Interface
-
-Each tool follows a standard interface:
+### Tool Trait (MCP-compatible)
 
 ```rust
-trait Tool: Send + Sync {
+#[async_trait]
+pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    fn parameters_schema(&self) -> serde_json::Value;
-    async fn execute(&self, params: serde_json::Value) -> Result<ToolResult>;
+    fn parameters_schema(&self) -> serde_json::Value;  // JSON Schema
+    async fn execute(&self, params: serde_json::Value, ctx: &ToolContext) -> ToolResult;
 }
 
-struct ToolResult {
-    content: String,
-    is_error: bool,
+pub struct ToolContext {
+    pub repo_path: PathBuf,
+    pub project: String,
+    pub timeout: Duration,
 }
-```
 
-The orchestrator model receives tool descriptions in its system prompt and emits tool calls in a structured format. The daemon executes them and feeds results back.
+pub struct ToolResult {
+    pub content: String,       // Output to feed back to model
+    pub is_error: bool,
+    pub duration_ms: u64,
+    pub tokens_saved: u32,     // Estimated tokens this would have cost via LLM
+}
 
-### Multi-step Loop
+pub struct ToolRegistry {
+    tools: HashMap<String, Box<dyn Tool>>,
+}
 
-```
-1. Orchestrator receives goal + repo context + available tools
-2. Orchestrator outputs: { "tool": "read_file", "params": { "path": "src/main.rs" } }
-3. Daemon executes tool, returns result
-4. Orchestrator analyzes result, decides next action
-5. Repeat until orchestrator outputs: { "done": true, "summary": "..." }
-```
-
-This is the Claude Code / Cursor / SWE-agent loop — but running locally with our own models.
-
-### Goal Loop with Fuel Budget
-
-The entry agent/goal runs in a loop until it solves the problem OR runs out of fuel:
-
-```
-Goal: "add error handling to auth module"
-Budget: time_limit=600s, token_limit=50000, max_iterations=10
-
-Iteration 1:
-  → Orchestrator plans: 3 sub-tasks
-  → Agents execute
-  → Quality gate: FAIL (cargo clippy errors)
-  → Budget remaining: 540s, 38000 tokens
-
-Iteration 2 (exponential backoff: wait 2s):
-  → Orchestrator sees previous errors
-  → Re-plans with error context
-  → Agents fix the clippy issues
-  → Quality gate: FAIL (1 test fails)
-  → Budget remaining: 480s, 25000 tokens
-
-Iteration 3 (backoff: wait 4s):
-  → Orchestrator sees test failure
-  → Spawns focused fix agent
-  → Quality gate: PASS
-  → Done! Create PR.
-```
-
-**Fuel system:**
-- `time_fuel`: max wall-clock seconds (default: 600s = 10 min)
-- `token_fuel`: max total tokens across all iterations (default: 50000)
-- `max_iterations`: hard cap on retry loops (default: 10)
-- Exponential backoff between iterations: 2s, 4s, 8s, 16s... (cap at 60s)
-- Each iteration feeds previous errors/failures as context
-- Orchestrator can decide to give up early if it judges the task impossible
-
-**Budget tracking stored in SurrealDB:**
-```
-agent_run {
-  ...
-  iteration: 3,
-  total_tokens_used: 25000,
-  total_time_ms: 120000,
-  fuel_remaining_tokens: 25000,
-  fuel_remaining_time_ms: 480000,
+impl ToolRegistry {
+    pub fn available_tools_prompt(&self) -> String { ... }  // For model system prompt
+    pub async fn execute(&self, name: &str, params: Value, ctx: &ToolContext) -> ToolResult { ... }
 }
 ```
 
-Dashboard shows fuel gauge on running tasks.
+### Tree-Sitter Tools (the big win)
+
+Tree-sitter gives us structural code understanding without LLM:
+
+```rust
+// tree_sitter.rs
+pub struct TreeSitterTool { /* language grammars loaded at init */ }
+
+impl TreeSitterTool {
+    /// Parse file → AST → find all occurrences of symbol
+    pub fn find_symbol(&self, file: &str, symbol: &str) -> Vec<Location> { ... }
+    
+    /// Rename symbol across file (AST-aware, not text replace)
+    pub fn rename_symbol(&self, file: &str, old: &str, new: &str) -> Result<String> { ... }
+    
+    /// Extract all function/struct/impl signatures from a file
+    pub fn extract_signatures(&self, file: &str) -> Vec<Signature> { ... }
+    
+    /// Find all imports/uses of a module
+    pub fn find_imports(&self, file: &str, module: &str) -> Vec<Location> { ... }
+    
+    /// Get the AST context around a line (function body, impl block, etc.)
+    pub fn context_at_line(&self, file: &str, line: u32) -> ASTContext { ... }
+}
+```
+
+Languages supported: Rust (primary), TypeScript, Go, Python — via `tree-sitter-{lang}` crates.
+
+### LSP Tools (compile-time intelligence)
+
+Start a language server (rust-analyzer, tsserver) and query it:
+
+```rust
+// lsp.rs
+pub struct LspTool { client: LspClient }
+
+impl LspTool {
+    /// Get all diagnostics (errors, warnings) for a file or project
+    pub async fn diagnostics(&self, file: Option<&str>) -> Vec<Diagnostic> { ... }
+    
+    /// Find all references to a symbol at a position
+    pub async fn references(&self, file: &str, line: u32, col: u32) -> Vec<Location> { ... }
+    
+    /// Go to definition
+    pub async fn definition(&self, file: &str, line: u32, col: u32) -> Option<Location> { ... }
+    
+    /// Semantic rename (cross-file, type-aware)
+    pub async fn rename(&self, file: &str, line: u32, col: u32, new_name: &str) -> Vec<FileEdit> { ... }
+    
+    /// Get completions at position (useful for model to know what's valid)
+    pub async fn completions(&self, file: &str, line: u32, col: u32) -> Vec<Completion> { ... }
+}
+```
+
+LSP startup is slow (~2-5s for rust-analyzer) but subsequent queries are fast (<100ms). Keep the server alive across tool calls within a task.
+
+### Test Runner Tools
+
+```rust
+// test_runner.rs
+pub struct TestRunnerTool;
+
+impl TestRunnerTool {
+    /// Run all tests, return structured results
+    pub async fn run_all(&self, ctx: &ToolContext) -> TestResults { ... }
+    
+    /// Run specific test by name/pattern
+    pub async fn run_test(&self, ctx: &ToolContext, pattern: &str) -> TestResults { ... }
+    
+    /// Run only tests affected by changed files (via git diff)
+    pub async fn run_affected(&self, ctx: &ToolContext) -> TestResults { ... }
+}
+
+pub struct TestResults {
+    pub passed: u32,
+    pub failed: u32,
+    pub failures: Vec<TestFailure>,  // name, output, location
+    pub duration_ms: u64,
+}
+```
+
+### Web Search Tools
+
+```rust
+// web.rs
+pub struct WebSearchTool { api_key: Option<String> }
+
+impl WebSearchTool {
+    /// Search the web (via SearXNG, Brave Search API, or similar)
+    pub async fn search(&self, query: &str, max_results: usize) -> Vec<SearchResult> { ... }
+    
+    /// Fetch and extract text from a URL
+    pub async fn fetch_url(&self, url: &str) -> String { ... }
+    
+    /// Search crates.io for a Rust crate
+    pub async fn search_crates(&self, query: &str) -> Vec<CrateInfo> { ... }
+}
+```
+
+### How The Model Chooses Tools
+
+The orchestrator's system prompt includes available tools:
+
+```
+AVAILABLE TOOLS:
+You can call tools by outputting JSON blocks. Use tools for mechanical operations.
+Use LLM sub-agents only for creative/ambiguous tasks that need reasoning.
+
+TOOLS:
+- tree_sitter_rename(file, old_name, new_name) → renames symbol in AST (instant)
+- tree_sitter_find(file, symbol) → finds all occurrences (instant)
+- lsp_diagnostics(file?) → returns compile errors/warnings (fast)
+- lsp_references(file, line, col) → finds all references (fast)
+- lsp_rename(file, line, col, new_name) → semantic rename across project (fast)
+- run_tests(pattern?) → runs tests, returns pass/fail + output
+- read_file(path) → reads file content
+- write_file(path, content) → writes file
+- grep(pattern, path?) → searches for text
+- web_search(query) → searches the internet
+- fetch_url(url) → fetches web page content
+- sub_agent(description, files, complexity) → spawns LLM agent for complex work
+
+OUTPUT FORMAT:
+<<<TOOL tool_name
+{"param": "value"}
+>>>
+
+or for LLM work:
+
+<<<AGENT
+{"description": "...", "files": [...], "complexity": "medium"}
+>>>
+```
+
+The orchestrator loop:
+1. Model receives goal + repo context + tool list
+2. Model outputs tool calls OR agent spawns
+3. Daemon executes tools (instant) or agents (LLM)
+4. Results fed back to model
+5. Model decides next action
+6. Repeat until `<<<DONE>>>` or fuel exhausted
+
+### Fuel Budget (already partially implemented)
+
+The existing fuel system in `executor.rs` (time, tokens, iterations) applies to the tool-use loop. Tools are "free" (0 tokens) but still count against time. This naturally incentivizes the model to use tools over LLM calls.
 
 ### Implementation Order
-1. Define `Tool` trait and `ToolResult` type
-2. Implement structured tools (read/write/list/grep/rename)
-3. Implement the tool-use loop in agent-core (prompt → parse tool call → execute → feed back)
-4. Add goal retry loop with fuel budget in agent-daemon executor
-5. Add LSP tools (start LSP server, query via JSON-RPC)
-6. Add web search tools
-7. Update dashboard to show tool calls + fuel gauge in agent detail view
+
+1. **`crates/tools/` crate**: `Tool` trait, `ToolRegistry`, `ToolContext`, `ToolResult`
+2. **Filesystem tools**: `read_file`, `write_file`, `delete_file`, `list_files`, `grep`
+3. **Git tools**: `diff`, `status`, `commit`
+4. **Test runner tools**: `run_tests`, `run_test`, `run_affected`
+5. **Tree-sitter tools**: `rename_symbol`, `find_symbol`, `extract_signatures` (Rust first)
+6. **Tool-use loop in agent-core**: parse `<<<TOOL>>>` blocks, execute, feed back results
+7. **LSP tools**: start rust-analyzer, query diagnostics/references/rename
+8. **Web search tools**: `web_search`, `fetch_url`
+9. **Update orchestrator prompt**: include tool descriptions, teach model to choose
+10. **Dashboard**: show tool calls in agent detail (tool name, params, result, duration)
+
+### Dependencies
+
+```toml
+# crates/tools/Cargo.toml
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-typescript = "0.23"
+tower-lsp = "0.20"        # LSP client
+reqwest = "0.12"           # web fetch
+```
 
 ### Milestone: "Tool-Using Agents"
-Agents use structured tools for simple operations and LLM for complex reasoning. Goal loop retries with exponential backoff until quality gate passes or fuel runs out. 10x faster for mechanical tasks, more accurate for complex ones.
+Models choose between deterministic tools and LLM agents at each step. Renames take 2ms instead of 47s. Test failures surface immediately instead of after the quality gate. Web search provides context before code generation. LLM tokens are spent only where creativity is needed.
+
+---
+
+## Phase 8: Interactive Planning Before Execution (Future)
+
+**Goal**: User reviews and iterates on the plan BEFORE agents start executing. The biggest model generates a plan, the user can refine it with free-text feedback, and only approved plans get executed. All plan versions are persisted.
+
+### Why
+
+Currently: submit task → daemon immediately plans and executes → 20+ min later, results may be wrong. User has no control over what agents will do, which files they'll touch, or how the goal is decomposed. A bad plan wastes significant compute on the 72B/33B models.
+
+### New Status Flow
+
+```
+pending → planning → planned → approved → running → passed/failed
+                       ↑          │
+                       └──────────┘  (user feedback → re-plan)
+```
+
+### Data Model: `goal_plan` table
+
+```rust
+pub struct GoalPlan {
+    pub id: Option<String>,
+    pub run_id: String,              // FK to agent_run
+    pub project: String,
+    pub goal: String,
+    pub version: u32,                // increments on each iteration
+    pub sub_tasks: Vec<PlannedTask>,
+    pub model_used: String,
+    pub tokens_input: u32,
+    pub tokens_output: u32,
+    pub duration_ms: u64,
+    pub user_feedback: Option<String>,
+    pub status: String,              // "draft" | "approved" | "rejected"
+    pub context_files: Vec<String>,  // files the planner read
+    pub web_searches: Vec<String>,   // searches performed during planning
+    pub reasoning: String,           // planner's explanation
+    pub created_at: String,
+}
+
+pub struct PlannedTask {
+    pub id: String,
+    pub description: String,
+    pub files: Vec<String>,
+    pub complexity: String,
+    pub rationale: String,
+}
+```
+
+### API Endpoints
+
+- `POST /api/plan` — submit goal for planning only (no execution)
+- `GET /api/plans/{run_id}` — get all plan versions for a run
+- `POST /api/plans/{run_id}/feedback` — refine plan with user feedback
+- `POST /api/plans/{run_id}/approve` — approve and start execution
+- `POST /api/plans/{run_id}/edit` — user directly edits subtasks
+
+### Daemon Behavior
+
+The daemon handles new statuses:
+- `planning`: generate plan via LLM, store as GoalPlan, set status to `planned`, STOP
+- `planned`: wait for user action (approve/feedback/edit)
+- `approved`: load approved plan, execute agents using it (skip re-planning)
+- `pending`: legacy behavior (plan + execute immediately)
+
+### Re-planning with Feedback
+
+When user sends feedback, the planner prompt includes:
+```
+PREVIOUS PLAN (version 2):
+[JSON of previous subtasks]
+
+USER FEEDBACK:
+"Remove the frontend tasks, focus only on backend. Also search for how 
+other projects handle auth middleware before implementing."
+
+Generate an improved plan addressing the feedback.
+```
+
+The model can also trigger web searches during planning to gather context.
+
+### Frontend: Plan Review Page
+
+New page at `/project/{name}/plan/{run_id}`:
+- Goal description at top
+- Version history (tabs)
+- Subtask cards: description, files, complexity, rationale (editable)
+- Planner's reasoning (collapsible)
+- Feedback textarea
+- Actions: "Refine Plan", "Approve & Run", "Edit Manually"
+
+### Implementation Order
+
+1. Add `GoalPlan` + `PlannedTask` to schema
+2. Extend `RunStatus` with `Planning`, `Planned`, `Approved`
+3. Add API endpoints
+4. Update daemon to handle planning/approved statuses
+5. Update planner to accept previous plan + feedback
+6. Build plan review page in Leptos frontend
+7. Add "Plan first" toggle to submit page
+
+### Milestone: "Human-in-the-Loop Planning"
+User submits a goal, reviews the AI's plan, iterates with feedback, and only approved plans execute. Plan history is persisted. No more wasted 20-minute runs on bad decompositions.
+
+---
+
+## Phase 9: Resilience Hardening (Future)
+
+**Goal**: Fix critical failure modes identified in the system audit.
+
+### Critical Fixes
+
+1. **Ollama/Claude request timeouts** — add 5-minute hard timeout on all inference calls, 60s on embeddings
+2. **Atomic task claiming** — use SurrealDB conditional update (`WHERE status = 'pending'`) to prevent duplicate execution
+3. **Periodic zombie recovery** — run every 5 minutes (not just startup), check `last_activity_at` staleness
+4. **SurrealDB reconnection** — exponential backoff reconnect, queue updates locally during outage
+
+### High-Priority Fixes
+
+5. **Git operation timeouts** — 30s timeout on push/clone/pull
+6. **Worktree merge rollback** — `git reset --hard` if merge fails, report conflict to executor
+7. **Frontend error display** — show API errors to user, only clear form on success
+8. **Disk space monitoring** — add `max_disk_percent` to resource config, check before scheduling
+9. **Result set pagination** — LIMIT on all DB queries, add offset/limit to API
+
+### Medium-Priority Fixes
+
+10. **NATS reconnection loop** — actually reconnect after disconnect instead of falling through
+11. **SQL injection prevention** — parameterized queries in web-ui
+12. **Executor backpressure** — semaphore on concurrent task spawns in daemon main loop
+13. **Claude rate limit handling** — parse `retry-after` header, backoff instead of failing
+
+### Implementation Order
+
+1. Add timeout to Ollama/Claude HTTP clients (low effort, critical impact)
+2. Implement atomic task claiming
+3. Add periodic zombie recovery + heartbeat
+4. SurrealDB reconnection with local queue
+5. Git operation timeouts
+6. Worktree merge rollback
+7. Frontend error state
+8. Disk monitoring + result pagination
+
+### Milestone: "Production Resilient"
+System recovers from daemon crashes, network partitions, database outages, and disk full conditions. No silent failures. Users always see what went wrong.
 
 ---
 
@@ -494,3 +752,7 @@ Agents use structured tools for simple operations and LLM for complex reasoning.
 | Small models produce bad diffs | MEDIUM | Retry-with-escalation, structured output format, quality gate catches failures |
 | SurrealDB vector search quality | LOW | Well-documented, fallback to pgvector if needed |
 | NATS cluster ops overhead | LOW | Single-machine mode works through Phase 3; NATS is optional |
+| Ollama OOM on 72B model | MEDIUM | Concurrency semaphore limits parallel agents; timeout kills hung requests |
+| Tree-sitter grammar coverage | LOW | Start with Rust only; TypeScript/Go/Python grammars are well-maintained |
+| LSP startup latency | MEDIUM | Keep server alive across tool calls; cache per-project |
+| Concurrent daemon task claiming | HIGH | Atomic conditional update in SurrealDB (Phase 9) |
