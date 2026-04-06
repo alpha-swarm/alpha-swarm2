@@ -715,15 +715,22 @@ fn api_plan_feedback(response_out: ResponseOutparam, run_id: &str, body: &[u8]) 
 
     if feedback.is_empty() { respond_json(response_out, 400, r#"{"error":"feedback is required"}"#); return; }
 
-    let safe_id = run_id.replace('\'', "");
+    let safe_id = sanitize_id(run_id);
     let safe_fb = feedback.replace('\'', "");
 
-    // Set run status back to 'planning' and store feedback on the latest plan
-    let query = format!(
-        "UPDATE agent_run SET status = 'planning', progress_message = 'Re-planning with feedback...' WHERE id = '{}' OR id = type::thing('agent_run', '{}');
-         UPDATE goal_plan SET user_feedback = '{}' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
-        safe_id, safe_id, safe_fb, safe_id
-    );
+    let query = if safe_id.contains(':') {
+        format!(
+            "UPDATE {} SET status = 'planning', progress_message = 'Re-planning with feedback...';
+             UPDATE goal_plan SET user_feedback = '{}' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
+            safe_id, safe_fb, safe_id
+        )
+    } else {
+        format!(
+            "UPDATE agent_run:{} SET status = 'planning', progress_message = 'Re-planning with feedback...';
+             UPDATE goal_plan SET user_feedback = '{}' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
+            safe_id, safe_fb, safe_id
+        )
+    };
     match surreal_query(&query) {
         Ok(_) => respond_json(response_out, 200, r#"{"status":"replanning"}"#),
         Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
@@ -731,12 +738,21 @@ fn api_plan_feedback(response_out: ResponseOutparam, run_id: &str, body: &[u8]) 
 }
 
 fn api_plan_approve(response_out: ResponseOutparam, run_id: &str) {
-    let safe_id = run_id.replace('\'', "");
-    let query = format!(
-        "UPDATE agent_run SET status = 'approved', progress_message = 'Plan approved, starting execution...' WHERE id = '{}' OR id = type::thing('agent_run', '{}');
-         UPDATE goal_plan SET status = 'approved' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
-        safe_id, safe_id, safe_id
-    );
+    let safe_id = sanitize_id(run_id);
+    // Use direct record ID syntax for SurrealDB (no quotes around record IDs)
+    let query = if safe_id.contains(':') {
+        format!(
+            "UPDATE {} SET status = 'approved', progress_message = 'Plan approved, starting execution...';
+             UPDATE goal_plan SET status = 'approved' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
+            safe_id, safe_id
+        )
+    } else {
+        format!(
+            "UPDATE agent_run:{} SET status = 'approved', progress_message = 'Plan approved, starting execution...';
+             UPDATE goal_plan SET status = 'approved' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
+            safe_id, safe_id
+        )
+    };
     match surreal_query(&query) {
         Ok(_) => respond_json(response_out, 200, r#"{"status":"approved"}"#),
         Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
