@@ -125,7 +125,8 @@ impl SwarmRunner {
 
             join_set.spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
-                let agent = Agent::new(Arc::clone(&router), &wt_path);
+                let agent = Agent::new(Arc::clone(&router), &wt_path)
+                    .with_ollama(Arc::clone(&ollama));
                 let agent = if let Some(kb) = store {
                     agent.with_knowledge(KnowledgeConfig {
                         store: kb,
@@ -141,9 +142,11 @@ impl SwarmRunner {
 
                 info!(task_id = %task.id, desc = %task.description, "Running agent");
 
-                // Use standard run() — generates <<<EDIT>>>/<<<CREATE>>> blocks
-                // TODO: switch to run_with_tools() when models support structured tool calling
-                let result = agent.run(&task.description, &task.files, task.complexity).await;
+                // Try tool-enabled loop first (native Ollama tool calling).
+                // Falls back to standard run() if model doesn't support tools.
+                let tools = swarm_tools::ToolRegistry::with_defaults();
+                const MAX_TOOL_STEPS: u32 = 20;
+                let result = agent.run_with_tools(&task.description, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
                 (task, result)
             });
         }
