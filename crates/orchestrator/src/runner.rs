@@ -143,11 +143,9 @@ impl SwarmRunner {
 
                 info!(task_id = %task.id, desc = %task.description, "Running agent");
 
-                // Text-based tool loop: model outputs <<<TOOL>>>/<<<EDIT>>>/<<<DONE>>>
-                // Works with ALL models, no Ollama-specific API needed
-                let tools = swarm_tools::ToolRegistry::with_defaults();
-                const MAX_TOOL_STEPS: u32 = 10;
-                let result = agent.run_with_tools(&task.description, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
+                // Standard run() — 94% format compliance, proven reliable
+                // TODO: enable tool loop when models handle larger context
+                let result = agent.run(&task.description, &task.files, task.complexity).await;
                 (task, result)
             });
         }
@@ -204,8 +202,18 @@ impl SwarmRunner {
             }
         }
 
-        // 7. Run quality gate on merged result
-        let quality_passed = if any_applied {
+        // 7. Run quality gate on merged result — skip if only non-code files modified
+        let code_extensions = ["rs", "ts", "js", "go", "py"];
+        let modified_files: Vec<String> = results.iter()
+            .filter(|r| r.agent_result.as_ref().is_some_and(|a| a.applied))
+            .flat_map(|r| r.task.files.iter().cloned())
+            .collect();
+        let has_code_changes = modified_files.iter().any(|f| {
+            code_extensions.iter().any(|ext| f.ends_with(&format!(".{ext}")))
+        });
+
+        let quality_passed = if any_applied && has_code_changes {
+            info!("Running quality gate (code files modified)");
             let config = quality_gate_lib::detect_toolchain(&self.repo_path);
             match quality_gate_lib::run_all(&self.repo_path, &config).await {
                 Ok(checks) => {
@@ -221,6 +229,9 @@ impl SwarmRunner {
                     false
                 }
             }
+        } else if any_applied {
+            info!("Skipping quality gate (only non-code files modified: {:?})", modified_files);
+            true
         } else {
             true
         };

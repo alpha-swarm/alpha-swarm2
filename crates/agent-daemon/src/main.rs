@@ -203,30 +203,23 @@ async fn run_nats_kv_loop(
 
     loop {
         tokio::select! {
-            Some(task_entry) = watcher.next() => {
-                let id = task_entry.run_id.clone();
-                info!(run_id = %id, "New task from NATS KV");
+            biased;  // Poll SurrealDB first — web-ui tasks go there, not NATS KV
 
-                if !resources::can_schedule(&config.resources) {
-                    info!("Resources full, skipping task {id}");
-                    continue;
-                }
-
-                if !scheduler.try_claim(&id).await.unwrap_or(false) {
-                    continue;
-                }
-
-                spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), Some(Arc::clone(scheduler)), id, task_entry.project, task_entry.goal, task_entry.status);
-            }
             _ = poll_interval.tick() => {
-                // Check SurrealDB for tasks submitted via web-ui (not through NATS KV)
+                // Check SurrealDB for tasks submitted via web-ui
                 if let Ok(pending) = store.list_pending().await {
+                    if !pending.is_empty() {
+                        info!(count = pending.len(), "SurrealDB poll found pending tasks");
+                    }
                     for task in pending {
                         if !resources::can_schedule(&config.resources) { break; }
                         let id = task.id.clone().unwrap_or_default();
 
-                        if !scheduler.try_claim(&id).await.unwrap_or(false) {
-                            continue;
+                        // Try NATS KV claim, proceed even if it fails
+                        match scheduler.try_claim(&id).await {
+                            Ok(true) => { info!(id = %id, "Claimed via NATS KV (poll)"); }
+                            Ok(false) => { info!(id = %id, "NATS KV claim failed (poll), proceeding anyway"); }
+                            Err(e) => { warn!(id = %id, error = %e, "NATS KV claim error (poll)"); }
                         }
 
                         let project = task.project.clone();

@@ -256,14 +256,19 @@ async fn handle_execute(
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
 
-    // Lifecycle: on_agent_start — index embeddings if project not yet indexed
+    // Lifecycle: on_agent_start — index embeddings in BACKGROUND (don't block execution)
     let embed_model = config.defaults.embed_model.clone();
-    let emb_manager = knowledge_base::embedding_manager::EmbeddingManager::new(
+    let emb_manager = std::sync::Arc::new(knowledge_base::embedding_manager::EmbeddingManager::new(
         Arc::clone(&store), Arc::clone(&ollama), embed_model,
-    );
-    let indexed = emb_manager.on_agent_start(project, &repo_path).await;
-    if indexed > 0 {
-        info!(task_id, indexed, "Indexed project files for RAG");
+    ));
+    {
+        let emb = Arc::clone(&emb_manager);
+        let project = project.to_string();
+        let repo = repo_path.clone();
+        tokio::spawn(async move {
+            let indexed = emb.on_agent_start(&project, &repo).await;
+            if indexed > 0 { info!(indexed, "Background: indexed project files for RAG"); }
+        });
     }
 
     // Helper: update progress on the running task
@@ -391,7 +396,8 @@ async fn handle_execute(
         Some(result) => {
             let tasks_passed = result.results.iter().filter(|r| r.agent_result.as_ref().is_some_and(|a| a.applied)).count();
             let tasks_failed = result.results.iter().filter(|r| r.error.is_some()).count();
-            let any_work_done = tasks_passed > 0;
+            // Check if any agent produced work — either via edits or via tool-based file writes
+            let any_work_done = tasks_passed > 0 || !result.merged_diff.as_ref().map_or(true, |d| d.is_empty());
 
             // A run with zero successful sub-agents is always a failure
             let status = if !any_work_done {
