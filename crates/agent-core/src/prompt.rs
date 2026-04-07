@@ -40,13 +40,43 @@ impl AgentType {
     }
 }
 
-const EDIT_FORMAT: &str = "\nOUTPUT FORMAT:\nFor each file you want to modify, output a block like this:\n\n<<<EDIT path/to/file.rs\n--- OLD\nthe exact lines to replace (include enough context to be unique)\n--- NEW\nthe replacement lines\n>>>\n\nFor new files:\n\n<<<CREATE path/to/new_file.rs\nfile contents here\n>>>\n\nFor deleted files:\n\n<<<DELETE path/to/file.rs\n>>>\n\nOutput ONLY edit blocks. No explanation before or after unless the task cannot be done.";
+const EDIT_FORMAT: &str = "\nOUTPUT FORMAT:\nFor each file you want to modify, output a block like this:\n\n<<<EDIT path/to/file.rs\n--- OLD\nthe exact lines to replace (include enough context to be unique)\n--- NEW\nthe replacement lines\n>>>\n\nFor new files:\n\n<<<CREATE path/to/new_file.rs\nfile contents here\n>>>\n\nFor deleted files:\n\n<<<DELETE path/to/file.rs\n>>>\n\nOutput ONLY <<< blocks. No explanation before or after unless the task cannot be done.";
+
+/// Extended format for tool-use loop — includes TOOL and DONE blocks.
+const TOOL_FORMAT: &str = "\nOUTPUT FORMAT:\nYou can use tools and edit files. Output ONLY <<< blocks.\n\nTo call a tool:\n\n<<<TOOL read_file\n{\"path\": \"src/main.rs\"}\n>>>\n\n<<<TOOL grep\n{\"pattern\": \"fn main\", \"path\": \"src/\"}\n>>>\n\n<<<TOOL run_tests\n{}\n>>>\n\nTo edit files:\n\n<<<EDIT path/to/file.rs\n--- OLD\nexact lines to replace\n--- NEW\nreplacement lines\n>>>\n\n<<<CREATE path/to/new_file.rs\nfile contents here\n>>>\n\n<<<DELETE path/to/file.rs\n>>>\n\nWhen finished:\n\n<<<DONE\nsummary of what was done\n>>>\n\nRULES:\n- Start your response with <<< immediately\n- You may call multiple tools, then edit files, then signal DONE\n- Tool results will be returned to you so you can decide next steps\n- No markdown, no explanations — only <<< blocks";
 
 pub fn build_prompt(
     task_description: &str,
     files: &[(String, String)],
 ) -> Vec<ChatMessage> {
     build_prompt_with_type(task_description, files, AgentType::General)
+}
+
+/// Build a prompt for the tool-use loop with available tool names.
+pub fn build_tool_prompt(
+    task_description: &str,
+    files: &[(String, String)],
+    tool_names: &[&str],
+) -> Vec<ChatMessage> {
+    let file_context = build_file_context(files);
+
+    let tools_list = tool_names.iter()
+        .map(|n| format!("  - {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let system = format!(
+        "{}\n\nAVAILABLE TOOLS:\n{}\n{}",
+        AgentType::General.role_description(),
+        tools_list,
+        TOOL_FORMAT,
+    );
+    let user_message = format!("TASK: {task_description}\n\nFILES:\n{file_context}");
+
+    vec![
+        ChatMessage::system(system),
+        ChatMessage::user(user_message),
+    ]
 }
 
 /// Rough estimate of tokens from character count (1 token ≈ 4 chars for code).

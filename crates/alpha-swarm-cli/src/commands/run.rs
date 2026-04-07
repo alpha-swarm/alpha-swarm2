@@ -30,8 +30,7 @@ pub async fn execute(
     let kb = if project.is_some() { setup::get_knowledge_store(config).await? } else { None };
     let ollama = Arc::new(setup::get_ollama(config));
     let events = setup::get_event_publisher(config).await?;
-    let mut agent = Agent::new(Arc::clone(&router), &repo)
-        .with_ollama(Arc::clone(&ollama));
+    let mut agent = Agent::new(Arc::clone(&router), &repo);
     if let Some(pub_) = events {
         agent = agent.with_events(Arc::new(pub_));
     }

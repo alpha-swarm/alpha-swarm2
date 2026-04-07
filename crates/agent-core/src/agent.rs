@@ -52,7 +52,6 @@ pub struct KnowledgeConfig {
 /// A one-shot code modification agent.
 pub struct Agent {
     router: Arc<InferenceRouter>,
-    ollama: Option<Arc<OllamaBackend>>,
     repo_path: PathBuf,
     knowledge: Option<KnowledgeConfig>,
     events: Option<Arc<EventPublisher>>,
@@ -63,17 +62,11 @@ impl Agent {
     pub fn new(router: Arc<InferenceRouter>, repo_path: impl Into<PathBuf>) -> Self {
         Self {
             router,
-            ollama: None,
             repo_path: repo_path.into(),
             knowledge: None,
             events: None,
             project: "default".into(),
         }
-    }
-
-    pub fn with_ollama(mut self, ollama: Arc<OllamaBackend>) -> Self {
-        self.ollama = Some(ollama);
-        self
     }
 
     pub fn with_knowledge(mut self, config: KnowledgeConfig) -> Self {
@@ -478,9 +471,9 @@ impl Agent {
         }
     }
 
-    /// Run a task using the tool-use loop with Ollama native tool calling.
-    /// Model receives tools as JSON schema, returns tool_calls in response.
-    /// Falls back to standard run() if model doesn't support tools.
+    /// Run a task using the text-based tool protocol.
+    /// Model outputs <<<TOOL>>>, <<<EDIT>>>, <<<CREATE>>>, <<<DELETE>>>, <<<DONE>>> blocks.
+    /// Works with ANY model — no Ollama-specific API needed.
     pub async fn run_with_tools(
         &self,
         task: &str,
@@ -489,130 +482,116 @@ impl Agent {
         tools: &swarm_tools::ToolRegistry,
         max_steps: u32,
     ) -> Result<AgentResult> {
-        use inference_client::{OllamaMessage, OllamaTool, OllamaToolFunction};
-        use std::time::Duration;
-
-        let Some(ollama) = &self.ollama else {
-            // No Ollama backend available for native tool calling — use standard run
-            info!("No Ollama backend for tool calling, falling back to standard run");
-            return self.run(task, file_paths, complexity).await;
-        };
+        use crate::parser::{parse_actions, AgentAction};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
 
         let files = self.read_files(file_paths)?;
+        let tool_names = tools.tool_names();
+        let messages_init = crate::prompt::build_tool_prompt(task, &files, &tool_names);
 
-        // Build system + user messages in Ollama format
-        let system_prompt = format!(
-            "{}\n\nYou have access to tools. Use them for mechanical operations (reading files, searching, running tests). Use your own reasoning for creative code generation. When done, respond with just the word DONE.",
-            crate::prompt::AgentType::General.system_prompt(),
-        );
+        let mut messages = messages_init;
 
-        let mut file_context = String::new();
-        for (path, content) in &files {
-            if content.is_empty() {
-                file_context.push_str(&format!("=== {path} === [NEW FILE — use write_file tool to create]\n\n"));
-            } else {
-                file_context.push_str(&format!("=== {path} ===\n{content}\n\n"));
-            }
-        }
-        let user_msg = format!("TASK: {task}\n\nFILES:\n{file_context}");
-
-        let mut messages = vec![
-            OllamaMessage { role: "system".into(), content: system_prompt, tool_calls: None },
-            OllamaMessage { role: "user".into(), content: user_msg, tool_calls: None },
-        ];
-
-        // Convert tool registry to Ollama tool format
-        let ollama_tools: Vec<OllamaTool> = tools.to_ollama_tools().into_iter()
-            .filter_map(|v| {
-                let func = v.get("function")?;
-                Some(OllamaTool {
-                    tool_type: "function".into(),
-                    function: OllamaToolFunction {
-                        name: func.get("name")?.as_str()?.into(),
-                        description: func.get("description")?.as_str()?.into(),
-                        parameters: func.get("parameters").cloned().unwrap_or_default(),
-                    },
-                })
-            })
-            .collect();
+        let file_cache: Arc<RwLock<HashMap<String, String>>> = Arc::new(RwLock::new(
+            files.iter().map(|(p, c)| (p.clone(), c.clone())).collect()
+        ));
 
         let ctx = swarm_tools::ToolContext {
             repo_path: self.repo_path.clone(),
             project: self.project.clone(),
-            timeout: Duration::from_secs(60),
+            timeout: std::time::Duration::from_secs(60),
         };
 
         let options = default_options();
-        let model = options.preferred_model.as_deref().unwrap_or("deepseek-coder:33b");
         let mut total_tokens_in = 0u32;
         let mut total_tokens_out = 0u32;
         let mut total_duration = 0u64;
         let mut all_edits = Vec::new();
 
-        // Try native tool calling first
         for step in 1..=max_steps {
-            let result = ollama.chat_with_tools(model, &messages, &ollama_tools, &options).await;
-
-            let (msg, tok_in, tok_out, dur) = match result {
+            let response = match self.router.chat(&messages, complexity, &options).await {
                 Ok(r) => r,
                 Err(e) => {
-                    // ANY error from tool calling → fall back to standard run()
-                    // This handles: "does not support tools", timeouts, connection errors
-                    info!(model, error = %e, "Tool calling failed, falling back to standard run");
+                    warn!(step, error = %e, "Tool loop inference failed, falling back to standard run");
                     return self.run(task, file_paths, complexity).await;
                 }
             };
 
-            total_tokens_in += tok_in;
-            total_tokens_out += tok_out;
-            total_duration += dur;
+            total_tokens_in += response.tokens_input;
+            total_tokens_out += response.tokens_output;
+            total_duration += response.duration_ms;
 
-            info!(step, model, tokens_out = tok_out, has_tool_calls = msg.tool_calls.is_some(), "Tool loop step");
+            info!(step, model = %response.model, tokens_out = response.tokens_output, "Tool loop step");
 
-            // Check for tool calls
-            if let Some(tool_calls) = &msg.tool_calls {
-                messages.push(msg.clone());
-
-                for call in tool_calls {
-                    let name = &call.function.name;
-                    let params = call.function.arguments.clone();
-
-                    info!(step, tool = %name, "Executing tool call");
-                    let result = tools.execute(name, params, &ctx).await;
-
-                    // Feed tool result back
-                    messages.push(OllamaMessage {
-                        role: "tool".into(),
-                        content: result.content,
-                        tool_calls: None,
-                    });
+            let actions = match parse_actions(&response.content) {
+                Ok(a) if !a.is_empty() => a,
+                _ => {
+                    // No actions parsed — try as plain edit blocks
+                    let edits = crate::parser::parse_edits(&response.content).unwrap_or_default();
+                    if !edits.is_empty() {
+                        for edit in &edits {
+                            let _ = self.apply_edits(&[edit.clone()]);
+                        }
+                        all_edits.extend(edits);
+                    }
+                    info!(step, edits = all_edits.len(), "No structured actions, treating as final response");
+                    break;
                 }
-                continue; // Model will process tool results and respond
-            }
+            };
 
-            // No tool calls — model responded with text
-            let content = msg.content.trim().to_string();
+            messages.push(inference_client::ChatMessage::assistant(&response.content));
 
-            if content == "DONE" || content.contains("DONE") {
-                info!(step, "Tool loop: model signaled done");
-                break;
-            }
+            let mut feedback_parts = Vec::new();
+            let mut done = false;
 
-            // Try to parse as edit blocks (model might output <<<CREATE>>>/<<<EDIT>>> even in tool mode)
-            let edits = crate::parser::parse_edits(&content).unwrap_or_default();
-            if !edits.is_empty() {
-                for edit in &edits {
-                    if let Err(e) = self.apply_edits(&[edit.clone()]) {
-                        warn!("Failed to apply edit: {e}");
+            for action in &actions {
+                match action {
+                    AgentAction::Tool(call) => {
+                        let params: serde_json::Value = serde_json::from_str(&call.params_json)
+                            .unwrap_or(serde_json::Value::Object(Default::default()));
+                        info!(step, tool = %call.name, "Executing tool");
+                        let result = tools.execute(&call.name, params, &ctx).await;
+                        let prefix = if result.is_error { "ERROR" } else { "OK" };
+                        // Truncate long results to avoid context bloat
+                        let content = if result.content.len() > 2000 {
+                            format!("{}...(truncated)", &result.content[..2000])
+                        } else {
+                            result.content
+                        };
+                        feedback_parts.push(format!("[{} {}] {}", call.name, prefix, content));
+                    }
+                    AgentAction::Edit(edit) => {
+                        all_edits.push(edit.clone());
+                        if let Err(e) = self.apply_edits(&[edit.clone()]) {
+                            feedback_parts.push(format!("[edit ERROR] {e}"));
+                        } else {
+                            feedback_parts.push("[edit OK] Applied".into());
+                        }
+                    }
+                    AgentAction::Agent { description, files, .. } => {
+                        feedback_parts.push(format!("[sub-agent] {description} on {files:?}"));
+                        match self.run(description, files, complexity).await {
+                            Ok(sub) => {
+                                all_edits.extend(sub.edits);
+                                feedback_parts.push("[sub-agent OK]".into());
+                            }
+                            Err(e) => feedback_parts.push(format!("[sub-agent ERROR] {e}")),
+                        }
+                    }
+                    AgentAction::Done { summary } => {
+                        info!(step, summary = %summary, "Tool loop: DONE");
+                        done = true;
                     }
                 }
-                all_edits.extend(edits);
-                break;
             }
 
-            // Model responded with plain text — no tools, no edits, done
-            info!(step, "Model responded with text, no tool calls or edits");
-            break;
+            if done { break; }
+
+            let feedback = feedback_parts.join("\n");
+            messages.push(inference_client::ChatMessage::user(
+                &format!("TOOL RESULTS:\n{feedback}\n\nContinue with more <<<TOOL>>> calls, <<<EDIT>>>/<<<CREATE>>> blocks, or <<<DONE>>> if finished.")
+            ));
         }
 
         let applied = !all_edits.is_empty();
@@ -621,7 +600,7 @@ impl Agent {
             edits: all_edits,
             inference_response: InferenceResponse {
                 content: String::new(),
-                model: model.to_string(),
+                model: String::new(),
                 backend: inference_client::BackendKind::Ollama,
                 tokens_input: total_tokens_in,
                 tokens_output: total_tokens_out,
