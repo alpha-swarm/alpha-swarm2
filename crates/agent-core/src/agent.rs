@@ -735,12 +735,57 @@ impl Agent {
                     let content = std::fs::read_to_string(&full_path)
                         .with_context(|| format!("Cannot read {path} for editing"))?;
 
-                    if !content.contains(old.as_str()) {
-                        warn!(path, "OLD block not found in file — skipping edit");
-                        continue;
-                    }
+                    let updated = if content.contains(old.as_str()) {
+                        // Exact match
+                        content.replacen(old.as_str(), new.as_str(), 1)
+                    } else {
+                        // Try trimmed match — normalize whitespace
+                        let old_trimmed = old.trim();
+                        let lines: Vec<&str> = content.lines().collect();
+                        let old_lines: Vec<&str> = old_trimmed.lines().map(|l| l.trim()).collect();
 
-                    let updated = content.replacen(old.as_str(), new.as_str(), 1);
+                        if old_lines.is_empty() {
+                            warn!(path, "OLD block empty — skipping edit");
+                            continue;
+                        }
+
+                        // Find the first line of OLD in the file
+                        let mut found = false;
+                        let mut start_line = 0;
+                        for (i, line) in lines.iter().enumerate() {
+                            if line.trim() == old_lines[0] {
+                                // Check if subsequent lines match
+                                let mut all_match = true;
+                                for (j, old_line) in old_lines.iter().enumerate() {
+                                    if i + j >= lines.len() || lines[i + j].trim() != *old_line {
+                                        all_match = false;
+                                        break;
+                                    }
+                                }
+                                if all_match {
+                                    start_line = i;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if !found {
+                            warn!(path, "OLD block not found in file (even with trimmed match) — skipping");
+                            continue;
+                        }
+
+                        // Replace the matched lines preserving original indentation
+                        let mut result_lines: Vec<String> = Vec::new();
+                        result_lines.extend(lines[..start_line].iter().map(|l| l.to_string()));
+                        // Use new content as-is
+                        for new_line in new.lines() {
+                            result_lines.push(new_line.to_string());
+                        }
+                        result_lines.extend(lines[start_line + old_lines.len()..].iter().map(|l| l.to_string()));
+                        info!(path, "Applied edit with trimmed matching");
+                        result_lines.join("\n")
+                    };
                     std::fs::write(&full_path, updated)
                         .with_context(|| format!("Failed to write {path}"))?;
                     info!(path, "Applied edit");
