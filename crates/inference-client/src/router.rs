@@ -151,22 +151,23 @@ impl InferenceRouter {
             ),
         }
 
-        // Fallback: try every other backend
+        // Fallback: try every backend with the best available model
         for backend in &self.backends {
-            if backend.kind() == recommended.backend {
-                continue;
-            }
             let models = match backend.list_models().await {
-                Ok(m) => m,
-                Err(_) => continue,
+                Ok(m) if !m.is_empty() => m,
+                _ => continue,
             };
-            if let Some(model) = models.first() {
+            // Pick best model: prefer deepseek-coder/qwen, then largest
+            let model = largest_ollama(&models)
+                .or_else(|| models.into_iter().next());
+            if let Some(model) = model {
+                if model.name == recommended.name { continue; } // Already tried
                 match backend.chat(&model.name, messages, options).await {
                     Ok(resp) => {
                         info!(backend = ?backend.kind(), model = %model.name, "Fallback succeeded");
                         return Ok(resp);
                     }
-                    Err(e) => warn!(backend = ?backend.kind(), "Fallback failed: {e}"),
+                    Err(e) => warn!(backend = ?backend.kind(), model = %model.name, "Fallback failed: {e}"),
                 }
             }
         }

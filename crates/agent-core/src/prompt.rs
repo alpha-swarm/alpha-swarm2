@@ -138,13 +138,7 @@ fn build_file_context(files: &[(String, String)]) -> String {
             // Extract function/struct signatures as summary
             let signatures: Vec<String> = lines.iter()
                 .enumerate()
-                .filter(|(_, line)| {
-                    let trimmed = line.trim();
-                    trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ")
-                        || trimmed.starts_with("pub struct ") || trimmed.starts_with("struct ")
-                        || trimmed.starts_with("pub enum ") || trimmed.starts_with("impl ")
-                        || trimmed.starts_with("pub trait ") || trimmed.starts_with("pub async fn ")
-                })
+                .filter(|(_, line)| crate::code_utils::is_signature_line(line))
                 .map(|(i, line)| format!("  L{}: {}", i + 1, line.trim()))
                 .collect();
 

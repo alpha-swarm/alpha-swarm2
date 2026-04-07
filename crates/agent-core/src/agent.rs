@@ -1,10 +1,22 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use inference_client::{Complexity, InferenceOptions, InferenceResponse, InferenceRouter, OllamaBackend};
+use knowledge_base::{AgentRun, AttemptRecord, KnowledgeStore, RunStatus};
+use swarm_events::{EventPublisher, SwarmEvent};
+
+use crate::parser::{FileEdit, parse_edits};
+use crate::prompt::build_prompt;
+
+// --- Constants ---
+
+/// Max characters to store in attempt preview fields.
+const ATTEMPT_PREVIEW_CHARS: usize = 500;
+
+// --- Helper functions ---
 
 /// Inference options for a given tier.
 fn tier_options(tier: &swarm_config::TierConfig) -> InferenceOptions {
@@ -19,14 +31,36 @@ fn tier_options(tier: &swarm_config::TierConfig) -> InferenceOptions {
 fn default_options() -> InferenceOptions {
     tier_options(&swarm_config::TierConfig::agent())
 }
-use knowledge_base::{AgentRun, AttemptRecord, KnowledgeStore, RunStatus};
 
-/// Max characters to store in attempt preview fields
-const ATTEMPT_PREVIEW_CHARS: usize = 500;
-use swarm_events::{EventPublisher, SwarmEvent};
+/// Auto-wrap heuristic: if model output content without <<< blocks,
+/// and it doesn't look conversational, wrap as <<<CREATE target_file>>>.
+fn try_auto_wrap(content: &str, file_paths: &[String], repo_path: &Path) -> Vec<FileEdit> {
+    if content.is_empty() || content.contains("<<<") {
+        return Vec::new();
+    }
 
-use crate::parser::{FileEdit, parse_edits};
-use crate::prompt::build_prompt;
+    let is_conversational = content.starts_with("I ") || content.starts_with("Here ")
+        || content.starts_with("To ") || content.starts_with("You ")
+        || content.starts_with("The ") || content.starts_with("This ")
+        || content.contains("you can") || content.contains("you should");
+
+    if is_conversational {
+        return Vec::new();
+    }
+
+    // Find a target file — prefer non-existent files (CREATE), else first assigned
+    let target = file_paths.iter()
+        .find(|f| !repo_path.join(f).exists())
+        .or_else(|| file_paths.first());
+
+    if let Some(target) = target {
+        info!(file = %target, "Auto-wrapping response as CREATE");
+        let wrapped = format!("<<<CREATE {target}\n{content}\n>>>");
+        parse_edits(&wrapped).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
 
 /// Result of an agent run.
 pub struct AgentResult {
@@ -256,20 +290,10 @@ impl Agent {
             }
         };
 
-        // Auto-wrap: if no edits parsed but response has content, try wrapping as CREATE
-        let edits = if edits.is_empty() && !response.content.trim().is_empty() && !response.content.contains("<<<") {
-            let content = response.content.trim();
-            let is_conversational = content.starts_with("I ") || content.starts_with("Here ")
-                || content.starts_with("To ") || content.starts_with("You ")
-                || content.contains("you can") || content.contains("you should");
-
-            if !is_conversational {
-                if let Some(target) = file_paths.iter().find(|f| !self.repo_path.join(f).exists()).or_else(|| file_paths.first()) {
-                    info!(file = %target, "Auto-wrapping response as CREATE");
-                    let wrapped = format!("<<<CREATE {target}\n{content}\n>>>");
-                    parse_edits(&wrapped).unwrap_or(edits)
-                } else { edits }
-            } else { edits }
+        // Auto-wrap: if no edits parsed, try wrapping raw content as CREATE
+        let edits = if edits.is_empty() {
+            let wrapped = try_auto_wrap(response.content.trim(), file_paths, &self.repo_path);
+            if !wrapped.is_empty() { wrapped } else { edits }
         } else { edits };
 
         info!(edit_count = edits.len(), "Parsed file edits");
@@ -555,36 +579,14 @@ impl Agent {
                         break;
                     }
 
-                    // Auto-wrap heuristic: if model output non-empty content without <<<
-                    // blocks, and we have a target file from the task, wrap it as CREATE.
-                    // Handles the "lazy model" case where 7B outputs content directly.
-                    if !content.is_empty() && !content.contains("<<<") {
-                        let is_conversational = content.starts_with("I ")
-                            || content.starts_with("Here ")
-                            || content.starts_with("To ")
-                            || content.starts_with("You ")
-                            || content.starts_with("The ")
-                            || content.starts_with("This ")
-                            || content.contains("you can")
-                            || content.contains("you should");
-
-                        if !is_conversational {
-                            // Looks like file content — find target file from task files
-                            if let Some(target) = file_paths.iter().find(|f| {
-                                !std::path::Path::new(&self.repo_path.join(f)).exists()
-                            }).or_else(|| file_paths.first()) {
-                                info!(step, file = %target, "Auto-wrapping response as CREATE (model skipped format)");
-                                let wrapped = format!("<<<CREATE {target}\n{content}\n>>>");
-                                let wrapped_edits = crate::parser::parse_edits(&wrapped).unwrap_or_default();
-                                if !wrapped_edits.is_empty() {
-                                    for edit in &wrapped_edits {
-                                        let _ = self.apply_edits(&[edit.clone()]);
-                                    }
-                                    all_edits.extend(wrapped_edits);
-                                    break;
-                                }
-                            }
+                    // Auto-wrap: try wrapping raw content as CREATE
+                    let wrapped = try_auto_wrap(content, file_paths, &self.repo_path);
+                    if !wrapped.is_empty() {
+                        for edit in &wrapped {
+                            let _ = self.apply_edits(&[edit.clone()]);
                         }
+                        all_edits.extend(wrapped);
+                        break;
                     }
 
                     info!(step, "No parseable actions, treating as final response");
