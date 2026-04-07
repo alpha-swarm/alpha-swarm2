@@ -121,13 +121,31 @@ async fn main() -> Result<()> {
     // Process initial pending tasks
     process_pending(&config, &router, &ollama, &store, &publisher, &scheduler).await;
 
-    // Main loop: NATS KV watch (primary) or SurrealDB polling (fallback)
-    if let Some(sched) = &scheduler {
-        info!("Primary mode: watching NATS KV for tasks");
-        run_nats_kv_loop(&config, &router, &ollama, &store, &publisher, sched).await;
-    } else {
-        info!("Fallback mode: polling SurrealDB every {:?}", FALLBACK_POLL_INTERVAL);
-        run_surreal_poll_loop(&config, &router, &ollama, &store, &publisher).await;
+    // Main loop: always poll SurrealDB, use NATS KV for claiming
+    info!("Polling SurrealDB every {:?} with NATS KV claiming", FALLBACK_POLL_INTERVAL);
+    loop {
+        tokio::time::sleep(FALLBACK_POLL_INTERVAL).await;
+        if !resources::can_schedule(&config.resources) { continue; }
+        if let Ok(pending) = store.list_pending().await {
+            for task in pending {
+                if !resources::can_schedule(&config.resources) { break; }
+                let id = task.id.clone().unwrap_or_default();
+                let project = task.project.clone();
+                let goal = task.task_description.clone();
+                let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
+
+                // NATS KV claim (best-effort, proceed even if fails)
+                if let Some(sched) = &scheduler {
+                    match sched.try_claim(&id).await {
+                        Ok(true) => { info!(id = %id, "Claimed via NATS KV"); }
+                        Ok(false) => { info!(id = %id, "NATS KV claim failed, proceeding anyway"); }
+                        Err(e) => { warn!(id = %id, error = %e, "NATS KV error"); }
+                    }
+                }
+
+                spawn_task(config.clone(), Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), scheduler.clone(), id, project, goal, status);
+            }
+        }
     }
 
     Ok(())
