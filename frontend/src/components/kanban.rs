@@ -14,6 +14,7 @@ pub fn KanbanBoard(
     }
 
     let columns = vec![
+        ("planned", "Awaiting Review", "var(--accent)"),
         ("running", "In Progress", "var(--warning)"),
         ("passed", "Completed", "var(--success)"),
         ("failed", "Failed", "var(--error)"),
@@ -21,7 +22,9 @@ pub fn KanbanBoard(
 
     columns.into_iter().filter_map(|(status, label, color)| {
         let col_goals: Vec<Goal> = goals.iter()
-            .filter(|g| g.status == status || (status == "running" && (g.status == "partial" || g.status == "planning")))
+            .filter(|g| g.status == status
+                || (status == "planned" && g.status == "planning")
+                || (status == "running" && (g.status == "partial" || g.status == "pending")))
             .cloned()
             .collect();
         if col_goals.is_empty() { return None; }
@@ -58,10 +61,16 @@ fn GoalCard(
     let progress = agents.iter()
         .find(|a| a.status == "running" || a.status == "planning")
         .and_then(|a| a.progress_message.clone());
-    // Check if any agent is in "planned" status (awaiting approval)
+    // Check if any agent is in "planned" or "planning" status
     let planned_agent = agents.iter()
-        .find(|a| a.status == "planned")
-        .and_then(|a| a.id.clone());
+        .find(|a| a.status == "planned" || a.status == "planning")
+        .and_then(|a| a.id.clone())
+        // Fallback: try first agent's ID if goal status is planned
+        .or_else(|| {
+            if goal.status == "planned" || goal.status == "planning" {
+                agents.first().and_then(|a| a.id.clone())
+            } else { None }
+        });
 
     view! {
         <div class="card" style="margin-bottom:8px;padding:12px 14px">

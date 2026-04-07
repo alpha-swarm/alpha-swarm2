@@ -353,7 +353,7 @@ fn api_goals(response_out: ResponseOutparam, project: &str) {
     // Sub-agents are individual runs under that goal.
     let safe = project.replace('\'', "");
     let query = format!(
-        "SELECT task_description, status, model_used, agent_id, tokens_input, tokens_output, duration_ms, created_at, error_message, quality_gate_passed, files_modified FROM agent_run WHERE project = '{}' ORDER BY created_at DESC LIMIT 50",
+        "SELECT id, task_description, status, model_used, agent_id, tokens_input, tokens_output, duration_ms, created_at, error_message, quality_gate_passed, files_modified, progress_message FROM agent_run WHERE project = '{}' ORDER BY created_at DESC LIMIT 50",
         safe
     );
     match surreal_query(&query) {
@@ -376,7 +376,13 @@ fn api_goals(response_out: ResponseOutparam, project: &str) {
                 let failed = agents.iter().filter(|a| a.get("status").and_then(|s| s.as_str()) == Some("failed")).count();
                 let running = agents.iter().filter(|a| a.get("status").and_then(|s| s.as_str()) == Some("running")).count();
 
-                let status = if running > 0 { "running" }
+                let planned = agents.iter().filter(|a| {
+                    let s = a.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    s == "planned" || s == "planning"
+                }).count();
+
+                let status = if planned > 0 { "planned" }
+                    else if running > 0 { "running" }
                     else if failed > 0 && passed == 0 { "failed" }
                     else if passed == total { "passed" }
                     else { "partial" };
