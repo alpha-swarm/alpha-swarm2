@@ -156,10 +156,15 @@ async fn process_pending(
                 let goal = task.task_description.clone();
                 let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
 
-                // Try to claim via NATS KV first
+                // Try to claim via NATS KV (skip if lease exists from previous daemon)
                 if let Some(sched) = scheduler {
-                    if !sched.try_claim(&id).await.unwrap_or(false) {
-                        continue; // Another daemon claimed it
+                    match sched.try_claim(&id).await {
+                        Ok(true) => { info!(id = %id, "Claimed via NATS KV"); }
+                        Ok(false) => {
+                            info!(id = %id, "NATS KV claim failed (lease exists), proceeding with SurrealDB claim");
+                            // Don't skip — SurrealDB atomic claim is the fallback
+                        }
+                        Err(e) => { warn!(id = %id, error = %e, "NATS KV claim error"); }
                     }
                 }
 
