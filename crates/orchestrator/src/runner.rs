@@ -86,9 +86,21 @@ impl SwarmRunner {
     pub async fn run(&self, goal: &str) -> Result<SwarmResult> {
         let start = Instant::now();
 
-        // 1. Discover repo files
+        // 1. Discover repo files + index embeddings for RAG
         let repo_files = discover_source_files(&self.repo_path)?;
         info!(file_count = repo_files.len(), "Discovered repo files");
+
+        // Index file embeddings for RAG retrieval (best-effort, async)
+        if let Some(store) = &self.store {
+            let store = Arc::clone(store);
+            let ollama = Arc::clone(&self.ollama);
+            let project = self.project.clone();
+            let repo_path = self.repo_path.clone();
+            let files = repo_files.clone();
+            tokio::spawn(async move {
+                index_file_embeddings(&store, &ollama, &project, &repo_path, &files).await;
+            });
+        }
 
         // 2. Plan: decompose goal into sub-tasks
         let tasks = plan_goal(&self.router, goal, &repo_files).await
@@ -267,4 +279,60 @@ fn discover_source_files(repo: &PathBuf) -> Result<Vec<String>> {
     walk(repo, repo, &extensions, &mut files);
     files.sort();
     Ok(files)
+}
+
+/// Index file embeddings for RAG — runs in background, best-effort.
+/// For each source file, creates a summary (first line + signature) and embeds it.
+async fn index_file_embeddings(
+    store: &knowledge_base::KnowledgeStore,
+    ollama: &inference_client::OllamaBackend,
+    project: &str,
+    repo_path: &std::path::Path,
+    files: &[String],
+) {
+    let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
+        .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
+
+    /// Max files to embed per run (avoid overloading Ollama).
+    const MAX_FILES_TO_EMBED: usize = 50;
+    /// Max chars of file content to summarize for embedding.
+    const SUMMARY_CHARS: usize = 500;
+
+    let mut indexed = 0;
+    for file_path in files.iter().take(MAX_FILES_TO_EMBED) {
+        let full_path = repo_path.join(file_path);
+        let content = match std::fs::read_to_string(&full_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Build summary: filename + first few lines + signatures
+        let lines: Vec<&str> = content.lines().collect();
+        let first_lines: String = lines.iter().take(5).cloned().collect::<Vec<_>>().join("\n");
+        let sigs: Vec<String> = lines.iter()
+            .filter(|l| {
+                let t = l.trim();
+                t.starts_with("pub fn ") || t.starts_with("fn ") || t.starts_with("pub struct ")
+                    || t.starts_with("struct ") || t.starts_with("impl ") || t.starts_with("pub trait ")
+            })
+            .take(10)
+            .map(|l| l.trim().to_string())
+            .collect();
+
+        let summary = format!("{file_path}\n{first_lines}\n{}", sigs.join("\n"));
+        let summary_truncated: String = summary.chars().take(SUMMARY_CHARS).collect();
+
+        // Embed the summary
+        match ollama.embed(&embed_model, &summary_truncated).await {
+            Ok(embedding) => {
+                let _ = store.store_file_embedding(project, file_path, &summary_truncated, &embedding).await;
+                indexed += 1;
+            }
+            Err(_) => continue,
+        }
+    }
+
+    if indexed > 0 {
+        info!(indexed, total = files.len(), "Indexed file embeddings for RAG");
+    }
 }

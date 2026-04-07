@@ -42,7 +42,9 @@ impl KnowledgeStore {
              DEFINE INDEX IF NOT EXISTS idx_status ON TABLE agent_run FIELDS status;
              DEFINE INDEX IF NOT EXISTS idx_project_status ON TABLE agent_run FIELDS project, status;
              DEFINE TABLE IF NOT EXISTS goal_plan SCHEMALESS;
-             DEFINE INDEX IF NOT EXISTS idx_plan_run ON TABLE goal_plan FIELDS run_id;"
+             DEFINE INDEX IF NOT EXISTS idx_plan_run ON TABLE goal_plan FIELDS run_id;
+             DEFINE TABLE IF NOT EXISTS file_embedding SCHEMALESS;
+             DEFINE INDEX IF NOT EXISTS idx_file_project ON TABLE file_embedding FIELDS project, file_path;"
         )
         .await
         .context("Failed to initialize schema")?;
@@ -249,6 +251,64 @@ impl KnowledgeStore {
             .filter_map(|v| serde_json::from_value(v).ok())
             .collect();
         Ok(errors)
+    }
+
+    // --- RAG: File-level embeddings for context retrieval ---
+
+    /// Store or update an embedding for a file in a project.
+    pub async fn store_file_embedding(&self, project: &str, file_path: &str, summary: &str, embedding: &[f32]) -> Result<()> {
+        let project = project.to_string();
+        let file_path = file_path.to_string();
+        let summary = summary.to_string();
+        let embedding = serde_json::to_value(embedding)?;
+
+        self.db.query(
+            "UPSERT file_embedding SET project = $project, file_path = $file_path, summary = $summary, embedding = $embedding, updated_at = time::now() WHERE project = $project AND file_path = $file_path"
+        )
+        .bind(("project", project))
+        .bind(("file_path", file_path))
+        .bind(("summary", summary))
+        .bind(("embedding", embedding))
+        .await
+        .context("Failed to store file embedding")?;
+        Ok(())
+    }
+
+    /// Find the most relevant files for a task using vector similarity.
+    /// Returns (file_path, summary, similarity_score).
+    pub async fn find_relevant_files(
+        &self,
+        project: &str,
+        task_embedding: &[f32],
+        limit: usize,
+        min_similarity: f32,
+    ) -> Result<Vec<(String, String, f32)>> {
+        let project = project.to_string();
+        let embedding = serde_json::to_value(task_embedding)?;
+
+        let mut result = self.db.query(
+            "SELECT file_path, summary, vector::similarity::cosine(embedding, $embedding) AS similarity
+             FROM file_embedding
+             WHERE project = $project
+               AND embedding IS NOT NONE
+               AND vector::similarity::cosine(embedding, $embedding) >= $min_sim
+             ORDER BY similarity DESC
+             LIMIT $limit"
+        )
+        .bind(("project", project))
+        .bind(("embedding", embedding))
+        .bind(("min_sim", min_similarity))
+        .bind(("limit", limit as i64))
+        .await
+        .context("Failed to find relevant files")?;
+
+        let rows: Vec<serde_json::Value> = result.take(0)?;
+        Ok(rows.iter().filter_map(|v| {
+            let path = v.get("file_path")?.as_str()?.to_string();
+            let summary = v.get("summary")?.as_str()?.to_string();
+            let sim = v.get("similarity")?.as_f64()? as f32;
+            Some((path, summary, sim))
+        }).collect())
     }
 
     // --- Goal Plan CRUD ---
