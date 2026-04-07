@@ -61,9 +61,14 @@ pub fn parse_edits(response: &str) -> Result<Vec<FileEdit>, ParseError> {
         let block_start = pos + start + 3;
 
         let Some(end_offset) = response[block_start..].find(">>>") else {
-            return Err(ParseError(format!(
-                "Unclosed edit block starting at position {}", pos + start
-            )));
+            // Unclosed block — try to salvage by treating rest of response as the block
+            let block = response[block_start..].trim();
+            if !block.is_empty() {
+                if let Ok(edit) = parse_single_block(block) {
+                    edits.push(edit);
+                }
+            }
+            break; // No more complete blocks possible
         };
         let block_end = block_start + end_offset;
         let block = response[block_start..block_end].trim();
@@ -87,9 +92,8 @@ pub fn parse_actions(response: &str) -> Result<Vec<AgentAction>, ParseError> {
         let block_start = pos + start + 3;
 
         let Some(end_offset) = response[block_start..].find(">>>") else {
-            return Err(ParseError(format!(
-                "Unclosed block starting at position {}", pos + start
-            )));
+            // Unclosed block — salvage what we can
+            break;
         };
         let block_end = block_start + end_offset;
         let block = response[block_start..block_end].trim();
