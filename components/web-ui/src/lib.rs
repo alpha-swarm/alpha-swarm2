@@ -736,17 +736,13 @@ fn api_plan_feedback(response_out: ResponseOutparam, run_id: &str, body: &[u8]) 
     let safe_id = sanitize_id(run_id);
     let safe_fb = feedback.replace('\'', "");
 
-    // Update run status + store feedback on latest plan
-    let update_run = if safe_id.contains(':') {
-        format!("UPDATE {} SET status = 'planning', progress_message = 'Re-planning with feedback...'", safe_id)
+    // Single UPDATE — set status to planning (daemon will pick it up and re-plan)
+    // Feedback stored on the goal_plan by the daemon during re-planning
+    let query = if safe_id.contains(':') {
+        format!("UPDATE {} SET status = 'planning', progress_message = 'Re-planning with feedback: {}'", safe_id, safe_fb)
     } else {
-        format!("UPDATE agent_run:{} SET status = 'planning', progress_message = 'Re-planning with feedback...'", safe_id)
+        format!("UPDATE agent_run:{} SET status = 'planning', progress_message = 'Re-planning with feedback: {}'", safe_id, safe_fb)
     };
-    let update_plan = format!(
-        "UPDATE goal_plan SET user_feedback = '{}' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
-        safe_fb, safe_id
-    );
-    let query = format!("{update_run}; {update_plan}");
     match surreal_query(&query) {
         Ok(_) => respond_json(response_out, 200, r#"{"status":"replanning"}"#),
         Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
@@ -755,25 +751,19 @@ fn api_plan_feedback(response_out: ResponseOutparam, run_id: &str, body: &[u8]) 
 
 fn api_plan_approve(response_out: ResponseOutparam, run_id: &str) {
     let safe_id = sanitize_id(run_id);
-    // Use direct record ID syntax for SurrealDB (no quotes around record IDs)
+    // Simple single UPDATE — no multi-statement, no goal_plan update
     let query = if safe_id.contains(':') {
-        format!(
-            "UPDATE {} SET status = 'approved', progress_message = 'Plan approved, starting execution...';
-             UPDATE goal_plan SET status = 'approved' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
-            safe_id, safe_id
-        )
+        format!("UPDATE {} SET status = 'approved', progress_message = 'Plan approved, starting execution...'", safe_id)
     } else {
-        format!(
-            "UPDATE agent_run:{} SET status = 'approved', progress_message = 'Plan approved, starting execution...';
-             UPDATE goal_plan SET status = 'approved' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
-            safe_id, safe_id
-        )
+        format!("UPDATE agent_run:{} SET status = 'approved', progress_message = 'Plan approved, starting execution...'", safe_id)
     };
     match surreal_query(&query) {
-        Ok(_) => respond_json(response_out, 200, r#"{"status":"approved"}"#),
+        Ok(body) => respond_json(response_out, 200, &format!(r#"{{"status":"approved","debug":{}}}"#, body)),
         Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
     }
 }
+
+// Old multi-statement approve removed — single UPDATE works reliably
 
 fn api_plan_edit(response_out: ResponseOutparam, run_id: &str, body: &[u8]) {
     let body_str = String::from_utf8_lossy(body);
