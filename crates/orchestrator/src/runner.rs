@@ -215,6 +215,15 @@ impl SwarmRunner {
         });
 
         let quality_passed = if any_applied && has_code_changes {
+            // Auto-format before quality gate — models often get whitespace wrong
+            if self.repo_path.join("Cargo.toml").exists() {
+                let _ = std::process::Command::new("cargo")
+                    .args(["fmt"])
+                    .current_dir(&self.repo_path)
+                    .output();
+                info!("Auto-formatted with cargo fmt before quality gate");
+            }
+
             info!("Running quality gate (code files modified)");
             let config = quality_gate_lib::detect_toolchain(&self.repo_path);
             match quality_gate_lib::run_all(&self.repo_path, &config).await {
