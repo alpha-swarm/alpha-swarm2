@@ -10,8 +10,11 @@ pub enum BackendKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Complexity {
+    #[serde(alias = "Simple", alias = "SIMPLE")]
     Simple,
+    #[serde(alias = "Medium", alias = "MEDIUM")]
     Medium,
+    #[serde(alias = "Complex", alias = "COMPLEX")]
     Complex,
 }
 

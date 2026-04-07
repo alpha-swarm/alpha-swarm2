@@ -718,19 +718,17 @@ fn api_plan_feedback(response_out: ResponseOutparam, run_id: &str, body: &[u8]) 
     let safe_id = sanitize_id(run_id);
     let safe_fb = feedback.replace('\'', "");
 
-    let query = if safe_id.contains(':') {
-        format!(
-            "UPDATE {} SET status = 'planning', progress_message = 'Re-planning with feedback...';
-             UPDATE goal_plan SET user_feedback = '{}' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
-            safe_id, safe_fb, safe_id
-        )
+    // Update run status + store feedback on latest plan
+    let update_run = if safe_id.contains(':') {
+        format!("UPDATE {} SET status = 'planning', progress_message = 'Re-planning with feedback...'", safe_id)
     } else {
-        format!(
-            "UPDATE agent_run:{} SET status = 'planning', progress_message = 'Re-planning with feedback...';
-             UPDATE goal_plan SET user_feedback = '{}' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
-            safe_id, safe_fb, safe_id
-        )
+        format!("UPDATE agent_run:{} SET status = 'planning', progress_message = 'Re-planning with feedback...'", safe_id)
     };
+    let update_plan = format!(
+        "UPDATE goal_plan SET user_feedback = '{}' WHERE run_id = '{}' ORDER BY version DESC LIMIT 1",
+        safe_fb, safe_id
+    );
+    let query = format!("{update_run}; {update_plan}");
     match surreal_query(&query) {
         Ok(_) => respond_json(response_out, 200, r#"{"status":"replanning"}"#),
         Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),

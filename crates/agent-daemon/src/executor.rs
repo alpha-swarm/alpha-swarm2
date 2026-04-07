@@ -114,22 +114,38 @@ async fn handle_planning(
     let repo_files = discover_source_files(&repo_path);
     let start = std::time::Instant::now();
 
-    // Check for previous feedback
-    let feedback = match store.get_latest_plan(task_id).await {
-        Ok(Some(prev)) => prev.user_feedback.clone(),
-        _ => None,
-    };
-    let version = match store.get_latest_plan(task_id).await {
-        Ok(Some(prev)) => prev.version + 1,
-        _ => 1,
+    // Check for previous plans and feedback (for iterative re-planning)
+    let previous_plans = store.get_plans(task_id).await.unwrap_or_default();
+    let version = previous_plans.last().map(|p| p.version + 1).unwrap_or(1);
+
+    // Build planning prompt with full conversation history
+    let plan_goal = if previous_plans.is_empty() {
+        goal.to_string()
+    } else {
+        let mut context = format!("{}\n\n", goal);
+        for plan in &previous_plans {
+            // Show previous plan
+            let task_list: Vec<String> = plan.sub_tasks.iter()
+                .map(|t| format!("  - {}: {} (files: {:?}, {})", t.id, t.description, t.files, t.complexity))
+                .collect();
+            context.push_str(&format!("PREVIOUS PLAN (v{}):\n{}\n\n", plan.version, task_list.join("\n")));
+
+            // Show user feedback if any
+            if let Some(fb) = &plan.user_feedback {
+                context.push_str(&format!("USER FEEDBACK:\n{}\n\n", fb));
+            }
+        }
+        context.push_str("Generate an improved plan addressing all feedback. Output ONLY the JSON array.");
+        context
     };
 
-    // Build planning prompt with feedback if re-planning
-    let plan_goal = if let Some(fb) = &feedback {
-        format!("{}\n\nUSER FEEDBACK ON PREVIOUS PLAN:\n{}\n\nGenerate an improved plan addressing the feedback.", goal, fb)
+    // Update progress with iteration info
+    let progress = if version > 1 {
+        format!("Re-planning (v{}) with user feedback...", version)
     } else {
-        goal.to_string()
+        "Planning goal decomposition...".to_string()
     };
+    let _ = store.db_query_raw(&format_update(task_id, &format!("SET progress_message = '{}'", progress.replace('\'', "")))).await;
 
     match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files).await {
         Ok(tasks) => {
@@ -157,7 +173,7 @@ async fn handle_planning(
                 tokens_input: 0,
                 tokens_output: 0,
                 duration_ms,
-                user_feedback: feedback,
+                user_feedback: previous_plans.last().and_then(|p| p.user_feedback.clone()),
                 status: "draft".to_string(),
                 context_files: repo_files,
                 web_searches: vec![],
