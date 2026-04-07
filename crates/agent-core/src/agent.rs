@@ -27,6 +27,7 @@ fn tier_options(tier: &swarm_config::TierConfig) -> InferenceOptions {
     InferenceOptions {
         max_tokens: Some(tier.context_window),
         preferred_model: Some(tier.model.clone()),
+        preferred_backend: Some(inference_client::BackendKind::Ollama),
         ..Default::default()
     }
 }
