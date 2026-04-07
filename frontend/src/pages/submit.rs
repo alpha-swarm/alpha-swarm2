@@ -10,6 +10,8 @@ pub fn SubmitPage() -> impl IntoView {
     let selected_project = RwSignal::new(String::new());
     let submitting = RwSignal::new(false);
     let plan_first = RwSignal::new(true);
+    let error_msg = RwSignal::new(Option::<String>::None);
+    let nav = use_navigate();
 
     wasm_bindgen_futures::spawn_local(async move {
         if let Ok(projects) = api::list_projects().await {
@@ -29,6 +31,8 @@ pub fn SubmitPage() -> impl IntoView {
         let project_clone = project.clone();
         let use_plan = plan_first.get();
 
+        let nav = nav.clone();
+        error_msg.set(None);
         wasm_bindgen_futures::spawn_local(async move {
             let submit_task = api::SubmitTask {
                 task,
@@ -43,11 +47,11 @@ pub fn SubmitPage() -> impl IntoView {
             match result {
                 Ok(_) => {
                     task_text.set(String::new());
-                    let nav = use_navigate();
+                    // Navigate to project page — kanban shows plan status + "Review Plan" button
                     nav(&format!("/project/{project_clone}"), Default::default());
                 }
                 Err(e) => {
-                    web_sys::console::error_1(&format!("Submit failed: {e}").into());
+                    error_msg.set(Some(format!("Submit failed: {e}")));
                 }
             }
             submitting.set(false);
@@ -96,6 +100,10 @@ pub fn SubmitPage() -> impl IntoView {
                     <span style="font-weight:400;color:var(--muted)">" — review the plan before agents start executing"</span>
                 </label>
             </div>
+
+            {move || error_msg.get().map(|e| view! {
+                <div style="color:var(--error);background:var(--error-bg);padding:10px 14px;border-radius:var(--radius-sm);font-size:13px;margin-bottom:8px">{e}</div>
+            })}
 
             <div style="padding:12px 0;font-size:13px;color:var(--muted)">
                 {move || if plan_first.get() {
