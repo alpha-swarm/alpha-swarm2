@@ -17,13 +17,19 @@ pub fn ProjectDetailPage() -> impl IntoView {
     let runs = RwSignal::new(Vec::<AgentRun>::new());
     let run_detail = RwSignal::new(Option::<AgentRun>::None);
 
-    // Initial load + auto-refresh every 5s
+    // Initial load + auto-refresh every 5s (only update if data changed)
     let pn = name();
     wasm_bindgen_futures::spawn_local(async move {
         loop {
-            if let Ok(m) = api::get_metrics(&pn).await { metrics.set(m); }
-            if let Ok(g) = api::get_goals(&pn).await { goals.set(g); }
-            if let Ok(r) = api::list_runs(&pn).await { runs.set(r); }
+            if let Ok(m) = api::get_metrics(&pn).await {
+                if m != metrics.get() { metrics.set(m); }
+            }
+            if let Ok(g) = api::get_goals(&pn).await {
+                if g != goals.get() { goals.set(g); }
+            }
+            if let Ok(r) = api::list_runs(&pn).await {
+                if r != runs.get() { runs.set(r); }
+            }
             sleep_ms(5000).await;
         }
     });

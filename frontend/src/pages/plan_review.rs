@@ -30,9 +30,13 @@ pub fn PlanReviewPage() -> impl IntoView {
                 sleep_ms(5000).await;
                 if let Ok(d) = api::get_run_detail(&rid).await {
                     let status = d.status.clone();
-                    run.set(Some(d));
+                    // Only update if status or progress changed
+                    let changed = run.get().map(|r| r.status != d.status || r.progress_message != d.progress_message).unwrap_or(true);
+                    if changed { run.set(Some(d)); }
                     if status == "planned" || status == "approved" || status == "running" || status == "passed" || status == "failed" {
-                        if let Ok(p) = api::get_plans(&rid).await { plans.set(p); }
+                        if let Ok(p) = api::get_plans(&rid).await {
+                            if p != plans.get() { plans.set(p); }
+                        }
                     }
                     if status != "planning" {
                         poll_count.set(poll_count.get() + 1);
