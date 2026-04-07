@@ -392,8 +392,19 @@ fn write_prompt_file(iteration: usize, name: &str, prompt: &str) {
     fs::write(&path, prompt).expect("write prompt");
 }
 
+mod benchmark;
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.len() > 1 && args[1] == "benchmark" {
+        benchmark::run_benchmark();
+        return;
+    }
+
     println!("=== Prompt Evaluator ===\n");
+    println!("Usage: prompt-eval           — run prompt evaluation");
+    println!("       prompt-eval benchmark — run goal benchmark\n");
 
     fs::create_dir_all(RESULTS_DIR).ok();
     fs::create_dir_all(PROMPTS_DIR).ok();
