@@ -22,6 +22,7 @@ pub fn RunDetailPanel(
     let prompt = run.prompt_sent.clone();
     let response = run.response_text.clone();
     let attempts = run.attempts.clone();
+    let tool_calls_list = run.tool_calls.clone();
     let started = run.started_at.clone();
     let last_active = run.last_activity_at.clone();
     let is_running = run.status == "running";
@@ -91,6 +92,37 @@ pub fn RunDetailPanel(
                                             </div>
                                             {err.map(|e| view! {
                                                 <div style="color:var(--error);margin-top:2px">{e}</div>
+                                            })}
+                                        </div>
+                                    }
+                                }).collect_view()}
+                            </div>
+                        </details>
+                    }
+                })}
+
+                // Tool calls section
+                {(!tool_calls_list.is_empty()).then(|| {
+                    let calls = tool_calls_list.clone();
+                    view! {
+                        <details style="margin-top:8px" open>
+                            <summary style="cursor:pointer;font-size:12px;color:var(--accent);font-weight:500">"Tool Calls ("{calls.len()}")"</summary>
+                            <div style="margin-top:6px">
+                                {calls.into_iter().map(|tc| {
+                                    let icon = if tc.is_error { "ERR" } else { "OK" };
+                                    let dur = format_duration(tc.duration_ms);
+                                    view! {
+                                        <div style="padding:4px 0;border-bottom:1px solid var(--border);font-size:12px">
+                                            <div style="display:flex;align-items:center;gap:6px">
+                                                <span style="font-weight:600;color:var(--accent)">{tc.tool}</span>
+                                                <span class=if tc.is_error { "badge failed" } else { "badge passed" } style="font-size:10px;padding:1px 6px">{icon}</span>
+                                                <span style="margin-left:auto;color:var(--muted)">{dur}</span>
+                                            </div>
+                                            {(!tc.params_preview.is_empty()).then(|| view! {
+                                                <div style="font-size:11px;color:var(--muted);margin-top:2px;font-family:monospace">{tc.params_preview}</div>
+                                            })}
+                                            {(!tc.result_preview.is_empty()).then(|| view! {
+                                                <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;max-height:60px;overflow:hidden">{tc.result_preview}</div>
                                             })}
                                         </div>
                                     }

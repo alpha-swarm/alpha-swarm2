@@ -15,6 +15,10 @@ use crate::prompt::build_prompt;
 
 /// Max characters to store in attempt preview fields.
 const ATTEMPT_PREVIEW_CHARS: usize = 500;
+/// Max characters for tool result fed back to model context.
+const TOOL_RESULT_MAX_CHARS: usize = 2_000;
+/// Max characters for tool call/result previews stored in records.
+const TOOL_RECORD_PREVIEW_CHARS: usize = 200;
 
 // --- Helper functions ---
 
@@ -71,6 +75,7 @@ pub struct AgentResult {
     pub run_id: Option<String>,
     pub attempt: u32,
     pub escalated_from: Option<String>,
+    pub tool_calls: Vec<knowledge_base::ToolCallRecord>,
 }
 
 /// Configuration for knowledge-aware agent.
@@ -156,6 +161,7 @@ impl Agent {
                         run_id: None,
                         attempt: 1,
                         escalated_from: None,
+                        tool_calls: Vec::new(),
                     });
                 }
 
@@ -286,6 +292,7 @@ impl Agent {
                     run_id,
                     attempt: 1,
                     escalated_from: None,
+                    tool_calls: Vec::new(),
                 });
             }
         };
@@ -346,6 +353,7 @@ impl Agent {
             run_id,
             attempt: 1,
             escalated_from: None,
+            tool_calls: Vec::new(),
         })
     }
 
@@ -482,6 +490,7 @@ impl Agent {
                 run_id: last_result.run_id,
                 attempt,
                 escalated_from: last_result.escalated_from,
+                tool_calls: Vec::new(),
             };
 
             self.update_attempts(&last_result.run_id, &attempts).await;
@@ -548,6 +557,7 @@ impl Agent {
         let mut total_tokens_out = 0u32;
         let mut total_duration = 0u64;
         let mut all_edits = Vec::new();
+        let mut tool_call_records = Vec::new();
 
         for step in 1..=max_steps {
             let response = match self.router.chat(&messages, complexity, &options).await {
@@ -605,11 +615,21 @@ impl Agent {
                         let params: serde_json::Value = serde_json::from_str(&call.params_json)
                             .unwrap_or(serde_json::Value::Object(Default::default()));
                         info!(step, tool = %call.name, "Executing tool");
-                        let result = tools.execute(&call.name, params, &ctx).await;
+                        let result = tools.execute(&call.name, params.clone(), &ctx).await;
                         let prefix = if result.is_error { "ERROR" } else { "OK" };
+
+                        // Record tool call
+                        tool_call_records.push(knowledge_base::ToolCallRecord {
+                            tool: call.name.clone(),
+                            params_preview: call.params_json.chars().take(TOOL_RECORD_PREVIEW_CHARS).collect(),
+                            result_preview: result.content.chars().take(TOOL_RECORD_PREVIEW_CHARS).collect(),
+                            is_error: result.is_error,
+                            duration_ms: result.duration_ms,
+                        });
+
                         // Truncate long results to avoid context bloat
-                        let content = if result.content.len() > 2000 {
-                            format!("{}...(truncated)", &result.content[..2000])
+                        let content = if result.content.len() > TOOL_RESULT_MAX_CHARS {
+                            format!("{}...(truncated)", &result.content[..TOOL_RESULT_MAX_CHARS])
                         } else {
                             result.content
                         };
@@ -665,6 +685,7 @@ impl Agent {
             run_id: None,
             attempt: 1,
             escalated_from: None,
+            tool_calls: tool_call_records,
         })
     }
 

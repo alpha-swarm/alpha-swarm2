@@ -32,6 +32,18 @@ pub struct AgentRun {
     pub parent_run_id: Option<String>,
     #[serde(default)]
     pub progress_message: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallRecord>,
+}
+
+/// Record of a tool call made during agent execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    pub tool: String,
+    pub params_preview: String,
+    pub result_preview: String,
+    pub is_error: bool,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +136,7 @@ impl AgentRun {
             last_activity_at: None,
             parent_run_id: None,
             progress_message: None,
+            tool_calls: Vec::new(),
         }
     }
 }

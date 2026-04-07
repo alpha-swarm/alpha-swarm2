@@ -143,9 +143,11 @@ impl SwarmRunner {
 
                 info!(task_id = %task.id, desc = %task.description, "Running agent");
 
-                // Standard run() — 94% format compliance, proven reliable
-                // TODO: enable tool loop when models handle larger context
-                let result = agent.run(&task.description, &task.files, task.complexity).await;
+                // Tool-use loop: model makes small focused calls (read_file, grep, etc.)
+                // then produces edits. Much faster than one big LLM call with all files.
+                let tools = swarm_tools::ToolRegistry::with_defaults();
+                const MAX_TOOL_STEPS: u32 = 10;
+                let result = agent.run_with_tools(&task.description, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
                 (task, result)
             });
         }

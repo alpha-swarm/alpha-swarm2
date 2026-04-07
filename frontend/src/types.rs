@@ -62,6 +62,22 @@ pub struct AgentRun {
     pub parent_run_id: Option<String>,
     #[serde(default)]
     pub progress_message: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallRecord>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ToolCallRecord {
+    #[serde(default)]
+    pub tool: String,
+    #[serde(default)]
+    pub params_preview: String,
+    #[serde(default)]
+    pub result_preview: String,
+    #[serde(default)]
+    pub is_error: bool,
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
