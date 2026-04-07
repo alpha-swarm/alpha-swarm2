@@ -33,3 +33,41 @@ pub const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", "dist", ".was
 pub fn is_code_file(path: &str) -> bool {
     CODE_EXTENSIONS.iter().any(|ext| path.ends_with(&format!(".{ext}")))
 }
+
+/// Reject obviously invalid/placeholder file paths from model output.
+/// Returns true if the path looks like a real project file.
+pub fn is_valid_file_path(path: &str) -> bool {
+    let path = path.trim();
+    if path.is_empty() { return false; }
+
+    // Reject placeholder/example paths
+    const REJECT_PATTERNS: &[&str] = &[
+        "path/to/",
+        "example",
+        "your_",
+        "my_file",
+        "new_file.rs",
+        "old_file",
+        "{",
+        "<",
+        "...",
+        "file.ext",
+        "foo.",
+        "bar.",
+        "baz.",
+        "test_file",
+    ];
+
+    let lower = path.to_lowercase();
+    for pattern in REJECT_PATTERNS {
+        if lower.contains(pattern) { return false; }
+    }
+
+    // Must have a file extension
+    if !path.contains('.') { return false; }
+
+    // Must not start with / (absolute paths)
+    if path.starts_with('/') { return false; }
+
+    true
+}

@@ -303,7 +303,8 @@ impl Agent {
             if !wrapped.is_empty() { wrapped } else { edits }
         } else { edits };
 
-        info!(edit_count = edits.len(), "Parsed file edits");
+        let edits = self.validate_edits(edits);
+        info!(edit_count = edits.len(), "Parsed and validated file edits");
 
         // 5. Apply edits
         if !edits.is_empty() {
@@ -636,10 +637,13 @@ impl Agent {
                         feedback_parts.push(format!("[{} {}] {}", call.name, prefix, content));
                     }
                     AgentAction::Edit(edit) => {
-                        all_edits.push(edit.clone());
-                        if let Err(e) = self.apply_edits(&[edit.clone()]) {
+                        let validated = self.validate_edits(vec![edit.clone()]);
+                        if validated.is_empty() {
+                            feedback_parts.push("[edit REJECTED] Invalid file path".into());
+                        } else if let Err(e) = self.apply_edits(&validated) {
                             feedback_parts.push(format!("[edit ERROR] {e}"));
                         } else {
+                            all_edits.extend(validated);
                             feedback_parts.push("[edit OK] Applied".into());
                         }
                     }
@@ -687,6 +691,23 @@ impl Agent {
             escalated_from: None,
             tool_calls: tool_call_records,
         })
+    }
+
+    /// Filter out edits with invalid/placeholder file paths.
+    fn validate_edits(&self, edits: Vec<FileEdit>) -> Vec<FileEdit> {
+        edits.into_iter().filter(|edit| {
+            let path = match edit {
+                FileEdit::Edit { path, .. } => path,
+                FileEdit::Create { path, .. } => path,
+                FileEdit::Delete { path } => path,
+            };
+            if crate::code_utils::is_valid_file_path(path) {
+                true
+            } else {
+                warn!(path = %path, "Rejected edit with invalid/placeholder path");
+                false
+            }
+        }).collect()
     }
 
     fn read_files(&self, paths: &[String]) -> Result<Vec<(String, String)>> {

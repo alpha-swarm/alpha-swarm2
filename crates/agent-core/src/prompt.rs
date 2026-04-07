@@ -40,10 +40,10 @@ impl AgentType {
     }
 }
 
-const EDIT_FORMAT: &str = "\nOUTPUT FORMAT:\nFor each file you want to modify, output a block like this:\n\n<<<EDIT path/to/file.rs\n--- OLD\nthe exact lines to replace (include enough context to be unique)\n--- NEW\nthe replacement lines\n>>>\n\nFor new files:\n\n<<<CREATE path/to/new_file.rs\nfile contents here\n>>>\n\nFor deleted files:\n\n<<<DELETE path/to/file.rs\n>>>\n\nOutput ONLY <<< blocks. No explanation before or after unless the task cannot be done.";
+const EDIT_FORMAT: &str = "\nOUTPUT FORMAT:\nUse ONLY the exact file paths from the FILES section above. Never invent paths.\n\n<<<EDIT {actual_file_from_task}\n--- OLD\nexact existing lines to find\n--- NEW\nreplacement lines\n>>>\n\n<<<CREATE {actual_file_from_task}\nfile contents\n>>>\n\n<<<DELETE {actual_file_from_task}\n>>>\n\nRULES:\n- Use ONLY file paths listed in the FILES section or mentioned in the TASK\n- Never use example paths like path/to/file.rs\n- Output ONLY <<< blocks, no explanation";
 
 /// Extended format for tool-use loop — includes TOOL and DONE blocks.
-const TOOL_FORMAT: &str = "\nOUTPUT FORMAT:\nYou can use tools and edit files. Output ONLY <<< blocks.\n\nTo call a tool:\n\n<<<TOOL read_file\n{\"path\": \"src/main.rs\"}\n>>>\n\n<<<TOOL grep\n{\"pattern\": \"fn main\", \"path\": \"src/\"}\n>>>\n\n<<<TOOL run_tests\n{}\n>>>\n\nTo edit files:\n\n<<<EDIT path/to/file.rs\n--- OLD\nexact lines to replace\n--- NEW\nreplacement lines\n>>>\n\n<<<CREATE path/to/new_file.rs\nfile contents here\n>>>\n\n<<<DELETE path/to/file.rs\n>>>\n\nWhen finished:\n\n<<<DONE\nsummary of what was done\n>>>\n\nRULES:\n- Start your response with <<< immediately\n- You may call multiple tools, then edit files, then signal DONE\n- Tool results will be returned to you so you can decide next steps\n- No markdown, no explanations — only <<< blocks";
+const TOOL_FORMAT: &str = "\nOUTPUT FORMAT:\nYou can call tools and edit files. Output ONLY <<< blocks.\n\n<<<TOOL tool_name\n{\"param\": \"value\"}\n>>>\n\n<<<EDIT {actual_file_from_task}\n--- OLD\nexact existing lines\n--- NEW\nreplacement lines\n>>>\n\n<<<CREATE {actual_file_from_task}\nfile contents\n>>>\n\n<<<DONE\nwhat was done\n>>>\n\nRULES:\n- Use ONLY file paths from the FILES section or TASK description\n- Never use example/placeholder paths\n- Start with <<< immediately, no explanation\n- Call tools first to read files, then edit, then <<<DONE>>>";
 
 pub fn build_prompt(
     task_description: &str,
