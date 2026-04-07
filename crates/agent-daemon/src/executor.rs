@@ -256,6 +256,16 @@ async fn handle_execute(
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
 
+    // Lifecycle: on_agent_start — index embeddings if project not yet indexed
+    let embed_model = config.defaults.embed_model.clone();
+    let emb_manager = knowledge_base::embedding_manager::EmbeddingManager::new(
+        Arc::clone(&store), Arc::clone(&ollama), embed_model,
+    );
+    let indexed = emb_manager.on_agent_start(project, &repo_path).await;
+    if indexed > 0 {
+        info!(task_id, indexed, "Indexed project files for RAG");
+    }
+
     // Helper: update progress on the running task
     async fn update_progress(store: &KnowledgeStore, task_id: &str, msg: &str) {
         let now = chrono::Utc::now().to_rfc3339();
@@ -501,6 +511,11 @@ async fn handle_execute(
             }
 
             let _ = store.update_run(task_id, &final_run).await;
+
+            // Lifecycle: on_agent_done — update embeddings for modified files only
+            if !final_run.files_modified.is_empty() {
+                emb_manager.on_agent_done(project, &repo_path, &final_run.files_modified).await;
+            }
 
             // Emit completion event
             if let Some(pub_) = &publisher {

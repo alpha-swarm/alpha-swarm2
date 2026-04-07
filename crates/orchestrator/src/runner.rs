@@ -86,21 +86,11 @@ impl SwarmRunner {
     pub async fn run(&self, goal: &str) -> Result<SwarmResult> {
         let start = Instant::now();
 
-        // 1. Discover repo files + index embeddings for RAG
+        // 1. Discover repo files
+        // Note: file embedding indexing is handled by EmbeddingManager lifecycle
+        // hooks in executor.rs (on_agent_start / on_agent_done).
         let repo_files = discover_source_files(&self.repo_path)?;
         info!(file_count = repo_files.len(), "Discovered repo files");
-
-        // Index file embeddings for RAG retrieval (best-effort, async)
-        if let Some(store) = &self.store {
-            let store = Arc::clone(store);
-            let ollama = Arc::clone(&self.ollama);
-            let project = self.project.clone();
-            let repo_path = self.repo_path.clone();
-            let files = repo_files.clone();
-            tokio::spawn(async move {
-                index_file_embeddings(&store, &ollama, &project, &repo_path, &files).await;
-            });
-        }
 
         // 2. Plan: decompose goal into sub-tasks
         let tasks = plan_goal(&self.router, goal, &repo_files).await

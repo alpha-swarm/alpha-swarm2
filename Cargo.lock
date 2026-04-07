@@ -2296,6 +2296,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "inference-client",
  "serde",
  "serde_json",
  "surrealdb",

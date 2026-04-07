@@ -2,6 +2,7 @@ mod schema;
 mod store;
 mod queries;
 mod metrics;
+pub mod embedding_manager;
 
 pub use schema::*;
 pub use store::KnowledgeStore;
