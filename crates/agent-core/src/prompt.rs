@@ -49,19 +49,19 @@ pub fn build_prompt(
     build_prompt_with_type(task_description, files, AgentType::General)
 }
 
+/// Rough estimate of tokens from character count (1 token ≈ 4 chars for code).
+const CHARS_PER_TOKEN: usize = 4;
+/// Max chars for a single file before it gets summarized.
+const MAX_FILE_CHARS: usize = 8_000;
+/// Max total chars for all file context combined.
+const MAX_TOTAL_CONTEXT_CHARS: usize = 24_000;
+
 pub fn build_prompt_with_type(
     task_description: &str,
     files: &[(String, String)],
     agent_type: AgentType,
 ) -> Vec<ChatMessage> {
-    let mut file_context = String::new();
-    for (path, content) in files {
-        if content.is_empty() {
-            file_context.push_str(&format!("=== {path} === [NEW FILE — does not exist yet, use <<<CREATE>>> to create it]\n\n"));
-        } else {
-            file_context.push_str(&format!("=== {path} ===\n{content}\n\n"));
-        }
-    }
+    let file_context = build_file_context(files);
 
     let system = format!("{}{}", agent_type.role_description(), EDIT_FORMAT);
     let user_message = format!("TASK: {task_description}\n\nFILES:\n{file_context}");
@@ -70,6 +70,72 @@ pub fn build_prompt_with_type(
         ChatMessage::system(system),
         ChatMessage::user(user_message),
     ]
+}
+
+/// Build file context with smart truncation:
+/// - New files: just the header (no content to show)
+/// - Small files: full content
+/// - Large files: first chunk + signature summary
+/// - Total context capped to prevent model confusion
+fn build_file_context(files: &[(String, String)]) -> String {
+    let mut context = String::new();
+    let mut total_chars = 0;
+
+    for (path, content) in files {
+        if content.is_empty() {
+            let entry = format!("=== {path} === [NEW FILE — does not exist yet, use <<<CREATE>>> to create it]\n\n");
+            context.push_str(&entry);
+            total_chars += entry.len();
+            continue;
+        }
+
+        if total_chars > MAX_TOTAL_CONTEXT_CHARS {
+            // Over budget — just list remaining files without content
+            context.push_str(&format!("=== {path} === [{} lines, content omitted — context limit reached]\n\n", content.lines().count()));
+            continue;
+        }
+
+        if content.len() <= MAX_FILE_CHARS {
+            // Small file — include full content
+            let entry = format!("=== {path} ===\n{content}\n\n");
+            total_chars += entry.len();
+            context.push_str(&entry);
+        } else {
+            // Large file — include first chunk + summary of structure
+            let lines: Vec<&str> = content.lines().collect();
+            let total_lines = lines.len();
+
+            // Extract function/struct signatures as summary
+            let signatures: Vec<String> = lines.iter()
+                .enumerate()
+                .filter(|(_, line)| {
+                    let trimmed = line.trim();
+                    trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ")
+                        || trimmed.starts_with("pub struct ") || trimmed.starts_with("struct ")
+                        || trimmed.starts_with("pub enum ") || trimmed.starts_with("impl ")
+                        || trimmed.starts_with("pub trait ") || trimmed.starts_with("pub async fn ")
+                })
+                .map(|(i, line)| format!("  L{}: {}", i + 1, line.trim()))
+                .collect();
+
+            // Include first N lines for context
+            let preview_lines = 50.min(total_lines);
+            let preview: String = lines[..preview_lines].join("\n");
+
+            let summary = if signatures.is_empty() {
+                format!("=== {path} === [{total_lines} lines, showing first {preview_lines}]\n{preview}\n... ({} more lines)\n\n",
+                    total_lines - preview_lines)
+            } else {
+                format!("=== {path} === [{total_lines} lines, showing first {preview_lines} + structure]\n{preview}\n\n--- Structure ({} items) ---\n{}\n... ({} more lines)\n\n",
+                    signatures.len(), signatures.join("\n"), total_lines - preview_lines)
+            };
+
+            total_chars += summary.len();
+            context.push_str(&summary);
+        }
+    }
+
+    context
 }
 
 #[cfg(test)]
