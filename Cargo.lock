@@ -3148,6 +3148,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "prompt-eval"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "edit-parser",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "prost"
 version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3476,7 +3487,9 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "h2",
  "http",
  "http-body",
