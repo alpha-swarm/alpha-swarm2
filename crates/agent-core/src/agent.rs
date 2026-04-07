@@ -256,6 +256,22 @@ impl Agent {
             }
         };
 
+        // Auto-wrap: if no edits parsed but response has content, try wrapping as CREATE
+        let edits = if edits.is_empty() && !response.content.trim().is_empty() && !response.content.contains("<<<") {
+            let content = response.content.trim();
+            let is_conversational = content.starts_with("I ") || content.starts_with("Here ")
+                || content.starts_with("To ") || content.starts_with("You ")
+                || content.contains("you can") || content.contains("you should");
+
+            if !is_conversational {
+                if let Some(target) = file_paths.iter().find(|f| !self.repo_path.join(f).exists()).or_else(|| file_paths.first()) {
+                    info!(file = %target, "Auto-wrapping response as CREATE");
+                    let wrapped = format!("<<<CREATE {target}\n{content}\n>>>");
+                    parse_edits(&wrapped).unwrap_or(edits)
+                } else { edits }
+            } else { edits }
+        } else { edits };
+
         info!(edit_count = edits.len(), "Parsed file edits");
 
         // 5. Apply edits
@@ -524,18 +540,54 @@ impl Agent {
 
             info!(step, model = %response.model, tokens_out = response.tokens_output, "Tool loop step");
 
-            let actions = match parse_actions(&response.content) {
+            let content = response.content.trim();
+            let actions = match parse_actions(content) {
                 Ok(a) if !a.is_empty() => a,
                 _ => {
-                    // No actions parsed — try as plain edit blocks
-                    let edits = crate::parser::parse_edits(&response.content).unwrap_or_default();
+                    // No structured actions — try plain edit blocks
+                    let edits = crate::parser::parse_edits(content).unwrap_or_default();
                     if !edits.is_empty() {
                         for edit in &edits {
                             let _ = self.apply_edits(&[edit.clone()]);
                         }
                         all_edits.extend(edits);
+                        info!(step, edits = all_edits.len(), "Parsed plain edit blocks");
+                        break;
                     }
-                    info!(step, edits = all_edits.len(), "No structured actions, treating as final response");
+
+                    // Auto-wrap heuristic: if model output non-empty content without <<<
+                    // blocks, and we have a target file from the task, wrap it as CREATE.
+                    // Handles the "lazy model" case where 7B outputs content directly.
+                    if !content.is_empty() && !content.contains("<<<") {
+                        let is_conversational = content.starts_with("I ")
+                            || content.starts_with("Here ")
+                            || content.starts_with("To ")
+                            || content.starts_with("You ")
+                            || content.starts_with("The ")
+                            || content.starts_with("This ")
+                            || content.contains("you can")
+                            || content.contains("you should");
+
+                        if !is_conversational {
+                            // Looks like file content — find target file from task files
+                            if let Some(target) = file_paths.iter().find(|f| {
+                                !std::path::Path::new(&self.repo_path.join(f)).exists()
+                            }).or_else(|| file_paths.first()) {
+                                info!(step, file = %target, "Auto-wrapping response as CREATE (model skipped format)");
+                                let wrapped = format!("<<<CREATE {target}\n{content}\n>>>");
+                                let wrapped_edits = crate::parser::parse_edits(&wrapped).unwrap_or_default();
+                                if !wrapped_edits.is_empty() {
+                                    for edit in &wrapped_edits {
+                                        let _ = self.apply_edits(&[edit.clone()]);
+                                    }
+                                    all_edits.extend(wrapped_edits);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    info!(step, "No parseable actions, treating as final response");
                     break;
                 }
             };
