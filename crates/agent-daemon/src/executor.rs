@@ -32,7 +32,7 @@ fn format_update_where(task_id: &str, set_clause: &str, where_clause: &str) -> S
 
 fn discover_source_files(repo_path: &std::path::Path) -> Vec<String> {
     let mut files = Vec::new();
-    let extensions = ["rs", "ts", "js", "go", "py"];
+    let extensions = ["rs", "ts", "js", "go", "py", "md", "toml", "json", "yaml", "yml"];
     fn walk(dir: &std::path::Path, base: &std::path::Path, ext: &[&str], out: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {

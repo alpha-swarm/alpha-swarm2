@@ -36,7 +36,7 @@ max_context_files = 100
 
 # Agent: sub-task executor, medium model
 [tiers.agent]
-model = "deepseek-coder:33b"
+model = "qwen2.5-coder:7b"
 context_window = 16384
 time_limit_secs = 1800          # 30 min
 token_limit = 300000            # 300K tokens

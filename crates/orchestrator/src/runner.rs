@@ -242,7 +242,7 @@ impl SwarmRunner {
 
 fn discover_source_files(repo: &PathBuf) -> Result<Vec<String>> {
     let mut files = Vec::new();
-    let extensions = ["rs", "ts", "js", "go", "py"];
+    let extensions = ["rs", "ts", "js", "go", "py", "md", "toml", "json", "yaml", "yml"];
 
     fn walk(dir: &std::path::Path, base: &std::path::Path, ext: &[&str], out: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };

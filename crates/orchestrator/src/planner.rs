@@ -16,18 +16,21 @@ pub struct SubTask {
 const PLANNER_SYSTEM: &str = r#"You are a task decomposition agent. Given a high-level goal and a list of files in a repository, break the goal into independent sub-tasks that can be worked on in parallel by separate agents.
 
 RULES:
-- Each sub-task must list the specific files it will modify
+- Each sub-task must list the specific files it will modify or create
+- Files that don't exist yet CAN be listed — agents will create them
 - No two sub-tasks should modify the same file
 - Each sub-task should be small enough for a single agent with limited context
 - Classify each sub-task as simple, medium, or complex
+- Include relevant existing files as context (so the agent knows what to reference)
+- Prefer fewer, well-scoped tasks over many tiny ones
 
 OUTPUT FORMAT (JSON array):
 ```json
 [
   {
     "id": "task-1",
-    "description": "What the agent should do",
-    "files": ["src/foo.rs", "src/bar.rs"],
+    "description": "Clear description of what to do. Be specific about the expected output.",
+    "files": ["path/to/existing_file.rs", "path/to/new_file.md"],
     "complexity": "simple"
   }
 ]

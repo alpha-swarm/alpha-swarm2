@@ -54,10 +54,14 @@ fn GoalCard(
     let agent_count = goal.total;
     let rerun_text = goal.goal.clone();
     let can_rerun = !rerun_project.is_empty();
-    // Show progress from the first running agent (the daemon run)
+    // Show progress from the first running/planning agent
     let progress = agents.iter()
-        .find(|a| a.status == "running")
+        .find(|a| a.status == "running" || a.status == "planning")
         .and_then(|a| a.progress_message.clone());
+    // Check if any agent is in "planned" status (awaiting approval)
+    let planned_agent = agents.iter()
+        .find(|a| a.status == "planned")
+        .and_then(|a| a.id.clone());
 
     view! {
         <div class="card" style="margin-bottom:8px;padding:12px 14px">
@@ -92,6 +96,14 @@ fn GoalCard(
                     <span style="margin-left:8px;color:var(--accent);font-style:italic">{p}</span>
                 })}
             </div>
+            {planned_agent.map(|id| {
+                let href = format!("/plan/{}", id);
+                view! {
+                    <a href=href class="btn btn-primary" style="margin-top:8px;font-size:12px;text-decoration:none;display:inline-block">
+                        "Review Plan"
+                    </a>
+                }
+            })}
 
             {move || expanded.get().then(|| {
                 let agents = agents.clone();

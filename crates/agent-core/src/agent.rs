@@ -556,14 +556,10 @@ impl Agent {
             let (msg, tok_in, tok_out, dur) = match result {
                 Ok(r) => r,
                 Err(e) => {
-                    let err_str = e.to_string();
-                    if err_str.contains("does not support") {
-                        // Model doesn't support native tools — fall back to standard run
-                        info!(model, "Model doesn't support native tool calling, falling back to standard run");
-                        return self.run(task, file_paths, complexity).await;
-                    }
-                    warn!(step, error = %e, "Tool loop inference failed");
-                    break;
+                    // ANY error from tool calling → fall back to standard run()
+                    // This handles: "does not support tools", timeouts, connection errors
+                    info!(model, error = %e, "Tool calling failed, falling back to standard run");
+                    return self.run(task, file_paths, complexity).await;
                 }
             };
 
