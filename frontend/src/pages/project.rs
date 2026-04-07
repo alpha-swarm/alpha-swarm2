@@ -17,11 +17,15 @@ pub fn ProjectDetailPage() -> impl IntoView {
     let runs = RwSignal::new(Vec::<AgentRun>::new());
     let run_detail = RwSignal::new(Option::<AgentRun>::None);
 
+    // Initial load + auto-refresh every 5s
     let pn = name();
     wasm_bindgen_futures::spawn_local(async move {
-        if let Ok(m) = api::get_metrics(&pn).await { metrics.set(m); }
-        if let Ok(g) = api::get_goals(&pn).await { goals.set(g); }
-        if let Ok(r) = api::list_runs(&pn).await { runs.set(r); }
+        loop {
+            if let Ok(m) = api::get_metrics(&pn).await { metrics.set(m); }
+            if let Ok(g) = api::get_goals(&pn).await { goals.set(g); }
+            if let Ok(r) = api::list_runs(&pn).await { runs.set(r); }
+            sleep_ms(5000).await;
+        }
     });
 
     let on_delete = {
@@ -113,4 +117,12 @@ fn RunTable(runs: RwSignal<Vec<AgentRun>>, run_detail: RwSignal<Option<AgentRun>
             </table>
         }.into_any()
     }
+}
+
+async fn sleep_ms(ms: u64) {
+    wasm_bindgen_futures::JsFuture::from(
+        js_sys::Promise::new(&mut |resolve, _| {
+            let _ = web_sys::window().unwrap().set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32);
+        })
+    ).await.ok();
 }

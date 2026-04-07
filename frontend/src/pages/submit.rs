@@ -45,10 +45,15 @@ pub fn SubmitPage() -> impl IntoView {
                 api::submit_task(&submit_task).await
             };
             match result {
-                Ok(_) => {
+                Ok(resp) => {
                     task_text.set(String::new());
-                    // Navigate to project page — kanban shows plan status + "Review Plan" button
-                    nav(&format!("/project/{project_clone}"), Default::default());
+                    // For plan-first: navigate to plan review page if we got a run_id
+                    let run_id = resp.get("run_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if use_plan && !run_id.is_empty() {
+                        nav(&format!("/plan/{run_id}"), Default::default());
+                    } else {
+                        nav(&format!("/project/{project_clone}"), Default::default());
+                    }
                 }
                 Err(e) => {
                     error_msg.set(Some(format!("Submit failed: {e}")));

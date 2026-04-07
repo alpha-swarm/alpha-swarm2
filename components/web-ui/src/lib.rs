@@ -683,13 +683,25 @@ fn api_submit_plan(response_out: ResponseOutparam, body: &[u8]) {
     if task.is_empty() { respond_json(response_out, 400, r#"{"error":"task is required"}"#); return; }
 
     let query = format!(
-        "CREATE agent_run SET project='{}', task_description='{}', agent_id='pending', model_used='auto', status='planning', tokens_input=0, tokens_output=0, duration_ms=0, created_at=time::now(), files_modified=[]",
+        "CREATE agent_run SET project='{}', task_description='{}', agent_id='pending', model_used='auto', status='planning', tokens_input=0, tokens_output=0, duration_ms=0, created_at=time::now(), files_modified=[] RETURN id",
         project.replace('\'', ""),
         task.replace('\'', "").chars().take(500).collect::<String>(),
     );
 
     match surreal_query(&query) {
-        Ok(_) => respond_json(response_out, 202, &format!(r#"{{"status":"planning","project":"{}","task":"{}"}}"#, project, task.chars().take(80).collect::<String>())),
+        Ok(body) => {
+            // Extract the created run ID from response
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let run_id = parsed.as_array()
+                .and_then(|a| a.last())
+                .and_then(|r| r.get("result"))
+                .and_then(|r| r.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.get("id"))
+                .and_then(|id| id.as_str())
+                .unwrap_or("");
+            respond_json(response_out, 202, &format!(r#"{{"status":"planning","project":"{}","run_id":"{}"}}"#, project, run_id));
+        }
         Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, e)),
     }
 }
