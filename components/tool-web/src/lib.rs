@@ -145,7 +145,7 @@ fn tool_search_crates(params: &serde_json::Value) -> ToolResponse {
 
 fn http_get(url: &str) -> Result<String, String> {
     let headers = Fields::new();
-    headers.append(&"user-agent".to_string(), &b"alpha-swarm/0.1"[..]).map_err(|e| format!("header: {e:?}"))?;
+    headers.append("user-agent", &b"alpha-swarm/0.1"[..]).map_err(|e| format!("header: {e:?}"))?;
 
     let request = OutgoingRequest::new(headers);
     request.set_method(&Method::Get).map_err(|_| "set method")?;
@@ -186,10 +186,10 @@ fn http_get(url: &str) -> Result<String, String> {
 }
 
 fn parse_url(url: &str) -> Result<(Scheme, String, String), String> {
-    let (scheme, rest) = if url.starts_with("https://") {
-        (Scheme::Https, &url[8..])
-    } else if url.starts_with("http://") {
-        (Scheme::Http, &url[7..])
+    let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
+        (Scheme::Https, rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        (Scheme::Http, rest)
     } else {
         return Err(format!("unsupported URL scheme: {url}"));
     };

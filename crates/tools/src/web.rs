@@ -1,7 +1,5 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tracing::warn;
-
 use crate::{Tool, ToolContext, ToolResult};
 
 /// Max characters to return from a web fetch

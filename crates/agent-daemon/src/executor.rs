@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use tracing::{info, warn, error};
 
 use inference_client::{InferenceRouter, OllamaBackend};
@@ -10,9 +9,6 @@ use swarm_config::SwarmConfig;
 /// Max chars for attempt preview fields
 const ATTEMPT_PREVIEW_CHARS: usize = 500;
 use swarm_events::{EventPublisher, SwarmEvent};
-
-use crate::repo;
-use crate::git_pr;
 
 fn format_update(task_id: &str, set_clause: &str) -> String {
     if task_id.contains(':') {
@@ -41,12 +37,10 @@ fn discover_source_files(repo_path: &std::path::Path) -> Vec<String> {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                 if name.starts_with('.') || name == "target" || name == "node_modules" || name == "dist" { continue; }
                 walk(&path, base, ext, out);
-            } else if let Some(e) = path.extension().and_then(|e| e.to_str()) {
-                if ext.contains(&e) {
-                    if let Ok(rel) = path.strip_prefix(base) {
-                        out.push(rel.to_string_lossy().to_string());
-                    }
-                }
+            } else if let Some(e) = path.extension().and_then(|e| e.to_str())
+                && ext.contains(&e)
+                && let Ok(rel) = path.strip_prefix(base) {
+                    out.push(rel.to_string_lossy().to_string());
             }
         }
     }
@@ -56,6 +50,7 @@ fn discover_source_files(repo_path: &std::path::Path) -> Vec<String> {
 }
 
 /// Dispatch a task based on its status: planning, approved, or pending (legacy).
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_task(
     config: &SwarmConfig,
     router: Arc<InferenceRouter>,
@@ -78,13 +73,12 @@ pub async fn handle_task(
 async fn handle_planning(
     config: &SwarmConfig,
     router: Arc<InferenceRouter>,
-    ollama: Arc<OllamaBackend>,
+    _ollama: Arc<OllamaBackend>,
     store: Arc<KnowledgeStore>,
     task_id: &str,
     project: &str,
     goal: &str,
 ) {
-    use crate::repo;
     info!(task_id, project, goal, "Planning only (no execution)");
 
     // Claim
@@ -193,6 +187,7 @@ async fn handle_planning(
 }
 
 /// Execute with an approved plan — load plan, skip re-planning, run agents.
+#[allow(clippy::too_many_arguments)]
 async fn handle_approved(
     config: &SwarmConfig,
     router: Arc<InferenceRouter>,
@@ -211,6 +206,7 @@ async fn handle_approved(
 }
 
 /// Standard execution: claim → plan → execute → PR.
+#[allow(clippy::too_many_arguments)]
 async fn handle_execute(
     config: &SwarmConfig,
     router: Arc<InferenceRouter>,
@@ -328,7 +324,7 @@ async fn handle_execute(
 
         // Exponential backoff between retries
         if iteration > 1 {
-            let backoff = std::cmp::min(2u64.pow(iteration as u32 - 1), max_backoff);
+            let backoff = std::cmp::min(2u64.pow(iteration - 1), max_backoff);
             info!(task_id, iteration, backoff_secs = backoff, errors = %last_errors.chars().take(100).collect::<String>(), "Retrying after backoff");
             tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
         }
@@ -409,7 +405,7 @@ async fn handle_execute(
             let tasks_passed = result.results.iter().filter(|r| r.agent_result.as_ref().is_some_and(|a| a.applied)).count();
             let tasks_failed = result.results.iter().filter(|r| r.error.is_some()).count();
             // Check if any agent produced work — either via edits or via tool-based file writes
-            let any_work_done = tasks_passed > 0 || !result.merged_diff.as_ref().map_or(true, |d| d.is_empty());
+            let any_work_done = tasks_passed > 0 || !result.merged_diff.as_ref().is_none_or(|d| d.is_empty());
 
             // A run with zero successful sub-agents is always a failure
             let status = if !any_work_done {
@@ -509,7 +505,7 @@ async fn handle_execute(
 
             // 5. Create PR if there are actual changes
             if any_work_done {
-                let sub_tasks_info: Vec<(String, String, String)> = result.results.iter()
+                let _sub_tasks_info: Vec<(String, String, String)> = result.results.iter()
                     .map(|r| {
                         let model = r.agent_result.as_ref().map(|a| a.inference_response.model.clone()).unwrap_or_default();
                         let st = if r.error.is_some() { "failed" } else if r.agent_result.as_ref().is_some_and(|a| a.applied) { "passed" } else { "skipped" };
@@ -560,7 +556,7 @@ async fn fail_task(
     publisher: &Option<Arc<EventPublisher>>,
     task_id: &str, project: &str, goal: &str, error: &str,
 ) {
-    fail_task_with_duration(&store, &publisher, task_id, project, goal, error, 0).await;
+    fail_task_with_duration(store, publisher, task_id, project, goal, error, 0).await;
 }
 
 async fn fail_task_with_duration(

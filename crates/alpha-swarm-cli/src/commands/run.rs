@@ -9,6 +9,7 @@ use agent_core::{Agent, KnowledgeConfig};
 use swarm_config::SwarmConfig;
 use crate::setup;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     router: Arc<InferenceRouter>,
     config: &SwarmConfig,
@@ -19,7 +20,7 @@ pub async fn execute(
     no_quality_gate: bool,
     project: Option<String>,
     agent_type: &str,
-    retry: bool,
+    _retry: bool,
 ) -> Result<()> {
     let _agent_type = agent_core::AgentType::from_str(agent_type);
     let repo = repo.canonicalize().context("Repository path does not exist")?;

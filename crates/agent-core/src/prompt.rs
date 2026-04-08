@@ -12,6 +12,7 @@ pub enum AgentType {
 }
 
 impl AgentType {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "lint" | "lint-fixer" | "linter" => Self::LintFixer,
@@ -80,6 +81,7 @@ pub fn build_tool_prompt(
 }
 
 /// Rough estimate of tokens from character count (1 token ≈ 4 chars for code).
+#[allow(dead_code)]
 const CHARS_PER_TOKEN: usize = 4;
 /// Max chars for a single file before it gets summarized.
 const MAX_FILE_CHARS: usize = 8_000;

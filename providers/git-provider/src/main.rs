@@ -11,13 +11,14 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 /// Base directory for cloned repos.
 const REPO_BASE: &str = "/tmp/alpha-swarm/repos";
 /// Base directory for worktrees.
 const WORKTREE_BASE: &str = "/tmp/alpha-swarm/worktrees";
 /// Timeout for git commands (seconds).
+#[allow(dead_code)]
 const GIT_TIMEOUT_SECS: u64 = 60;
 
 #[derive(Deserialize)]
@@ -203,7 +204,7 @@ fn op_apply_diff(repo_path: &str, agent_id: &str) -> GitResponse {
     }
 }
 
-fn op_extract_diff(repo_path: &str, agent_id: &str) -> GitResponse {
+fn op_extract_diff(_repo_path: &str, agent_id: &str) -> GitResponse {
     let wt_path = PathBuf::from(WORKTREE_BASE).join(agent_id);
     match Command::new("git").args(["diff", "HEAD"]).current_dir(&wt_path).output() {
         Ok(o) => GitResponse::ok(String::from_utf8_lossy(&o.stdout)),

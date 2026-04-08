@@ -159,6 +159,7 @@ fn build_pr_body(
 }
 
 /// Timeout for git operations (push can be slow over network)
+#[allow(dead_code)]
 const GIT_TIMEOUT_SECS: u64 = 60;
 
 fn run_git(repo_path: &Path, args: &[&str]) -> Result<()> {

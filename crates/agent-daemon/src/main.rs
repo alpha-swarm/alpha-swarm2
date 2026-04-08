@@ -19,7 +19,6 @@ use tracing::{info, warn};
 use inference_client::{ClaudeBackend, InferenceRouter, OllamaBackend};
 use knowledge_base::KnowledgeStore;
 use swarm_config::SwarmConfig;
-use futures::StreamExt;
 use swarm_events::{EventPublisher, NatsScheduler, scheduler::HostResources};
 
 /// How often to poll SurrealDB in fallback mode.
@@ -148,6 +147,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    #[allow(unreachable_code)]
     Ok(())
 }
 
@@ -194,6 +194,7 @@ async fn process_pending(
 }
 
 /// Primary mode: watch NATS KV for new tasks.
+#[allow(dead_code)]
 async fn run_nats_kv_loop(
     config: &SwarmConfig,
     router: &Arc<InferenceRouter>,
@@ -253,6 +254,7 @@ async fn run_nats_kv_loop(
 }
 
 /// Fallback mode: poll SurrealDB when NATS is unavailable.
+#[allow(dead_code)]
 async fn run_surreal_poll_loop(
     config: &SwarmConfig,
     router: &Arc<InferenceRouter>,
@@ -279,6 +281,7 @@ async fn run_surreal_poll_loop(
 }
 
 /// Spawn a task with lease management.
+#[allow(clippy::too_many_arguments)]
 fn spawn_task(
     config: SwarmConfig,
     router: Arc<InferenceRouter>,

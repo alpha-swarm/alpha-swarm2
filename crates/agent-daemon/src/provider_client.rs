@@ -14,7 +14,7 @@ pub struct GitProviderClient {
     client: Option<async_nats::Client>,
 }
 
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 struct GitRequest {
     op: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -41,6 +41,7 @@ struct GitRequest {
 struct GitResponse {
     result: Option<String>,
     error: Option<String>,
+    #[allow(dead_code)]
     files: Option<Vec<String>>,
 }
 
@@ -124,16 +125,6 @@ impl GitProviderClient {
             return Err(err);
         }
         resp.result.ok_or_else(|| "no result".into())
-    }
-}
-
-impl Default for GitRequest {
-    fn default() -> Self {
-        Self {
-            op: String::new(), project: String::new(), url: String::new(),
-            repo_path: String::new(), agent_id: String::new(), goal: String::new(),
-            quality_passed: false, duration_ms: 0, tokens_in: 0, tokens_out: 0,
-        }
     }
 }
 

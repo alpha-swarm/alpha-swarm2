@@ -175,46 +175,42 @@ fn api_events_impl(response_out: ResponseOutparam) {
 
     // 2. Query running agents from SurrealDB
     let running_query = "SELECT id, project, task_description, agent_id, model_used, status, tokens_input, tokens_output, duration_ms, created_at, error_message, quality_gate_passed, files_modified FROM agent_run WHERE status = 'running' ORDER BY created_at DESC LIMIT 10";
-    if let Ok(body) = surreal_query(running_query) {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
-            if let Some(runs) = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
-                let count = runs.len();
-                events.push_str(&format!(
-                    "event: status\ndata: {{\"active_agents\":{}}}\n\n",
-                    count
-                ));
-                for run in runs {
-                    let agent_id = run.get("agent_id").and_then(|a| a.as_str()).unwrap_or("unknown");
-                    let task = run.get("task_description").and_then(|t| t.as_str()).unwrap_or("");
-                    let model = run.get("model_used").and_then(|m| m.as_str()).unwrap_or("");
-                    let data = serde_json::json!({
-                        "agent_id": agent_id,
-                        "task": task,
-                        "model": model,
-                    });
-                    events.push_str(&format!("event: agent_started\ndata: {}\n\n", data));
-                }
+    if let Ok(body) = surreal_query(running_query)
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body)
+        && let Some(runs) = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
+            let count = runs.len();
+            events.push_str(&format!(
+                "event: status\ndata: {{\"active_agents\":{}}}\n\n",
+                count
+            ));
+            for run in runs {
+                let agent_id = run.get("agent_id").and_then(|a| a.as_str()).unwrap_or("unknown");
+                let task = run.get("task_description").and_then(|t| t.as_str()).unwrap_or("");
+                let model = run.get("model_used").and_then(|m| m.as_str()).unwrap_or("");
+                let data = serde_json::json!({
+                    "agent_id": agent_id,
+                    "task": task,
+                    "model": model,
+                });
+                events.push_str(&format!("event: agent_started\ndata: {}\n\n", data));
             }
-        }
     }
 
     // 3. Query recent completed/failed/pending runs — include ALL fields for detail view
     let recent_query = "SELECT id, project, task_description, agent_id, model_used, status, tokens_input, tokens_output, duration_ms, created_at, error_message, quality_gate_passed, files_modified FROM agent_run WHERE status != 'running' ORDER BY created_at DESC LIMIT 20";
-    if let Ok(body) = surreal_query(recent_query) {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
-            if let Some(runs) = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
-                for run in runs {
-                    let status = run.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
-                    let event_type = match status {
-                        "failed" => "agent_failed",
-                        "pending" => "agent_started",
-                        _ => "agent_finished",
-                    };
-                    // Send the full run data so the UI can show details
-                    events.push_str(&format!("event: {event_type}\ndata: {}\n\n", run));
-                }
+    if let Ok(body) = surreal_query(recent_query)
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body)
+        && let Some(runs) = parsed.as_array().and_then(|a| a.last()).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
+            for run in runs {
+                let status = run.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                let event_type = match status {
+                    "failed" => "agent_failed",
+                    "pending" => "agent_started",
+                    _ => "agent_finished",
+                };
+                // Send the full run data so the UI can show details
+                events.push_str(&format!("event: {event_type}\ndata: {}\n\n", run));
             }
-        }
     }
 
     // If no DB data, still send the status event
@@ -224,8 +220,8 @@ fn api_events_impl(response_out: ResponseOutparam) {
 
     // Send as streaming response
     let headers = Fields::new();
-    headers.append(&"content-type".to_string(), &b"text/event-stream"[..]).unwrap();
-    headers.append(&"cache-control".to_string(), &b"no-cache"[..]).unwrap();
+    headers.append("content-type", &b"text/event-stream"[..]).unwrap();
+    headers.append("cache-control", &b"no-cache"[..]).unwrap();
 
     let response = OutgoingResponse::new(headers);
     response.set_status_code(200).unwrap();
@@ -416,9 +412,9 @@ fn surreal_query(query: &str) -> Result<String, String> {
 
 fn surreal_raw_query_no_headers(query: &str) -> Result<String, String> {
     let headers = Fields::new();
-    headers.append(&"content-type".to_string(), &b"text/plain"[..]).map_err(|e| format!("{e:?}"))?;
-    headers.append(&"accept".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
-    headers.append(&"authorization".to_string(), &b"Basic cm9vdDpyb290"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append("content-type", &b"text/plain"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append("accept", &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append("authorization", &b"Basic cm9vdDpyb290"[..]).map_err(|e| format!("{e:?}"))?;
 
     let request = OutgoingRequest::new(headers);
     request.set_method(&Method::Post).map_err(|_| "method")?;
@@ -465,12 +461,13 @@ fn surreal_raw_query_no_headers(query: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| format!("utf8: {e}"))
 }
 
+#[allow(dead_code)]
 fn surreal_init_query(query: &str) -> Result<String, String> {
     // Query without namespace/db headers — for creating ns/db
     let headers = Fields::new();
-    headers.append(&"content-type".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
-    headers.append(&"accept".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
-    headers.append(&"authorization".to_string(), &b"Basic cm9vdDpyb290"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append("content-type", &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append("accept", &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append("authorization", &b"Basic cm9vdDpyb290"[..]).map_err(|e| format!("{e:?}"))?;
 
     let request = OutgoingRequest::new(headers);
     request.set_method(&Method::Post).map_err(|_| "method")?;
@@ -508,15 +505,16 @@ fn surreal_init_query(query: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| format!("utf8: {e}"))
 }
 
+#[allow(dead_code)]
 fn surreal_raw_query(query: &str) -> Result<String, String> {
     let _surreal_url = "http://127.0.0.1:8001";
     let headers = Fields::new();
-    headers.append(&"content-type".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
-    headers.append(&"accept".to_string(), &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
-    headers.append(&"surreal-ns".to_string(), &b"alpha_swarm"[..]).map_err(|e| format!("{e:?}"))?;
-    headers.append(&"surreal-db".to_string(), &b"swarm"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append("content-type", &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append("accept", &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append("surreal-ns", &b"alpha_swarm"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append("surreal-db", &b"swarm"[..]).map_err(|e| format!("{e:?}"))?;
     // Basic auth: root:root
-    headers.append(&"authorization".to_string(), &b"Basic cm9vdDpyb290"[..]).map_err(|e| format!("{e:?}"))?;
+    headers.append("authorization", &b"Basic cm9vdDpyb290"[..]).map_err(|e| format!("{e:?}"))?;
 
     let request = OutgoingRequest::new(headers);
     request.set_method(&Method::Post).map_err(|_| "method")?;
@@ -824,10 +822,11 @@ fn http_get(url: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| format!("utf8: {e}"))
 }
 
+#[allow(dead_code)]
 fn serve_dashboard(response_out: ResponseOutparam) {
     let html = include_str!("../static/index.html");
     let headers = Fields::new();
-    headers.append(&"content-type".to_string(), &b"text/html; charset=utf-8"[..]).unwrap();
+    headers.append("content-type", &b"text/html; charset=utf-8"[..]).unwrap();
     let response = OutgoingResponse::new(headers);
     response.set_status_code(200).unwrap();
     let body = response.body().unwrap();
@@ -854,9 +853,10 @@ fn serve_dashboard(response_out: ResponseOutparam) {
     OutgoingBody::finish(body, None).unwrap();
 }
 
+#[allow(dead_code)]
 fn serve_static(response_out: ResponseOutparam, content_type: &str, data: &[u8]) {
     let headers = Fields::new();
-    headers.append(&"content-type".to_string(), content_type.as_bytes()).unwrap();
+    headers.append("content-type", content_type.as_bytes()).unwrap();
 
     let response = OutgoingResponse::new(headers);
     response.set_status_code(200).unwrap();
@@ -876,7 +876,7 @@ fn serve_static(response_out: ResponseOutparam, content_type: &str, data: &[u8])
 
 fn respond_json(response_out: ResponseOutparam, status: u16, body: &str) {
     let headers = Fields::new();
-    headers.append(&"content-type".to_string(), &b"application/json"[..]).unwrap();
+    headers.append("content-type", &b"application/json"[..]).unwrap();
     let response = OutgoingResponse::new(headers);
     response.set_status_code(status).unwrap();
     let out_body = response.body().unwrap();

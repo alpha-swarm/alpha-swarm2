@@ -1,4 +1,4 @@
-/// Shared utilities for code analysis — signature extraction, file classification.
+//! Shared utilities for code analysis — signature extraction, file classification.
 
 /// Check if a line is a function/struct/trait/impl signature.
 pub fn is_signature_line(line: &str) -> bool {

@@ -6,13 +6,14 @@ use crate::types::*;
 
 /// Routes inference requests to the best available backend.
 /// Picks model by complexity tier, falls back across backends.
+#[derive(Default)]
 pub struct InferenceRouter {
     backends: Vec<Box<dyn InferenceBackend>>,
 }
 
 impl InferenceRouter {
     pub fn new() -> Self {
-        Self { backends: Vec::new() }
+        Self::default()
     }
 
     pub fn add_backend(mut self, backend: impl InferenceBackend + 'static) -> Self {
@@ -92,7 +93,7 @@ impl InferenceRouter {
 
     /// Get the next-tier model for retry escalation.
     /// Returns a larger model than the one that failed.
-    pub async fn escalate_model(&self, failed_model: &str, complexity: Complexity) -> Result<ModelInfo> {
+    pub async fn escalate_model(&self, failed_model: &str, _complexity: Complexity) -> Result<ModelInfo> {
         let models = self.list_models().await?;
         let failed_size = parse_param_size_b(
             models.iter()
@@ -124,15 +125,14 @@ impl InferenceRouter {
         options: &InferenceOptions,
     ) -> Result<InferenceResponse> {
         // If user specified a backend/model, try that first
-        if let Some(preferred) = options.preferred_backend {
-            if let Some(backend) = self.backends.iter().find(|b| b.kind() == preferred) {
+        if let Some(preferred) = options.preferred_backend
+            && let Some(backend) = self.backends.iter().find(|b| b.kind() == preferred) {
                 let model = options.preferred_model.as_deref()
                     .unwrap_or_else(|| self.default_model_for(preferred));
                 match backend.chat(model, messages, options).await {
                     Ok(resp) => return Ok(resp),
                     Err(e) => warn!(backend = ?preferred, "Preferred backend failed: {e}"),
                 }
-            }
         }
 
         // Auto-select via routing

@@ -44,14 +44,13 @@ pub async fn execute(
         if let Some(err) = &tr.error { println!("         error: {err}"); }
     }
 
-    if let Some(diff) = &result.merged_diff {
-        if !diff.is_empty() {
+    if let Some(diff) = &result.merged_diff
+        && !diff.is_empty() {
             println!("\n--- Merged Diff ---");
             for line in diff.lines().take(50) { println!("{line}"); }
             if diff.lines().count() > 50 {
                 println!("... ({} more lines)", diff.lines().count() - 50);
             }
-        }
     }
 
     if !result.quality_passed { std::process::exit(1); }

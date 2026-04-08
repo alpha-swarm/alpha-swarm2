@@ -1,11 +1,10 @@
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::{info, warn, debug};
+use tracing::{info, debug};
 
-use crate::{Tool, ToolContext, ToolResult};
+use crate::{ToolContext, ToolResult};
 
 /// Timeout for remote tool calls via NATS.
 const REMOTE_TOOL_TIMEOUT: Duration = Duration::from_secs(30);

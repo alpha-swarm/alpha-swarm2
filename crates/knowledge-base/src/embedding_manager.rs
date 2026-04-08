@@ -4,10 +4,9 @@
 //! - On agent done: update only modified files
 //! - Batching: queue embeddings, process N at a time to avoid overloading Ollama
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use tracing::{info, warn, debug};
 
 use inference_client::OllamaBackend;
@@ -155,12 +154,10 @@ fn discover_indexable_files(repo_path: &Path) -> Vec<String> {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                 if name.starts_with('.') || name == "target" || name == "node_modules" || name == "dist" { continue; }
                 walk(&path, base, ext, out);
-            } else if let Some(e) = path.extension().and_then(|e| e.to_str()) {
-                if ext.contains(&e) {
-                    if let Ok(rel) = path.strip_prefix(base) {
-                        out.push(rel.to_string_lossy().to_string());
-                    }
-                }
+            } else if let Some(e) = path.extension().and_then(|e| e.to_str())
+                && ext.contains(&e)
+                && let Ok(rel) = path.strip_prefix(base) {
+                    out.push(rel.to_string_lossy().to_string());
             }
         }
     }

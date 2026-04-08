@@ -63,12 +63,10 @@ pub fn discover_files(repo: &std::path::Path) -> Result<Vec<String>> {
                     continue;
                 }
                 walk(&path, base, ext, out);
-            } else if let Some(e) = path.extension().and_then(|e| e.to_str()) {
-                if ext.contains(&e) {
-                    if let Ok(rel) = path.strip_prefix(base) {
-                        out.push(rel.to_string_lossy().to_string());
-                    }
-                }
+            } else if let Some(e) = path.extension().and_then(|e| e.to_str())
+                && ext.contains(&e)
+                && let Ok(rel) = path.strip_prefix(base) {
+                    out.push(rel.to_string_lossy().to_string());
             }
         }
     }

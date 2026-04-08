@@ -63,10 +63,9 @@ pub fn parse_edits(response: &str) -> Result<Vec<FileEdit>, ParseError> {
         let Some(end_offset) = response[block_start..].find(">>>") else {
             // Unclosed block — try to salvage by treating rest of response as the block
             let block = response[block_start..].trim();
-            if !block.is_empty() {
-                if let Ok(edit) = parse_single_block(block) {
+            if !block.is_empty()
+                && let Ok(edit) = parse_single_block(block) {
                     edits.push(edit);
-                }
             }
             break; // No more complete blocks possible
         };
@@ -120,9 +119,8 @@ pub fn parse_actions(response: &str) -> Result<Vec<AgentAction>, ParseError> {
             actions.push(AgentAction::Done { summary: body.trim().to_string() });
         } else {
             // Try as edit block for backwards compatibility
-            match parse_single_block(block) {
-                Ok(edit) => actions.push(AgentAction::Edit(edit)),
-                Err(_) => {} // Skip unknown blocks
+            if let Ok(edit) = parse_single_block(block) {
+                actions.push(AgentAction::Edit(edit));
             }
         }
 
@@ -139,8 +137,7 @@ fn extract_json_field(json: &str, field: &str) -> String {
     let after_key = &json[idx + needle.len()..];
     let Some(colon) = after_key.find(':') else { return String::new() };
     let after_colon = after_key[colon + 1..].trim_start();
-    if after_colon.starts_with('"') {
-        let content = &after_colon[1..];
+    if let Some(content) = after_colon.strip_prefix('"') {
         let end = content.find('"').unwrap_or(content.len());
         content[..end].to_string()
     } else {

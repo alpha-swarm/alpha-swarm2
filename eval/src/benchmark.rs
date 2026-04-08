@@ -57,6 +57,7 @@ struct GoalBenchmark {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct SurrealResult {
     result: Option<Vec<serde_json::Value>>,
 }
@@ -269,7 +270,7 @@ fn generate_markdown_report(benchmarks: &[GoalBenchmark]) -> String {
     let total_time: u64 = benchmarks.iter().map(|b| b.total_duration_ms).sum();
     let total_agents: usize = benchmarks.iter().map(|b| b.total_agents).sum();
 
-    report.push_str(&format!("\n## Summary\n\n"));
+    report.push_str("\n## Summary\n\n");
     report.push_str(&format!("- **Goals**: {} (passed: {}, failed: {})\n", total_goals, passed, total_goals - passed));
     report.push_str(&format!("- **Pass rate**: {:.0}%\n", if total_goals > 0 { passed as f64 / total_goals as f64 * 100.0 } else { 0.0 }));
     report.push_str(&format!("- **Total agents**: {}\n", total_agents));

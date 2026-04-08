@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::SwarmEvent;
 

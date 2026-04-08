@@ -244,6 +244,7 @@ struct OllamaResponse {
     #[serde(default)]
     eval_count: u32,
     #[serde(default)]
+    #[allow(dead_code)]
     prompt_eval_count: u32,
 }
 
@@ -255,6 +256,7 @@ struct OllamaMessageResp {
 struct EvalResult {
     test_name: String,
     model: String,
+    #[allow(dead_code)]
     prompt_variant: String,
     response: String,
     parsed_ok: bool,
@@ -387,7 +389,7 @@ fn write_iteration_report(iteration: usize, results: &[EvalResult], prompt_name:
     println!("  Wrote {path}");
 }
 
-fn write_prompt_file(iteration: usize, name: &str, prompt: &str) {
+fn write_prompt_file(_iteration: usize, name: &str, prompt: &str) {
     let path = format!("{PROMPTS_DIR}/{name}.txt");
     fs::write(&path, prompt).expect("write prompt");
 }

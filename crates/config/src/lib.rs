@@ -8,7 +8,7 @@ use serde::Deserialize;
 /// 3. Environment variable overrides
 ///
 /// WASI components use defaults only (no file/env access).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct SwarmConfig {
     pub ollama: OllamaConfig,
@@ -173,19 +173,6 @@ pub fn model_role(name: &str) -> Option<ModelRole> {
 
 // --- Defaults ---
 
-impl Default for SwarmConfig {
-    fn default() -> Self {
-        Self {
-            ollama: OllamaConfig::default(),
-            surrealdb: SurrealConfig::default(),
-            nats: NatsConfig::default(),
-            claude: ClaudeConfig::default(),
-            defaults: DefaultsConfig::default(),
-            tiers: TiersConfig::default(),
-            resources: ResourceConfig::default(),
-        }
-    }
-}
 
 impl Default for ResourceConfig {
     fn default() -> Self {
@@ -316,10 +303,9 @@ impl SwarmConfig {
     fn from_file() -> Option<Self> {
         let paths = ["alpha-swarm.toml", ".alpha-swarm.toml"];
         for path in paths {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                if let Ok(config) = toml::from_str(&content) {
+            if let Ok(content) = std::fs::read_to_string(path)
+                && let Ok(config) = toml::from_str(&content) {
                     return Some(config);
-                }
             }
         }
         None
@@ -340,7 +326,6 @@ impl SwarmConfig {
 
     /// SurrealDB basic auth header value (base64 of user:pass).
     pub fn surrealdb_auth_header(&self) -> String {
-        use std::io::Write;
         let credentials = format!("{}:{}", self.surrealdb.username, self.surrealdb.password);
         format!("Basic {}", base64_encode(credentials.as_bytes()))
     }

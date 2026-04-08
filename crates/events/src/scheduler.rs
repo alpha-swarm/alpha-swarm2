@@ -156,10 +156,9 @@ impl NatsScheduler {
 
         while let Some(key_result) = keys.next().await {
             let Ok(key) = key_result else { continue };
-            if let Ok(Some(value)) = self.resources.get(&key).await {
-                if let Ok(host) = serde_json::from_slice::<HostResources>(&value) {
+            if let Ok(Some(value)) = self.resources.get(&key).await
+                && let Ok(host) = serde_json::from_slice::<HostResources>(&value) {
                     hosts.push(host);
-                }
             }
         }
         Ok(hosts)

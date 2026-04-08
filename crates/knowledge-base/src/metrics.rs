@@ -36,7 +36,7 @@ impl ProjectMetrics {
         let total_tokens_input: u64 = runs.iter().map(|r| r.tokens_input as u64).sum();
         let total_tokens_output: u64 = runs.iter().map(|r| r.tokens_output as u64).sum();
         let total_duration: u64 = runs.iter().map(|r| r.duration_ms).sum();
-        let avg_duration_ms = if total_runs > 0 { total_duration / total_runs } else { 0 };
+        let avg_duration_ms = total_duration.checked_div(total_runs).unwrap_or(0);
 
         // Per-model breakdown
         let mut model_map: std::collections::HashMap<String, Vec<&crate::AgentRun>> = std::collections::HashMap::new();
@@ -59,12 +59,12 @@ impl ProjectMetrics {
                 passed: model_passed,
                 failed: model_failed,
                 pass_rate: if runs_count > 0 { model_passed as f64 / runs_count as f64 } else { 0.0 },
-                avg_tokens_output: if runs_count > 0 { tokens_out / runs_count } else { 0 },
-                avg_duration_ms: if runs_count > 0 { dur / runs_count } else { 0 },
+                avg_tokens_output: tokens_out.checked_div(runs_count).unwrap_or(0),
+                avg_duration_ms: dur.checked_div(runs_count).unwrap_or(0),
             }
         }).collect();
 
-        models_used.sort_by(|a, b| b.runs.cmp(&a.runs));
+        models_used.sort_by_key(|b| std::cmp::Reverse(b.runs));
 
         ProjectMetrics {
             total_runs,

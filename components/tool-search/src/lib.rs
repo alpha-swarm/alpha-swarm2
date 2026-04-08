@@ -19,8 +19,10 @@ struct ToolRequest {
     #[serde(default)]
     repo_path: String,
     #[serde(default)]
+    #[allow(dead_code)]
     project: String,
     #[serde(default)]
+    #[allow(dead_code)]
     timeout_ms: u64,
 }
 

@@ -39,9 +39,8 @@ fn default_options() -> InferenceOptions {
     if let Ok(model) = std::env::var("ALPHA_SWARM_AGENT_MODEL") {
         tier.model = model;
     }
-    if let Ok(ctx) = std::env::var("ALPHA_SWARM_AGENT_CTX") {
-        if let Ok(n) = ctx.parse() { tier.context_window = n; }
-    }
+    if let Ok(ctx) = std::env::var("ALPHA_SWARM_AGENT_CTX")
+        && let Ok(n) = ctx.parse() { tier.context_window = n; }
     tier_options(&tier)
 }
 
@@ -174,8 +173,8 @@ impl Agent {
                 }
 
                 // Check for past errors to avoid
-                if let Ok(errors) = kc.store.find_past_errors(&kc.project, &embedding, 3).await {
-                    if !errors.is_empty() {
+                if let Ok(errors) = kc.store.find_past_errors(&kc.project, &embedding, 3).await
+                    && !errors.is_empty() {
                         context_from_knowledge.push_str("\nPAST ERRORS TO AVOID:\n");
                         for e in &errors {
                             context_from_knowledge.push_str(&format!(
@@ -186,12 +185,11 @@ impl Agent {
                             ));
                         }
                         info!(error_count = errors.len(), "Found past errors to avoid");
-                    }
                 }
 
                 // Check what parallel agents are doing
-                if let Ok(running) = kc.store.running_agents(&kc.project).await {
-                    if !running.is_empty() {
+                if let Ok(running) = kc.store.running_agents(&kc.project).await
+                    && !running.is_empty() {
                         context_from_knowledge.push_str("\nCURRENTLY RUNNING AGENTS:\n");
                         for r in &running {
                             context_from_knowledge.push_str(&format!(
@@ -200,7 +198,6 @@ impl Agent {
                             ));
                         }
                         info!(running_count = running.len(), "Found parallel agents");
-                    }
                 }
             }
         }
@@ -551,7 +548,7 @@ impl Agent {
 
         let mut messages = messages_init;
 
-        let file_cache: Arc<RwLock<HashMap<String, String>>> = Arc::new(RwLock::new(
+        let _file_cache: Arc<RwLock<HashMap<String, String>>> = Arc::new(RwLock::new(
             files.iter().map(|(p, c)| (p.clone(), c.clone())).collect()
         ));
 
@@ -591,7 +588,7 @@ impl Agent {
                     let edits = crate::parser::parse_edits(content).unwrap_or_default();
                     if !edits.is_empty() {
                         for edit in &edits {
-                            let _ = self.apply_edits(&[edit.clone()]);
+                            let _ = self.apply_edits(std::slice::from_ref(edit));
                         }
                         all_edits.extend(edits);
                         info!(step, edits = all_edits.len(), "Parsed plain edit blocks");
@@ -602,7 +599,7 @@ impl Agent {
                     let wrapped = try_auto_wrap(content, file_paths, &self.repo_path);
                     if !wrapped.is_empty() {
                         for edit in &wrapped {
-                            let _ = self.apply_edits(&[edit.clone()]);
+                            let _ = self.apply_edits(std::slice::from_ref(edit));
                         }
                         all_edits.extend(wrapped);
                         break;
@@ -676,7 +673,7 @@ impl Agent {
 
             let feedback = feedback_parts.join("\n");
             messages.push(inference_client::ChatMessage::user(
-                &format!("TOOL RESULTS:\n{feedback}\n\nContinue with more <<<TOOL>>> calls, <<<EDIT>>>/<<<CREATE>>> blocks, or <<<DONE>>> if finished.")
+                format!("TOOL RESULTS:\n{feedback}\n\nContinue with more <<<TOOL>>> calls, <<<EDIT>>>/<<<CREATE>>> blocks, or <<<DONE>>> if finished.")
             ));
         }
 

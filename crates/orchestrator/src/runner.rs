@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -128,7 +128,7 @@ impl SwarmRunner {
             let store = self.store.clone();
             let project = self.project.clone();
             let parent_id = self.parent_run_id.clone();
-            let nats_client = self.nats_client.clone();
+            let _nats_client = self.nats_client.clone();
             let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
                 .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
 
@@ -276,7 +276,7 @@ impl SwarmRunner {
     }
 }
 
-fn discover_source_files(repo: &PathBuf) -> Result<Vec<String>> {
+fn discover_source_files(repo: &Path) -> Result<Vec<String>> {
     let mut files = Vec::new();
     let extensions = ["rs", "ts", "js", "go", "py", "md", "toml", "json", "yaml", "yml"];
 
@@ -290,12 +290,10 @@ fn discover_source_files(repo: &PathBuf) -> Result<Vec<String>> {
                     continue;
                 }
                 walk(&path, base, ext, out);
-            } else if let Some(e) = path.extension().and_then(|e| e.to_str()) {
-                if ext.contains(&e) {
-                    if let Ok(rel) = path.strip_prefix(base) {
-                        out.push(rel.to_string_lossy().to_string());
-                    }
-                }
+            } else if let Some(e) = path.extension().and_then(|e| e.to_str())
+                && ext.contains(&e)
+                && let Ok(rel) = path.strip_prefix(base) {
+                    out.push(rel.to_string_lossy().to_string());
             }
         }
     }
@@ -307,6 +305,7 @@ fn discover_source_files(repo: &PathBuf) -> Result<Vec<String>> {
 
 /// Index file embeddings for RAG — runs in background, best-effort.
 /// For each source file, creates a summary (first line + signature) and embeds it.
+#[allow(dead_code)]
 async fn index_file_embeddings(
     store: &knowledge_base::KnowledgeStore,
     ollama: &inference_client::OllamaBackend,

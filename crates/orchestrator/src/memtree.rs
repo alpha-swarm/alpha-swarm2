@@ -213,10 +213,9 @@ fn collect_changes(
         match base_tree.get_path(Path::new(rel_path)) {
             Ok(entry) => {
                 // File exists — check if modified
-                if let Ok(blob) = repo.find_blob(entry.id()) {
-                    if blob.content() != ws_content.as_slice() {
+                if let Ok(blob) = repo.find_blob(entry.id())
+                    && blob.content() != ws_content.as_slice() {
                         changes.insert(rel_path.to_string(), Change::Modified(ws_content));
-                    }
                 }
             }
             Err(_) => {

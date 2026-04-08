@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
-use tracing::{info, warn};
+use tracing::warn;
 
-use swarm_config::{HostConfig, ResourceConfig};
+use swarm_config::ResourceConfig;
 
 /// Snapshot of current system resource usage for one host.
 #[derive(Debug, Clone, Serialize)]
@@ -88,8 +88,8 @@ async fn check_ollama(name: &str, ollama_url: &str) -> ResourceSnapshot {
     let ps_url = format!("{}/api/ps", ollama_url);
     match reqwest::get(&ps_url).await {
         Ok(resp) => {
-            if let Ok(body) = resp.json::<serde_json::Value>().await {
-                if let Some(models) = body.get("models").and_then(|m| m.as_array()) {
+            if let Ok(body) = resp.json::<serde_json::Value>().await
+                && let Some(models) = body.get("models").and_then(|m| m.as_array()) {
                     let mut total_size: u64 = 0;
                     for m in models {
                         let model_name = m.get("name").and_then(|n| n.as_str()).unwrap_or("unknown").to_string();
@@ -105,7 +105,6 @@ async fn check_ollama(name: &str, ollama_url: &str) -> ResourceSnapshot {
                     }
                     // Estimate RAM usage from loaded model sizes
                     snap.ram_used_mb = total_size;
-                }
             }
         }
         Err(e) => warn!(host = name, url = %ps_url, "Failed to query Ollama: {e}"),
@@ -113,12 +112,10 @@ async fn check_ollama(name: &str, ollama_url: &str) -> ResourceSnapshot {
 
     // Query /api/tags for available models count
     let tags_url = format!("{}/api/tags", ollama_url);
-    if let Ok(resp) = reqwest::get(&tags_url).await {
-        if let Ok(body) = resp.json::<serde_json::Value>().await {
-            if let Some(models) = body.get("models").and_then(|m| m.as_array()) {
-                snap.disk_total_gb = models.len() as f64; // repurpose as "models available"
-            }
-        }
+    if let Ok(resp) = reqwest::get(&tags_url).await
+        && let Ok(body) = resp.json::<serde_json::Value>().await
+        && let Some(models) = body.get("models").and_then(|m| m.as_array()) {
+            snap.disk_total_gb = models.len() as f64; // repurpose as "models available"
     }
 
     snap

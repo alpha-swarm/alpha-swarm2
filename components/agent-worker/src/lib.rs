@@ -23,7 +23,7 @@ fn ollama_chat(ollama_url: &str, model: &str, messages: &str) -> Result<String, 
 
     // Create outgoing request
     let headers = Fields::new();
-    headers.append(&"content-type".to_string(), &b"application/json"[..]).map_err(|e| format!("header: {e:?}"))?;
+    headers.append("content-type", &b"application/json"[..]).map_err(|e| format!("header: {e:?}"))?;
 
     let request = OutgoingRequest::new(headers);
     request.set_method(&Method::Post).map_err(|_| "set method")?;
@@ -61,14 +61,9 @@ fn ollama_chat(ollama_url: &str, model: &str, messages: &str) -> Result<String, 
 
     // Read response body
     let mut body_bytes = Vec::new();
-    loop {
-        match resp_stream.read(65536) {
-            Ok(chunk) => {
-                if chunk.is_empty() { break; }
-                body_bytes.extend_from_slice(&chunk);
-            }
-            Err(_) => break,
-        }
+    while let Ok(chunk) = resp_stream.read(65536) {
+        if chunk.is_empty() { break; }
+        body_bytes.extend_from_slice(&chunk);
     }
     drop(resp_stream);
     let _ = IncomingBody::finish(resp_body);
@@ -140,14 +135,9 @@ impl Guest for AgentWorker {
         let req_body = request.consume().unwrap();
         let req_stream = req_body.stream().unwrap();
         let mut body_bytes = Vec::new();
-        loop {
-            match req_stream.read(65536) {
-                Ok(chunk) => {
-                    if chunk.is_empty() { break; }
-                    body_bytes.extend_from_slice(&chunk);
-                }
-                Err(_) => break,
-            }
+        while let Ok(chunk) = req_stream.read(65536) {
+            if chunk.is_empty() { break; }
+            body_bytes.extend_from_slice(&chunk);
         }
         drop(req_stream);
         let _ = IncomingBody::finish(req_body);
@@ -187,15 +177,14 @@ impl Guest for AgentWorker {
                 // Apply edits to files
                 let mut modified_files = Vec::new();
                 for edit in &edits {
-                    if let FileEdit::Edit { path, old, new } = edit {
-                        if let Some(f) = task_req.files.iter().find(|f| f.path == *path) {
+                    if let FileEdit::Edit { path, old, new } = edit
+                        && let Some(f) = task_req.files.iter().find(|f| f.path == *path) {
                             let updated = f.content.replacen(old.as_str(), new.as_str(), 1);
                             modified_files.push(format!(
                                 r#"{{"path":"{}","content":{}}}"#,
                                 path,
                                 serde_json::to_string(&updated).unwrap_or_default()
                             ));
-                        }
                     }
                 }
 
@@ -217,7 +206,7 @@ impl Guest for AgentWorker {
 
 fn respond_json(response_out: ResponseOutparam, status: u16, body: &str) {
     let headers = Fields::new();
-    headers.append(&"content-type".to_string(), &b"application/json"[..]).unwrap();
+    headers.append("content-type", &b"application/json"[..]).unwrap();
     let response = OutgoingResponse::new(headers);
     response.set_status_code(status).unwrap();
     let out_body = response.body().unwrap();

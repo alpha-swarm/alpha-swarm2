@@ -58,7 +58,7 @@ impl Tool for TreeSitterRenameTool {
         };
 
         // Find all identifier nodes matching old_name
-        let mut cursor = tree.walk();
+        let cursor = tree.walk();
         let mut replacements = Vec::new();
         collect_identifiers(&content, cursor.node(), old_name, &mut replacements);
 
@@ -68,7 +68,7 @@ impl Tool for TreeSitterRenameTool {
 
         // Apply replacements in reverse order to preserve positions
         let mut new_content = content.clone();
-        replacements.sort_by(|a, b| b.0.cmp(&a.0));
+        replacements.sort_by_key(|b| std::cmp::Reverse(b.0));
         for (start, end) in &replacements {
             new_content.replace_range(*start..*end, new_name);
         }
