@@ -266,10 +266,13 @@ impl Agent {
         );
 
         // 4. Parse edits from response
+        let content_preview: String = response.content.trim().chars().take(300).collect();
+        info!(preview = %content_preview, tokens = response.tokens_output, "Standard run: model output");
+
         let edits = match parse_edits(&response.content) {
             Ok(edits) => edits,
             Err(e) => {
-                warn!("Failed to parse edits: {e}");
+                warn!(error = %e, "Failed to parse edits");
 
                 // Knowledge: record failure
                 if let (Some(kc), Some(id), Some(mut record)) = (&self.knowledge, &run_id, run_record.take()) {
@@ -581,9 +584,14 @@ impl Agent {
             info!(step, model = %response.model, tokens_out = response.tokens_output, "Tool loop step");
 
             let content = response.content.trim();
+
+            // Debug: log first 200 chars of model output for diagnosis
+            let preview: String = content.chars().take(200).collect();
+            info!(step, preview = %preview, "Model output preview");
+
             let actions = match parse_actions(content) {
                 Ok(a) if !a.is_empty() => a,
-                _ => {
+                Ok(_) | Err(_) => {
                     // No structured actions — try plain edit blocks
                     let edits = crate::parser::parse_edits(content).unwrap_or_default();
                     if !edits.is_empty() {
@@ -605,7 +613,13 @@ impl Agent {
                         break;
                     }
 
-                    info!(step, "No parseable actions, treating as final response");
+                    // Step 1 with no structured output → fall back to simpler EDIT_FORMAT
+                    if step == 1 {
+                        info!(step, content_len = content.len(), "No structured actions on step 1, falling back to standard run");
+                        return self.run(task, file_paths, complexity).await;
+                    }
+
+                    info!(step, content_len = content.len(), "No parseable actions, treating as final response");
                     break;
                 }
             };
