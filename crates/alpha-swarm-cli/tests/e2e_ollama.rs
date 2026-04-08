@@ -1,5 +1,7 @@
 /// E2E tests against real Ollama instance.
 /// Run with: ALPHA_SWARM_OLLAMA_URL=http://100.81.10.8:11434 cargo test --test e2e_ollama -- --ignored
+use std::sync::Arc;
+
 use agent_core::Agent;
 use inference_client::{Complexity, InferenceRouter, OllamaBackend};
 
@@ -51,7 +53,7 @@ async fn agent_modifies_code_via_ollama() {
     .unwrap();
 
     let router = setup_router();
-    let agent = Agent::new(&router, dir.path());
+    let agent = Agent::new(Arc::new(router), dir.path());
     let result = agent
         .run(
             "Add a function called greet that takes a name parameter and prints a greeting. Call it from main.",

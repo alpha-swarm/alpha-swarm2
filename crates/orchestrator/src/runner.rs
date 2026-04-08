@@ -38,6 +38,7 @@ pub struct SwarmRunner {
     parent_run_id: Option<String>,
     max_concurrent: usize,
     nats_client: Option<async_nats::Client>,
+    planner_tier: swarm_config::TierConfig,
 }
 
 /// Default concurrency when not configured
@@ -59,6 +60,7 @@ impl SwarmRunner {
             parent_run_id: None,
             max_concurrent: DEFAULT_MAX_CONCURRENT,
             nats_client: None,
+            planner_tier: swarm_config::TierConfig::orchestrator(),
         }
     }
 
@@ -82,6 +84,11 @@ impl SwarmRunner {
         self
     }
 
+    pub fn with_planner_tier(mut self, tier: swarm_config::TierConfig) -> Self {
+        self.planner_tier = tier;
+        self
+    }
+
     /// Execute a high-level goal: plan → spawn agents in parallel → merge → validate.
     pub async fn run(&self, goal: &str) -> Result<SwarmResult> {
         let start = Instant::now();
@@ -93,7 +100,7 @@ impl SwarmRunner {
         info!(file_count = repo_files.len(), "Discovered repo files");
 
         // 2. Plan: decompose goal into sub-tasks
-        let tasks = plan_goal(&self.router, goal, &repo_files).await
+        let tasks = plan_goal(&self.router, goal, &repo_files, &self.planner_tier).await
             .context("Goal planning failed")?;
 
         info!(task_count = tasks.len(), "Goal decomposed");

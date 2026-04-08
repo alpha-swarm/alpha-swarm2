@@ -33,8 +33,16 @@ fn tier_options(tier: &swarm_config::TierConfig) -> InferenceOptions {
 }
 
 /// Default inference options — agent tier.
+/// Respects ALPHA_SWARM_AGENT_MODEL env var for model override.
 fn default_options() -> InferenceOptions {
-    tier_options(&swarm_config::TierConfig::agent())
+    let mut tier = swarm_config::TierConfig::agent();
+    if let Ok(model) = std::env::var("ALPHA_SWARM_AGENT_MODEL") {
+        tier.model = model;
+    }
+    if let Ok(ctx) = std::env::var("ALPHA_SWARM_AGENT_CTX") {
+        if let Ok(n) = ctx.parse() { tier.context_window = n; }
+    }
+    tier_options(&tier)
 }
 
 /// Auto-wrap heuristic: if model output content without <<< blocks,
@@ -53,10 +61,9 @@ fn try_auto_wrap(content: &str, file_paths: &[String], repo_path: &Path) -> Vec<
         return Vec::new();
     }
 
-    // Find a target file — prefer non-existent files (CREATE), else first assigned
+    // Only wrap for non-existent files — CREATE on existing files would overwrite them
     let target = file_paths.iter()
-        .find(|f| !repo_path.join(f).exists())
-        .or_else(|| file_paths.first());
+        .find(|f| !repo_path.join(f).exists());
 
     if let Some(target) = target {
         info!(file = %target, "Auto-wrapping response as CREATE");

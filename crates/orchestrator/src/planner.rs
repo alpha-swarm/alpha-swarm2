@@ -43,8 +43,9 @@ pub async fn plan_goal(
     router: &InferenceRouter,
     goal: &str,
     repo_files: &[String],
+    tier: &swarm_config::TierConfig,
 ) -> Result<Vec<SubTask>> {
-    info!(goal, file_count = repo_files.len(), "Planning goal decomposition");
+    info!(goal, file_count = repo_files.len(), model = %tier.model, "Planning goal decomposition");
 
     let file_list = repo_files.join("\n");
     let user_msg = format!("GOAL: {goal}\n\nREPOSITORY FILES:\n{file_list}");
@@ -54,11 +55,10 @@ pub async fn plan_goal(
         ChatMessage::user(user_msg),
     ];
 
-    // Use complex tier for planning — needs good reasoning
-    let orch_tier = swarm_config::TierConfig::orchestrator();
     let options = InferenceOptions {
-        max_tokens: Some(orch_tier.context_window),
-        preferred_model: Some(orch_tier.model.clone()),
+        max_tokens: Some(tier.context_window),
+        preferred_model: Some(tier.model.clone()),
+        preferred_backend: Some(inference_client::BackendKind::Ollama),
         ..Default::default()
     };
 

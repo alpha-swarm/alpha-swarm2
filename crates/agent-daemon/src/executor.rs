@@ -147,7 +147,7 @@ async fn handle_planning(
     };
     let _ = store.db_query_raw(&format_update(task_id, &format!("SET progress_message = '{}'", progress.replace('\'', "")))).await;
 
-    match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files).await {
+    match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files, &config.tiers.orchestrator).await {
         Ok(tasks) => {
             let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -272,19 +272,14 @@ async fn handle_execute(
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
 
-    // Lifecycle: on_agent_start — index embeddings in BACKGROUND (don't block execution)
+    // Lifecycle: index embeddings BEFORE planning (avoids Ollama contention)
     let embed_model = config.defaults.embed_model.clone();
     let emb_manager = std::sync::Arc::new(knowledge_base::embedding_manager::EmbeddingManager::new(
         Arc::clone(&store), Arc::clone(&ollama), embed_model,
     ));
     {
-        let emb = Arc::clone(&emb_manager);
-        let project = project.to_string();
-        let repo = repo_path.clone();
-        tokio::spawn(async move {
-            let indexed = emb.on_agent_start(&project, &repo).await;
-            if indexed > 0 { info!(indexed, "Background: indexed project files for RAG"); }
-        });
+        let indexed = emb_manager.on_agent_start(project, &repo_path).await;
+        if indexed > 0 { info!(indexed, "Indexed project files for RAG"); }
     }
 
     // Helper: update progress on the running task
@@ -356,7 +351,8 @@ async fn handle_execute(
         runner = runner
             .with_store(Arc::clone(&store))
             .with_parent_run_id(task_id)
-            .with_max_concurrent(config.resources.max_concurrent_agents);
+            .with_max_concurrent(config.resources.max_concurrent_agents)
+            .with_planner_tier(config.tiers.orchestrator.clone());
 
         // Connect to NATS for distributed tool dispatch (best-effort)
         if let Ok(nats_client) = async_nats::connect(&config.nats.url).await {

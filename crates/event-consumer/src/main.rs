@@ -73,6 +73,9 @@ async fn main() -> Result<()> {
             SwarmEvent::QualityChecked { project, check_name, passed, .. } => {
                 info!(project, check_name, passed, "Quality checked");
             }
+            SwarmEvent::TaskSubmitted { project, task_id, goal, .. } => {
+                info!(project, task_id, goal, "Task submitted");
+            }
         }
     }
     Ok(())

@@ -1,6 +1,7 @@
 /// Integration tests for agent-core with mock inference backend.
 /// No external services needed — uses MockBackend.
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use agent_core::{Agent, AgentResult};
 use inference_client::{mock::MockBackend, BackendKind, Complexity, InferenceRouter};
@@ -31,7 +32,7 @@ async fn agent_applies_edit() {
         "<<<EDIT src/main.rs\n--- OLD\nfn main() {\n    println!(\"hello\");\n}\n--- NEW\nfn main() {\n    println!(\"hello, world!\");\n}\n>>>",
     );
 
-    let agent = Agent::new(&router, repo.path());
+    let agent = Agent::new(Arc::new(router), repo.path());
     let result = agent
         .run(
             "change hello to hello world",
@@ -54,7 +55,7 @@ async fn agent_no_edits_in_response() {
     let repo = create_test_repo();
     let router = setup_router_with_response("The code looks fine, no changes needed.");
 
-    let agent = Agent::new(&router, repo.path());
+    let agent = Agent::new(Arc::new(router), repo.path());
     let result = agent
         .run(
             "review code",
@@ -75,7 +76,7 @@ async fn agent_creates_new_file() {
         "<<<CREATE src/lib.rs\npub fn greet() -> &'static str {\n    \"hello\"\n}\n>>>",
     );
 
-    let agent = Agent::new(&router, repo.path());
+    let agent = Agent::new(Arc::new(router), repo.path());
     let result = agent
         .run(
             "create a lib.rs with greet function",
@@ -96,7 +97,7 @@ async fn agent_missing_file_returns_error() {
     let repo = create_test_repo();
     let router = setup_router_with_response("no edits");
 
-    let agent = Agent::new(&router, repo.path());
+    let agent = Agent::new(Arc::new(router), repo.path());
     let result = agent
         .run(
             "fix something",
@@ -113,7 +114,7 @@ async fn agent_result_has_model_info() {
     let repo = create_test_repo();
     let router = setup_router_with_response("no edits");
 
-    let agent = Agent::new(&router, repo.path());
+    let agent = Agent::new(Arc::new(router), repo.path());
     let result = agent
         .run(
             "review",
