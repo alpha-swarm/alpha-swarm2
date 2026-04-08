@@ -26,8 +26,8 @@ project = "default"
 # --- Agent Tiers ---
 # Orchestrator: top-level goal planner, uses the biggest model
 [tiers.orchestrator]
-model = "qwen2.5-coder:7b"
-context_window = 32768
+model = "qwen2.5-coder:14b"
+context_window = 8192
 time_limit_secs = 14400         # 4 hours
 token_limit = 1000000           # 1M tokens
 max_iterations = 20
@@ -36,8 +36,8 @@ max_context_files = 100
 
 # Agent: sub-task executor, medium model
 [tiers.agent]
-model = "qwen2.5-coder:32b"
-context_window = 16384
+model = "qwen2.5-coder:14b"
+context_window = 8192
 time_limit_secs = 1800          # 30 min
 token_limit = 300000            # 300K tokens
 max_iterations = 10
