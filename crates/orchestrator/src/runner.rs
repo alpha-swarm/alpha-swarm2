@@ -192,19 +192,18 @@ impl SwarmRunner {
             }
         }
 
-        // 6. Commit changes from workspaces using git2 (in-memory tree)
+        // 6. Create git2 commits from workspace changes (no main repo modification yet)
         let mut merged_diff = String::new();
+        let mut commit_results = Vec::new();
         if any_applied {
             for result in &results {
                 if result.agent_result.as_ref().is_some_and(|r| r.applied) {
                     let msg = format!("agent({}): {}", result.task.id, result.task.description);
                     match mem_manager.commit_changes(&result.task.id, &msg) {
-                        Ok(commit_result) => {
-                            if commit_result.has_changes {
-                                merged_diff.push_str(&commit_result.diff);
-                                if let Err(e) = mem_manager.apply_to_working_dir(&commit_result) {
-                                    warn!(task_id = %result.task.id, "Apply to working dir failed: {e}");
-                                }
+                        Ok(cr) => {
+                            if cr.has_changes {
+                                merged_diff.push_str(&cr.diff);
+                                commit_results.push(cr);
                             } else {
                                 info!(task_id = %result.task.id, "No changes detected in workspace");
                             }
@@ -217,7 +216,7 @@ impl SwarmRunner {
             }
         }
 
-        // 7. Run quality gate on merged result — skip if only non-code files modified
+        // 7. Run quality gate on WORKSPACE (not main repo) — never touch main during checks
         let code_extensions = ["rs", "ts", "js", "go", "py"];
         let modified_files: Vec<String> = results.iter()
             .filter(|r| r.agent_result.as_ref().is_some_and(|a| a.applied))
@@ -227,19 +226,24 @@ impl SwarmRunner {
             code_extensions.iter().any(|ext| f.ends_with(&format!(".{ext}")))
         });
 
+        // Use the first workspace that has changes for quality gate
+        let qg_path = commit_results.first()
+            .map(|cr| cr.workspace_path.clone())
+            .unwrap_or_else(|| self.repo_path.clone());
+
         let quality_passed = if any_applied && has_code_changes {
-            // Auto-format before quality gate — models often get whitespace wrong
-            if self.repo_path.join("Cargo.toml").exists() {
+            // Auto-format in workspace before quality gate
+            if qg_path.join("Cargo.toml").exists() {
                 let _ = std::process::Command::new("cargo")
                     .args(["fmt"])
-                    .current_dir(&self.repo_path)
+                    .current_dir(&qg_path)
                     .output();
                 info!("Auto-formatted with cargo fmt before quality gate");
             }
 
-            info!("Running quality gate (code files modified)");
-            let config = quality_gate_lib::detect_toolchain(&self.repo_path);
-            match quality_gate_lib::run_all(&self.repo_path, &config).await {
+            info!(path = %qg_path.display(), "Running quality gate on workspace");
+            let config = quality_gate_lib::detect_toolchain(&qg_path);
+            match quality_gate_lib::run_all(&qg_path, &config).await {
                 Ok(checks) => {
                     let passed = checks.iter().all(|c| c.passed);
                     for check in &checks {
@@ -260,7 +264,16 @@ impl SwarmRunner {
             true
         };
 
-        // 8. Cleanup workspaces
+        // 8. Apply to main repo ONLY if quality gate passed
+        if quality_passed && !commit_results.is_empty() {
+            for cr in &commit_results {
+                if let Err(e) = mem_manager.apply_to_main(cr) {
+                    warn!("Failed to apply agent commit to main: {e}");
+                }
+            }
+        }
+
+        // 9. Cleanup workspaces
         mem_manager.cleanup();
 
         let total_duration_ms = start.elapsed().as_millis() as u64;

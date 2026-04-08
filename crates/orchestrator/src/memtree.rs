@@ -1,8 +1,8 @@
 //! In-memory git tree workspace using git2.
 //!
-//! Replaces git worktrees with a hybrid approach:
-//! - Agent works on temp directory (tools need real files)
-//! - git2 handles commit creation and merge (no `git apply`)
+//! Agents work in isolated clones. git2 handles commit creation and diff
+//! extraction. The main repo working directory is NEVER modified during
+//! agent execution — changes are only applied after quality gate passes.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::info;
 
-/// Manages agent workspaces backed by git2 for reliable commit/merge.
+/// Manages agent workspaces backed by local git clones + git2.
 pub struct MemTreeManager {
     repo_path: PathBuf,
     base_dir: PathBuf,
@@ -34,9 +34,9 @@ impl MemTreeManager {
         }
     }
 
-    /// Create an isolated workspace for an agent.
-    /// Copies only the files the agent needs into a temp directory.
-    pub fn create(&mut self, agent_id: &str, files: &[String]) -> Result<PathBuf> {
+    /// Create an isolated workspace by cloning the repo.
+    /// Agent gets a full buildable project. Returns the clone path.
+    pub fn create(&mut self, agent_id: &str, _files: &[String]) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.base_dir)
             .context("Failed to create workspace base dir")?;
 
@@ -46,22 +46,21 @@ impl MemTreeManager {
         if work_dir.exists() {
             let _ = std::fs::remove_dir_all(&work_dir);
         }
-        std::fs::create_dir_all(&work_dir)?;
 
-        // Copy needed files from repo to workspace
-        for file in files {
-            let src = self.repo_path.join(file);
-            let dst = work_dir.join(file);
+        // Local git clone (uses hardlinks, fast)
+        let output = std::process::Command::new("git")
+            .args(["clone", "--local", "--no-hardlinks"])
+            .arg(&self.repo_path)
+            .arg(&work_dir)
+            .output()
+            .context("Failed to run git clone")?;
 
-            if src.exists() {
-                if let Some(parent) = dst.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::copy(&src, &dst)?;
-            }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git clone failed: {stderr}");
         }
 
-        info!(agent = agent_id, path = %work_dir.display(), files = files.len(), "Created workspace");
+        info!(agent = agent_id, path = %work_dir.display(), "Created workspace (local clone)");
 
         self.workspaces.push(WorkspaceInfo {
             agent_id: agent_id.to_string(),
@@ -71,28 +70,30 @@ impl MemTreeManager {
         Ok(work_dir)
     }
 
-    /// After agent finishes, collect changes and create a git commit using git2.
-    /// Returns the diff as a string for visibility.
+    /// After agent finishes, extract diff from workspace and create a git2 commit
+    /// in the MAIN repo (without updating working directory).
     pub fn commit_changes(&self, agent_id: &str, message: &str) -> Result<CommitResult> {
         let ws = self.workspaces.iter()
             .find(|w| w.agent_id == agent_id)
             .context("Workspace not found")?;
 
+        // Open the main repo for commit creation
         let repo = git2::Repository::open(&self.repo_path)
-            .context("Failed to open git repo")?;
+            .context("Failed to open main git repo")?;
 
         let head = repo.head().context("Failed to get HEAD")?;
         let head_commit = head.peel_to_commit().context("Failed to peel HEAD to commit")?;
         let base_tree = head_commit.tree().context("Failed to get HEAD tree")?;
 
-        // Collect changes: compare workspace files against repo HEAD
-        let changes = collect_changes(&repo, &base_tree, &ws.work_dir, &self.repo_path)?;
+        // Collect changes: compare workspace files against main repo HEAD
+        let changes = collect_changes(&repo, &base_tree, &ws.work_dir)?;
 
         if changes.is_empty() {
             return Ok(CommitResult {
                 has_changes: false,
                 diff: String::new(),
                 commit_id: None,
+                workspace_path: ws.work_dir.clone(),
             });
         }
 
@@ -100,16 +101,12 @@ impl MemTreeManager {
         let new_tree_id = build_tree_with_changes(&repo, &base_tree, &changes)?;
         let new_tree = repo.find_tree(new_tree_id)?;
 
-        // Generate diff for visibility
+        // Generate diff text for visibility
         let diff = repo.diff_tree_to_tree(Some(&base_tree), Some(&new_tree), None)?;
         let mut diff_text = String::new();
         diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
             let prefix = match line.origin() {
-                '+' => "+",
-                '-' => "-",
-                ' ' => " ",
-                'H' => "",  // file header
-                'F' => "",  // file header
+                '+' | '-' | ' ' => &line.origin().to_string(),
                 _ => "",
             };
             diff_text.push_str(prefix);
@@ -119,15 +116,11 @@ impl MemTreeManager {
             true
         })?;
 
-        // Create commit
+        // Create commit in main repo (no ref update — just an object)
         let sig = git2::Signature::now("alpha-swarm", "agent@alpha-swarm.local")?;
         let commit_id = repo.commit(
-            None,  // Don't update any ref — we'll merge/apply manually
-            &sig,
-            &sig,
-            message,
-            &new_tree,
-            &[&head_commit],
+            None, // Don't update any ref
+            &sig, &sig, message, &new_tree, &[&head_commit],
         )?;
 
         info!(agent = agent_id, changes = changes.len(), commit = %commit_id, "Created commit from workspace");
@@ -136,32 +129,39 @@ impl MemTreeManager {
             has_changes: true,
             diff: diff_text,
             commit_id: Some(commit_id),
+            workspace_path: ws.work_dir.clone(),
         })
     }
 
-    /// Apply committed changes to the working directory.
-    pub fn apply_to_working_dir(&self, commit_result: &CommitResult) -> Result<()> {
+    /// Apply a committed change to the main repo working directory.
+    /// Called ONLY after quality gate passes on the workspace.
+    pub fn apply_to_main(&self, commit_result: &CommitResult) -> Result<()> {
         let Some(commit_id) = commit_result.commit_id else {
             return Ok(());
         };
 
         let repo = git2::Repository::open(&self.repo_path)?;
         let commit = repo.find_commit(commit_id)?;
+
+        // Fast-forward HEAD to the agent's commit
+        let mut head_ref = repo.head()?;
+        head_ref.set_target(commit_id, &format!("alpha-swarm: {}", commit.message().unwrap_or("agent commit")))?;
+
+        // Checkout the new tree to update working directory
         let tree = commit.tree()?;
-
-        // Checkout the new tree to the working directory
         let mut checkout = git2::build::CheckoutBuilder::new();
-        checkout.safe();  // Don't overwrite untracked files
-        checkout.update_index(true);
+        checkout.force(); // We've verified quality, safe to overwrite
+        repo.checkout_tree(tree.as_object(), Some(&mut checkout))?;
 
-        repo.checkout_tree(tree.as_object(), Some(&mut checkout))
-            .context("Failed to checkout new tree")?;
-
-        // Fast-forward HEAD to the new commit
-        repo.head()?.set_target(commit_id, "alpha-swarm agent commit")?;
-
-        info!(commit = %commit_id, "Applied changes to working directory");
+        info!(commit = %commit_id, "Applied agent commit to main repo");
         Ok(())
+    }
+
+    /// Get the workspace path for running quality gate.
+    pub fn workspace_path(&self, agent_id: &str) -> Option<&Path> {
+        self.workspaces.iter()
+            .find(|w| w.agent_id == agent_id)
+            .map(|w| w.work_dir.as_path())
     }
 
     /// Clean up all workspaces.
@@ -183,48 +183,40 @@ pub struct CommitResult {
     pub has_changes: bool,
     pub diff: String,
     pub commit_id: Option<git2::Oid>,
+    pub workspace_path: PathBuf,
 }
 
 /// File change types.
 enum Change {
     Modified(Vec<u8>),
     Created(Vec<u8>),
-    #[allow(dead_code)]
-    Deleted,
 }
 
-/// Compare workspace files against the git HEAD tree.
+/// Compare workspace files against git HEAD tree.
 fn collect_changes(
     repo: &git2::Repository,
     base_tree: &git2::Tree,
     work_dir: &Path,
-    repo_path: &Path,
 ) -> Result<HashMap<String, Change>> {
     let mut changes = HashMap::new();
 
-    // Walk the workspace directory
     walk_dir(work_dir, work_dir, &mut |rel_path| {
         let ws_content = match std::fs::read(work_dir.join(rel_path)) {
             Ok(c) => c,
             Err(_) => return,
         };
 
-        // Check if file exists in base tree
         match base_tree.get_path(Path::new(rel_path)) {
             Ok(entry) => {
-                // File exists — check if modified
-                if let Ok(blob) = repo.find_blob(entry.id())
-                    && blob.content() != ws_content.as_slice() {
+                if let Ok(blob) = repo.find_blob(entry.id()) {
+                    if blob.content() != ws_content.as_slice() {
                         changes.insert(rel_path.to_string(), Change::Modified(ws_content));
+                    }
                 }
             }
             Err(_) => {
-                // File doesn't exist in base tree — new file
-                // But only if it also doesn't exist on disk (agent created it)
-                let disk_path = repo_path.join(rel_path);
-                if !disk_path.exists() || std::fs::read(&disk_path).ok().as_deref() != Some(&ws_content) {
-                    changes.insert(rel_path.to_string(), Change::Created(ws_content));
-                }
+                // New file created by agent
+                changes.insert(rel_path.to_string(), Change::Created(ws_content));
             }
         }
     });
@@ -238,71 +230,57 @@ fn build_tree_with_changes(
     base_tree: &git2::Tree,
     changes: &HashMap<String, Change>,
 ) -> Result<git2::Oid> {
-    // For nested paths, we need to build trees bottom-up.
-    // Group changes by top-level directory.
-    build_tree_recursive(repo, base_tree, changes, "")
+    // Group changes by directory for recursive tree building
+    build_subtree(repo, Some(base_tree), changes, "")
 }
 
-fn build_tree_recursive(
+/// Recursively build tree, handling nested directories.
+fn build_subtree(
     repo: &git2::Repository,
-    base_tree: &git2::Tree,
+    base: Option<&git2::Tree>,
     changes: &HashMap<String, Change>,
     prefix: &str,
 ) -> Result<git2::Oid> {
-    let mut builder = repo.treebuilder(Some(base_tree))?;
+    let mut builder = repo.treebuilder(base)?;
+
+    // Find direct children at this level
+    let mut handled_dirs = std::collections::HashSet::new();
 
     for (path, change) in changes {
+        // Get path relative to current prefix
         let rel = if prefix.is_empty() {
             path.as_str()
-        } else if let Some(stripped) = path.strip_prefix(prefix) {
-            stripped.trim_start_matches('/')
+        } else if let Some(stripped) = path.strip_prefix(&format!("{prefix}/")) {
+            stripped
         } else {
-            continue; // Not in this subtree
+            continue;
         };
 
-        // If path has '/', it's in a subdirectory — handle recursively
-        if let Some(slash_pos) = rel.find('/') {
-            let dir_name = &rel[..slash_pos];
+        if let Some(slash) = rel.find('/') {
+            // Nested in subdirectory
+            let dir_name = &rel[..slash];
+            if handled_dirs.insert(dir_name.to_string()) {
+                // Get existing subtree
+                let sub_tree = base.and_then(|t| {
+                    t.get_name(dir_name)
+                        .and_then(|e| repo.find_tree(e.id()).ok())
+                });
 
-            // Get existing subtree or create empty
-            let sub_tree = if let Ok(entry) = base_tree.get_path(Path::new(dir_name)) {
-                repo.find_tree(entry.id()).ok()
-            } else {
-                None
-            };
-            let sub_tree = sub_tree.unwrap_or_else(|| {
-                let empty = repo.treebuilder(None).unwrap().write().unwrap();
-                repo.find_tree(empty).unwrap()
-            });
+                let sub_prefix = if prefix.is_empty() {
+                    dir_name.to_string()
+                } else {
+                    format!("{prefix}/{dir_name}")
+                };
 
-            // Collect changes for this subdirectory
-            let sub_prefix = if prefix.is_empty() {
-                dir_name.to_string()
-            } else {
-                format!("{prefix}/{dir_name}")
-            };
-            let sub_changes: HashMap<String, Change> = changes.iter()
-                .filter(|(p, _)| p.starts_with(&format!("{sub_prefix}/")))
-                .map(|(p, c)| (p.clone(), match c {
-                    Change::Modified(v) => Change::Modified(v.clone()),
-                    Change::Created(v) => Change::Created(v.clone()),
-                    Change::Deleted => Change::Deleted,
-                }))
-                .collect();
-
-            if !sub_changes.is_empty() {
-                let sub_tree_id = build_tree_recursive(repo, &sub_tree, &sub_changes, &sub_prefix)?;
-                builder.insert(dir_name, sub_tree_id, 0o040000)?;
+                let sub_oid = build_subtree(repo, sub_tree.as_ref(), changes, &sub_prefix)?;
+                builder.insert(dir_name, sub_oid, 0o040000)?;
             }
         } else {
-            // Direct file in this directory
+            // Direct file at this level
             match change {
                 Change::Modified(content) | Change::Created(content) => {
                     let blob_id = repo.blob(content)?;
                     builder.insert(rel, blob_id, 0o100644)?;
-                }
-                Change::Deleted => {
-                    let _ = builder.remove(rel);
                 }
             }
         }
