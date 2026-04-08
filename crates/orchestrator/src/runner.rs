@@ -10,7 +10,7 @@ use inference_client::{InferenceRouter, OllamaBackend};
 use knowledge_base::KnowledgeStore;
 
 use crate::planner::{SubTask, plan_goal};
-use crate::worktree::WorktreeManager;
+use crate::memtree::MemTreeManager;
 
 /// Result of a full swarm run.
 pub struct SwarmResult {
@@ -105,14 +105,14 @@ impl SwarmRunner {
 
         info!(task_count = tasks.len(), "Goal decomposed");
 
-        // 3. Create worktrees for each agent
-        let mut wt_manager = WorktreeManager::new(&self.repo_path);
+        // 3. Create workspaces for each agent (temp dirs with file copies)
+        let mut mem_manager = MemTreeManager::new(&self.repo_path);
         let mut agent_paths = Vec::new();
 
         for task in &tasks {
-            let wt_path = wt_manager.create(&task.id)
-                .with_context(|| format!("Failed to create worktree for {}", task.id))?;
-            agent_paths.push((task.clone(), wt_path));
+            let ws_path = mem_manager.create(&task.id, &task.files)
+                .with_context(|| format!("Failed to create workspace for {}", task.id))?;
+            agent_paths.push((task.clone(), ws_path));
         }
 
         // 4. Run agents in PARALLEL using JoinSet (bounded by semaphore)
@@ -192,19 +192,25 @@ impl SwarmRunner {
             }
         }
 
-        // 6. Merge diffs back to main repo
+        // 6. Commit changes from workspaces using git2 (in-memory tree)
         let mut merged_diff = String::new();
         if any_applied {
             for result in &results {
                 if result.agent_result.as_ref().is_some_and(|r| r.applied) {
-                    match wt_manager.apply_diff_to_main(&result.task.id) {
-                        Ok(()) => {
-                            if let Ok(diff) = wt_manager.extract_diff(&result.task.id) {
-                                merged_diff.push_str(&diff);
+                    let msg = format!("agent({}): {}", result.task.id, result.task.description);
+                    match mem_manager.commit_changes(&result.task.id, &msg) {
+                        Ok(commit_result) => {
+                            if commit_result.has_changes {
+                                merged_diff.push_str(&commit_result.diff);
+                                if let Err(e) = mem_manager.apply_to_working_dir(&commit_result) {
+                                    warn!(task_id = %result.task.id, "Apply to working dir failed: {e}");
+                                }
+                            } else {
+                                info!(task_id = %result.task.id, "No changes detected in workspace");
                             }
                         }
                         Err(e) => {
-                            warn!(task_id = %result.task.id, "Merge failed: {e}");
+                            warn!(task_id = %result.task.id, "Commit failed: {e}");
                         }
                     }
                 }
@@ -254,8 +260,8 @@ impl SwarmRunner {
             true
         };
 
-        // 8. Cleanup worktrees
-        wt_manager.cleanup();
+        // 8. Cleanup workspaces
+        mem_manager.cleanup();
 
         let total_duration_ms = start.elapsed().as_millis() as u64;
 
