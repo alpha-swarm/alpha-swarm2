@@ -42,14 +42,17 @@ impl MemTreeManager {
 
         let work_dir = self.base_dir.join(agent_id);
 
-        // Clean up stale workspace
+        // Force-clean stale workspace (rm -rf handles locked files better)
         if work_dir.exists() {
-            let _ = std::fs::remove_dir_all(&work_dir);
+            let _ = std::process::Command::new("rm")
+                .args(["-rf"])
+                .arg(&work_dir)
+                .output();
         }
 
-        // Local git clone (uses hardlinks, fast)
+        // Local git clone — depth 1 for speed, shared objects
         let output = std::process::Command::new("git")
-            .args(["clone", "--local", "--no-hardlinks"])
+            .args(["clone", "--depth", "1", "--single-branch"])
             .arg(&self.repo_path)
             .arg(&work_dir)
             .output()
@@ -60,7 +63,15 @@ impl MemTreeManager {
             anyhow::bail!("git clone failed: {stderr}");
         }
 
-        info!(agent = agent_id, path = %work_dir.display(), "Created workspace (local clone)");
+        // Verify clone HEAD matches source
+        let head_output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&work_dir)
+            .output();
+        if let Ok(out) = head_output {
+            let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            info!(agent = agent_id, path = %work_dir.display(), head = %head, "Created workspace (local clone)");
+        }
 
         self.workspaces.push(WorkspaceInfo {
             agent_id: agent_id.to_string(),
