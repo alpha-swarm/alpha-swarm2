@@ -173,13 +173,12 @@ impl SwarmRunner {
                     }
                 }
 
-                // Create agent with VirtFileProvider
+                // Create agent with VirtFileProvider — use standard run() (not tool loop)
+                // because tools (read_file, grep) need disk which we don't have in zero-disk mode
                 let mut agent = Agent::new(Arc::clone(&self.router), &self.repo_path)
                     .with_file_provider(virt_fp);
 
-                let tools = swarm_tools::ToolRegistry::with_defaults();
-                const MAX_TOOL_STEPS: u32 = 10;
-                let result = agent.run_with_tools(&task.description, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
+                let result = agent.run(&task.description, &task.files, task.complexity).await;
 
                 match result {
                     Ok(agent_result) => {
