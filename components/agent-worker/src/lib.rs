@@ -187,9 +187,21 @@ impl Guest for AgentWorker {
         let req_body = request.consume().unwrap();
         let req_stream = req_body.stream().unwrap();
         let mut body_bytes = Vec::new();
-        while let Ok(chunk) = req_stream.read(65536) {
-            if chunk.is_empty() { break; }
-            body_bytes.extend_from_slice(&chunk);
+        loop {
+            match req_stream.read(65536) {
+                Ok(chunk) if chunk.is_empty() => break,
+                Ok(chunk) => body_bytes.extend_from_slice(&chunk),
+                Err(wasi::io::streams::StreamError::Closed) => break,
+                Err(_) => {
+                    // Stream not ready yet — poll and retry
+                    req_stream.subscribe().block();
+                    match req_stream.read(65536) {
+                        Ok(chunk) if chunk.is_empty() => break,
+                        Ok(chunk) => body_bytes.extend_from_slice(&chunk),
+                        _ => break,
+                    }
+                }
+            }
         }
         drop(req_stream);
         let _ = IncomingBody::finish(req_body);
