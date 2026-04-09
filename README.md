@@ -4,18 +4,13 @@ Distributed AI agent orchestration system. Multiple LLM-powered agents work on c
 
 ## Architecture
 
-```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│    picur     │    │  csatapaci   │    │    malna     │
-│   Mac Mini   │    │  M2 Max 96GB │    │   RPi 5 8GB  │
-│              │    │              │    │              │
-│ SurrealDB    │◄──►│ Ollama       │◄──►│ NATS quorum  │
-│ Web UI       │    │ 72B/33B/7B   │    │ WASI tools   │
-│ Daemon       │    │ Daemon       │    │              │
-│ NATS         │    │ NATS         │    │ NATS         │
-└──────┬───────┘    └──────┬───────┘    └──────┬───────┘
-       └───────────────────┴───────────────────┘
-                    Tailscale mesh
+```mermaid
+graph TD;
+  picur[Mac Mini\npicur\nSurrealDB\nWeb UI\nDaemon\nNATS] -- NATS --> csatapaci[M2 Max 96GB\ncsatapaci\nOllama 72B/33B/7B\nDaemon\nNATS];
+  csatapaci -- NATS --> malna[RPi 5 8GB\nmalna\nNATS quorum\nWASI tools\nNATS];
+  picur --- Tailscale_mesh[Tailscale mesh];
+  csatapaci --- Tailscale_mesh;
+  malna --- Tailscale_mesh;
 ```
 
 ## Components
