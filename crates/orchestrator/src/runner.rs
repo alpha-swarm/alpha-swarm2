@@ -31,6 +31,14 @@ pub struct TaskRunResult {
     pub error: Option<String>,
 }
 
+/// GitHub config for zero-disk mode.
+pub struct GitHubRepo {
+    pub owner: String,
+    pub repo: String,
+    pub token: String,
+    pub branch: String,
+}
+
 /// Runs multiple agents in parallel on a goal.
 pub struct SwarmRunner {
     router: Arc<InferenceRouter>,
@@ -42,6 +50,8 @@ pub struct SwarmRunner {
     max_concurrent: usize,
     nats_client: Option<async_nats::Client>,
     planner_tier: swarm_config::TierConfig,
+    /// When set, use GitHub API + VirtWorkspace instead of disk clone.
+    github: Option<GitHubRepo>,
 }
 
 /// Default concurrency when not configured
@@ -64,6 +74,7 @@ impl SwarmRunner {
             max_concurrent: DEFAULT_MAX_CONCURRENT,
             nats_client: None,
             planner_tier: swarm_config::TierConfig::orchestrator(),
+            github: None,
         }
     }
 
@@ -89,6 +100,12 @@ impl SwarmRunner {
 
     pub fn with_planner_tier(mut self, tier: swarm_config::TierConfig) -> Self {
         self.planner_tier = tier;
+        self
+    }
+
+    /// Enable zero-disk mode: files loaded via GitHub API, no git clone.
+    pub fn with_github(mut self, gh: GitHubRepo) -> Self {
+        self.github = Some(gh);
         self
     }
 

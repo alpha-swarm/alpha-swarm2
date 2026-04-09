@@ -19,4 +19,4 @@ pub use worktree::WorktreeManager;
 #[cfg(feature = "native")]
 pub use memtree::MemTreeManager;
 #[cfg(feature = "native")]
-pub use runner::{SwarmRunner, SwarmResult};
+pub use runner::{SwarmRunner, SwarmResult, GitHubRepo};

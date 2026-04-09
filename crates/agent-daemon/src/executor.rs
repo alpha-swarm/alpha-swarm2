@@ -350,6 +350,21 @@ async fn handle_execute(
             .with_max_concurrent(config.resources.max_concurrent_agents)
             .with_planner_tier(config.tiers.orchestrator.clone());
 
+        // Enable zero-disk mode when GITHUB_TOKEN is set
+        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            let gh_repo = std::env::var("GITHUB_REPO").unwrap_or_else(|_| "alpha-swarm/alpha-swarm2".into());
+            let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
+            if parts.len() == 2 {
+                runner = runner.with_github(swarm_orchestrator::GitHubRepo {
+                    owner: parts[0].into(),
+                    repo: parts[1].into(),
+                    token,
+                    branch: "main".into(),
+                });
+                info!("Zero-disk mode enabled (GitHub API)");
+            }
+        }
+
         // Connect to NATS for distributed tool dispatch (best-effort)
         if let Ok(nats_client) = async_nats::connect(&config.nats.url).await {
             runner = runner.with_nats_client(nats_client);
