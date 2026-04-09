@@ -8,8 +8,54 @@ wit_bindgen::generate!({
 use exports::wasi::http::incoming_handler::Guest;
 use wasi::http::outgoing_handler;
 use wasi::http::types::*;
+use wasi::blobstore;
 
 struct AgentWorker;
+
+// --- Blobstore-backed workspace operations ---
+
+/// Create a WasiBlobStoreAdapter wired to wasi:blobstore host calls.
+fn create_blobstore_adapter(container_name: &str) -> virt_git::WasiBlobStoreAdapter {
+    let cname = container_name.to_string();
+    let cname_get = cname.clone();
+    let cname_exists = cname.clone();
+    let cname_del = cname.clone();
+
+    virt_git::WasiBlobStoreAdapter::new(container_name)
+        .with_callbacks(
+            // put: write blob to NATS via wasi:blobstore
+            move |key: &str, data: &[u8]| {
+                let Ok(container) = blobstore::blobstore::get_container(&cname) else { return };
+                // Create outgoing value, write data, finalize
+                let outgoing = blobstore::types::OutgoingValue::new_outgoing_value();
+                if let Ok(stream) = outgoing.outgoing_value_write_body() {
+                    let _ = stream.blocking_write_and_flush(data);
+                    drop(stream);
+                }
+                let _ = container.write_data(key, &outgoing);
+            },
+            // get: read blob from NATS via sync consume
+            move |key: &str| -> Option<Vec<u8>> {
+                let container = blobstore::blobstore::get_container(&cname_get).ok()?;
+                // get-data with full range
+                let incoming = container.get_data(key, 0, u64::MAX).ok()?;
+                blobstore::types::IncomingValue::incoming_value_consume_sync(incoming).ok()
+            },
+            // exists
+            move |key: &str| -> bool {
+                blobstore::blobstore::get_container(&cname_exists)
+                    .ok()
+                    .and_then(|c| c.has_object(key).ok())
+                    .unwrap_or(false)
+            },
+            // delete
+            move |key: &str| {
+                if let Ok(container) = blobstore::blobstore::get_container(&cname_del) {
+                    let _ = container.delete_object(key);
+                }
+            },
+        )
+}
 
 // --- Ollama HTTP client via WASI ---
 
@@ -97,6 +143,12 @@ struct TaskRequest {
     ollama_url: String,
     #[serde(default)]
     files: Vec<FileInput>,
+    /// If set, use wasi:blobstore workspace instead of inline files.
+    #[serde(default)]
+    workspace_id: Option<String>,
+    /// File paths to load from workspace (when workspace_id is set).
+    #[serde(default)]
+    workspace_files: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -152,10 +204,24 @@ impl Guest for AgentWorker {
             }
         };
 
-        // Build prompt
+        // Build prompt — from inline files or blobstore workspace
         let mut file_context = String::new();
-        for f in &task_req.files {
-            file_context.push_str(&format!("=== {} ===\n{}\n\n", f.path, f.content));
+        let mut workspace = None;
+
+        if let Some(ref ws_id) = task_req.workspace_id {
+            // Use wasi:blobstore workspace
+            let mut store = create_blobstore_adapter(ws_id);
+            let mut ws = virt_git::VirtWorkspace::new();
+            // Also load files passed inline (fallback)
+            for f in &task_req.files {
+                ws.load_file(&mut store, &f.path, &f.content);
+                file_context.push_str(&format!("=== {} ===\n{}\n\n", f.path, f.content));
+            }
+            workspace = Some((store, ws));
+        } else {
+            for f in &task_req.files {
+                file_context.push_str(&format!("=== {} ===\n{}\n\n", f.path, f.content));
+            }
         }
         let user_msg = format!("TASK: {}\n\nFILES:\n{}", task_req.task, file_context);
 
@@ -174,25 +240,55 @@ impl Guest for AgentWorker {
             Ok(content) => {
                 let edits = edit_parser::parse_edits(&content).unwrap_or_default();
 
-                // Apply edits to files
+                // Apply edits — to workspace (blobstore) or inline files
                 let mut modified_files = Vec::new();
-                for edit in &edits {
-                    if let FileEdit::Edit { path, old, new } = edit
-                        && let Some(f) = task_req.files.iter().find(|f| f.path == *path) {
-                            let updated = f.content.replacen(old.as_str(), new.as_str(), 1);
-                            modified_files.push(format!(
-                                r#"{{"path":"{}","content":{}}}"#,
-                                path,
-                                serde_json::to_string(&updated).unwrap_or_default()
-                            ));
+                let mut diff_text = String::new();
+
+                if let Some((ref mut store, ref mut ws)) = workspace {
+                    // Apply edits to virt-git workspace → writes to blobstore
+                    for edit in &edits {
+                        if let FileEdit::Edit { path, old, new } = edit {
+                            if let Some(current) = ws.read_file(store, path) {
+                                let updated = current.replacen(old.as_str(), new.as_str(), 1);
+                                ws.write_file(store, path, &updated);
+                                modified_files.push(path.clone());
+                            }
+                        } else if let FileEdit::Create { path, content: c } = edit {
+                            ws.write_file(store, path, c);
+                            modified_files.push(path.clone());
+                        }
+                    }
+                    diff_text = ws.diff_text(store);
+                    if ws.has_changes() {
+                        ws.commit("agent edit");
+                    }
+                } else {
+                    // Inline mode (no workspace)
+                    for edit in &edits {
+                        if let FileEdit::Edit { path, old, new } = edit {
+                            if let Some(f) = task_req.files.iter().find(|f| f.path == *path) {
+                                let updated = f.content.replacen(old.as_str(), new.as_str(), 1);
+                                modified_files.push(format!(
+                                    r#"{{"path":"{}","content":{}}}"#,
+                                    path, serde_json::to_string(&updated).unwrap_or_default()
+                                ));
+                            }
+                        }
                     }
                 }
 
+                let modified_json = if workspace.is_some() {
+                    modified_files.iter().map(|p| format!(r#""{}""#, p)).collect::<Vec<_>>().join(",")
+                } else {
+                    modified_files.join(",")
+                };
+
                 let resp = format!(
-                    r#"{{"status":"ok","model":"{}","edits":{},"modified_files":[{}],"raw_response":{}}}"#,
+                    r#"{{"status":"ok","model":"{}","edits":{},"modified_files":[{}],"diff":{},"raw_response":{}}}"#,
                     task_req.model,
                     edits.len(),
-                    modified_files.join(","),
+                    modified_json,
+                    serde_json::to_string(&diff_text).unwrap_or_default(),
                     serde_json::to_string(&content).unwrap_or_default()
                 );
                 respond_json(response_out, 200, &resp);

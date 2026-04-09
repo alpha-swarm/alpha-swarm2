@@ -19,6 +19,11 @@ world agent-worker {
     import wasi:io/poll@0.2.0;
     import wasi:io/error@0.2.0;
 
+    /// Blobstore for workspace file operations (backed by NATS Object Store)
+    import wasi:blobstore/blobstore@0.2.0-draft;
+    import wasi:blobstore/container@0.2.0-draft;
+    import wasi:blobstore/types@0.2.0-draft;
+
     /// Handle incoming HTTP requests (for task submission)
     export wasi:http/incoming-handler@0.2.0;
 }

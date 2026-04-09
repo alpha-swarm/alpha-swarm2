@@ -69,6 +69,7 @@ dependencies = [
  "edit-parser",
  "serde",
  "serde_json",
+ "virt-git",
  "wit-bindgen 0.41.0",
 ]
 
