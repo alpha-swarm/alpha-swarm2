@@ -677,8 +677,14 @@ impl Agent {
                         }
                     }
                     AgentAction::Done { summary } => {
-                        info!(step, summary = %summary, "Tool loop: DONE");
-                        done = true;
+                        if all_edits.is_empty() && step <= 2 {
+                            // Model said DONE without making edits — nudge it
+                            info!(step, summary = %summary, "Tool loop: DONE with no edits, nudging");
+                            feedback_parts.push(format!("[DONE] {summary}\n\nYou haven't made any edits yet. Please produce <<<EDIT>>> blocks to modify the files. Read the file first if needed, then output the edit."));
+                        } else {
+                            info!(step, summary = %summary, "Tool loop: DONE");
+                            done = true;
+                        }
                     }
                 }
             }
