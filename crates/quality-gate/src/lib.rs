@@ -33,7 +33,7 @@ pub fn detect_toolchain(repo_path: &Path) -> ToolchainConfig {
         ToolchainConfig {
             build_cmd: Some("cargo check".into()),
             fmt_cmd: Some("cargo fmt -- --check".into()),
-            lint_cmd: Some("cargo clippy -- -D warnings".into()),
+            lint_cmd: Some("cargo clippy".into()),
             unit_test_cmd: Some("cargo test --lib".into()),
             integration_test_cmd: None,
             e2e_test_cmd: None,
@@ -166,7 +166,7 @@ mod tests {
         let config = detect_toolchain(dir.path());
         assert_eq!(config.build_cmd.as_deref(), Some("cargo check"));
         assert_eq!(config.fmt_cmd.as_deref(), Some("cargo fmt -- --check"));
-        assert_eq!(config.lint_cmd.as_deref(), Some("cargo clippy -- -D warnings"));
+        assert_eq!(config.lint_cmd.as_deref(), Some("cargo clippy"));
         assert_eq!(config.unit_test_cmd.as_deref(), Some("cargo test --lib"));
     }
 
