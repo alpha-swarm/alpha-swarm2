@@ -221,16 +221,47 @@ impl SwarmRunner {
                 let ollama_url = std::env::var("ALPHA_SWARM_OLLAMA_URL")
                     .unwrap_or_else(|_| "http://100.81.10.8:11434".into());
 
-                // Send file references for blobstore + inline content as fallback
-                // Inline is truncated to fit HTTP body limit (~3KB)
+                // Include file content inline for the WASI component
                 let mut inline_files = Vec::new();
+                let mut total_content_size = 0usize;
                 for file_path in &file_paths_loaded {
                     if let Some(content) = virt_fp.workspace.read_file(&virt_fp.store, file_path) {
-                        // Only include inline if small enough for HTTP body
-                        if content.len() < 3000 {
-                            inline_files.push(serde_json::json!({"path": file_path, "content": content}));
+                        total_content_size += content.len();
+                        inline_files.push(serde_json::json!({"path": file_path, "content": content}));
+                    }
+                }
+
+                // If total content > 2KB, use native agent (WASI component has body size limit in wash dev)
+                if total_content_size > 2000 {
+                    info!(total_content_size, "Large files — using native agent with VirtFileProvider");
+                    let mut agent = Agent::new(Arc::clone(&self.router), &self.repo_path)
+                        .with_file_provider(virt_fp);
+                    let result = agent.run(&task.description, &task.files, task.complexity).await;
+
+                    // Extract from provider
+                    if let Some(fp) = agent.take_file_provider() {
+                        if let Some(vfp) = fp.as_any().downcast_ref::<agent_core::VirtFileProvider>() {
+                            if vfp.has_changes() {
+                                any_applied = true;
+                                for (path, content) in vfp.modified_files() {
+                                    captured_files.push((path.clone(), content.into_bytes()));
+                                    info!(file = path, "Captured from VirtFileProvider");
+                                }
+                                merged_diff = vfp.diff_text();
+                            }
                         }
                     }
+
+                    match result {
+                        Ok(agent_result) => {
+                            if agent_result.applied { any_applied = true; }
+                            results.push(TaskRunResult { task: task.clone(), agent_result: Some(agent_result), error: None });
+                        }
+                        Err(e) => {
+                            results.push(TaskRunResult { task: task.clone(), agent_result: None, error: Some(e.to_string()) });
+                        }
+                    }
+                    continue;
                 }
 
                 let task_json = serde_json::json!({
