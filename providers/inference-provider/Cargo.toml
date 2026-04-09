@@ -13,3 +13,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-nats = "0.38"
 futures = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
+
+# wasmCloud provider SDK (optional, for host-managed mode)
+# wasmcloud-provider-sdk = { version = "0.17", optional = true }
+
+[features]
+default = ["standalone"]
+standalone = []  # Run as standalone NATS service
+# wasmcloud = ["wasmcloud-provider-sdk"]  # Run as wasmCloud host plugin

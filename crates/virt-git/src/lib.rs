@@ -1,0 +1,22 @@
+//! virt-git: In-memory content-addressed file store with git-like operations.
+//!
+//! Fully WASI-portable — no filesystem, no git2, no native deps.
+//! Backed by any key-value store (HashMap for local, NATS Object Store for distributed).
+//!
+//! # Architecture
+//!
+//! ```text
+//! Blob:   store[sha256(content)] = content bytes
+//! Tree:   store[sha256(entries)] = [TreeEntry { name, blob_sha }]
+//! Commit: store["commit/{id}"]  = { tree_sha, parent, message, timestamp }
+//! ```
+
+mod store;
+mod tree;
+mod diff;
+mod workspace;
+
+pub use store::{BlobStore, MemoryBlobStore};
+pub use tree::{TreeEntry, TreeSnapshot};
+pub use diff::{FileDiff, DiffKind, diff_trees, format_diff};
+pub use workspace::{VirtWorkspace, CommitInfo};
