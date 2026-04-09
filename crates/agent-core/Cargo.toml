@@ -8,14 +8,24 @@ license.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-uuid = { version = "1", features = ["v4"] }
-inference-client = { path = "../inference-client" }
+inference-client = { path = "../inference-client", default-features = false }
 edit-parser = { path = "../edit-parser" }
-quality-gate-lib = { path = "../quality-gate" }
-swarm-events = { path = "../events" }
 swarm-config = { path = "../config", default-features = false }
-knowledge-base = { path = "../knowledge-base" }
-swarm-tools = { path = "../tools" }
-chrono = "0.4"
+
+# Native-only deps
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+quality-gate-lib = { path = "../quality-gate", optional = true }
+swarm-events = { path = "../events", optional = true }
+knowledge-base = { path = "../knowledge-base", optional = true }
+swarm-tools = { path = "../tools", optional = true }
+chrono = { version = "0.4", optional = true }
+
+[features]
+default = ["native"]
+native = [
+    "inference-client/native",
+    "tokio", "tracing", "uuid",
+    "quality-gate-lib", "swarm-events", "knowledge-base", "swarm-tools", "chrono",
+]

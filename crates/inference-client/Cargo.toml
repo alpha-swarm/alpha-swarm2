@@ -8,7 +8,13 @@ license.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-reqwest.workspace = true
 async-trait.workspace = true
+
+# Native-only deps (not available on wasm32-wasip2)
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+
+[features]
+default = ["native"]
+native = ["tokio", "tracing", "reqwest"]
