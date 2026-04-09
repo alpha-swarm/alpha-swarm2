@@ -36,12 +36,10 @@ pub fn diff_trees(
         match new_entries.get(path) {
             Some(new_hash) if new_hash != old_hash => {
                 // Modified — compute text diff
-                let old_content = store.get(old_hash)
-                    .and_then(|b| std::str::from_utf8(b).ok())
-                    .unwrap_or("");
-                let new_content = store.get(new_hash)
-                    .and_then(|b| std::str::from_utf8(b).ok())
-                    .unwrap_or("");
+                let old_bytes = store.get(old_hash).unwrap_or_default();
+                let old_content = std::str::from_utf8(&old_bytes).unwrap_or("");
+                let new_bytes = store.get(new_hash).unwrap_or_default();
+                let new_content = std::str::from_utf8(&new_bytes).unwrap_or("");
 
                 let patch = text_diff(path, old_content, new_content);
 

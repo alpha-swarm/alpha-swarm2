@@ -54,7 +54,6 @@ impl TreeSnapshot {
     pub fn read(&self, store: &dyn BlobStore, path: &str) -> Option<Vec<u8>> {
         self.entries.get(path)
             .and_then(|hash| store.get(hash))
-            .map(|bytes| bytes.to_vec())
     }
 
     /// Read file as UTF-8 string.
