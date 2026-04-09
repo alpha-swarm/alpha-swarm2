@@ -9,7 +9,15 @@ use sha2::{Sha256, Digest};
 /// SHA256 hex string used as blob key.
 pub type BlobHash = String;
 
-/// Hash content to SHA256 hex.
+/// Computes the SHA256 hex digest of the provided content bytes.
+///
+/// # Arguments
+///
+/// * `content` - A slice of bytes representing the content to be hashed.
+///
+/// # Returns
+///
+/// A `BlobHash` which is the SHA256 hex string of the input content.
 pub fn content_hash(content: &[u8]) -> BlobHash {
     let hash = Sha256::digest(content);
     format!("{:x}", hash)
