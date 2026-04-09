@@ -21,6 +21,8 @@ pub struct SwarmResult {
     pub merged_diff: Option<String>,
     pub quality_passed: bool,
     pub total_duration_ms: u64,
+    /// Files modified by agents (path → new content).
+    pub modified_files: Vec<(String, Vec<u8>)>,
 }
 
 pub struct TaskRunResult {
@@ -265,12 +267,27 @@ impl SwarmRunner {
             true
         };
 
-        // 8. Apply to main repo ONLY if quality gate passed
+        // 8. Capture modified files from workspace (before cleanup)
+        let mut captured_files: Vec<(String, Vec<u8>)> = Vec::new();
         if quality_passed && !commit_results.is_empty() {
             for cr in &commit_results {
-                if let Err(e) = mem_manager.apply_to_main(cr) {
-                    warn!("Failed to apply agent commit to main: {e}");
+                if cr.has_changes {
+                    // Read modified files from workspace
+                    for result in &results {
+                        if result.agent_result.as_ref().is_some_and(|a| a.applied) {
+                            for file_path in &result.task.files {
+                                let full_path = cr.workspace_path.join(file_path);
+                                if let Ok(content) = std::fs::read(&full_path) {
+                                    captured_files.push((file_path.clone(), content));
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+            // Also try apply_to_main (best-effort, may fail)
+            for cr in &commit_results {
+                let _ = mem_manager.apply_to_main(cr);
             }
         }
 
@@ -286,6 +303,7 @@ impl SwarmRunner {
             merged_diff: if merged_diff.is_empty() { None } else { Some(merged_diff) },
             quality_passed,
             total_duration_ms,
+            modified_files: captured_files,
         })
     }
 }

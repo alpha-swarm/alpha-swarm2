@@ -11,6 +11,7 @@ serde_json.workspace = true
 inference-client = { path = "../inference-client", default-features = false }
 agent-core = { path = "../agent-core", default-features = false }
 swarm-config = { path = "../config", default-features = false }
+virt-git = { path = "../virt-git", optional = true }
 
 # Native-only
 tokio = { workspace = true, optional = true }
@@ -28,5 +29,5 @@ native = [
     "inference-client/native", "agent-core/native",
     "tokio", "tracing", "uuid",
     "quality-gate-lib", "knowledge-base", "swarm-tools",
-    "async-nats", "git2",
+    "async-nats", "git2", "virt-git",
 ]

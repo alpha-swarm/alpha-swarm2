@@ -60,6 +60,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "virt-git",
 ]
 
 [[package]]
@@ -4705,6 +4706,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "virt-git",
 ]
 
 [[package]]

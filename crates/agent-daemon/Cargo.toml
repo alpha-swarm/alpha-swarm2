@@ -29,3 +29,4 @@ futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 sysinfo = "0.33"
 reqwest = { version = "0.12", features = ["json"] }
+virt-git = { path = "../virt-git" }
