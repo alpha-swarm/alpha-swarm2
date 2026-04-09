@@ -9,7 +9,8 @@ use agent_core::{Agent, AgentResult, KnowledgeConfig};
 use inference_client::{InferenceRouter, OllamaBackend};
 use knowledge_base::KnowledgeStore;
 
-use crate::planner::{SubTask, plan_goal};
+use crate::planner::plan_goal;
+use crate::planner_types::SubTask;
 use crate::memtree::MemTreeManager;
 
 /// Result of a full swarm run.

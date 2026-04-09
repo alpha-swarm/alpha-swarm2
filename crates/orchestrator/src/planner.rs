@@ -1,44 +1,10 @@
-use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use inference_client::{ChatMessage, Complexity, InferenceOptions, InferenceRouter};
+use crate::planner_types::{SubTask, PLANNER_SYSTEM, parse_plan};
 
-/// A sub-task decomposed from a high-level goal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubTask {
-    pub id: String,
-    pub description: String,
-    pub files: Vec<String>,
-    pub complexity: Complexity,
-}
-
-const PLANNER_SYSTEM: &str = r#"You are a task decomposition agent. Given a high-level goal and a list of files in a repository, break the goal into independent sub-tasks that can be worked on in parallel by separate agents.
-
-RULES:
-- Each sub-task must list the specific files it will modify or create
-- Files that don't exist yet CAN be listed — agents will create them
-- No two sub-tasks should modify the same file
-- Each sub-task should be small enough for a single agent with limited context
-- Classify each sub-task as simple, medium, or complex
-- Include relevant existing files as context (so the agent knows what to reference)
-- Prefer fewer, well-scoped tasks over many tiny ones
-
-OUTPUT FORMAT (JSON array):
-```json
-[
-  {
-    "id": "task-1",
-    "description": "Clear description of what to do. Be specific about the expected output.",
-    "files": ["path/to/existing_file.rs", "path/to/new_file.md"],
-    "complexity": "simple"
-  }
-]
-```
-
-Output ONLY the JSON array, no other text."#;
-
-/// Decompose a high-level goal into parallel sub-tasks.
+/// Decompose a high-level goal into sub-tasks via LLM inference.
 pub async fn plan_goal(
     router: &InferenceRouter,
     goal: &str,
@@ -65,16 +31,10 @@ pub async fn plan_goal(
     let response = router.chat(&messages, Complexity::Complex, &options).await
         .context("Planning inference failed")?;
 
-    info!(
-        model = %response.model,
-        tokens = response.tokens_output,
-        "Plan generated"
-    );
+    info!(model = %response.model, tokens = response.tokens_output, "Plan generated");
 
-    // Parse JSON from response
+    // Extract JSON array from response
     let content = response.content.trim();
-
-    // Try to extract JSON array from the response
     let json_str = if let Some(start) = content.find('[') {
         if let Some(end) = content.rfind(']') {
             &content[start..=end]
@@ -85,32 +45,22 @@ pub async fn plan_goal(
         content
     };
 
-    let tasks: Vec<SubTask> = serde_json::from_str(json_str)
-        .with_context(|| format!("Failed to parse plan JSON: {json_str}"))?;
+    let tasks = parse_plan(json_str, repo_files)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    if tasks.is_empty() {
-        bail!("Planner returned empty task list");
-    }
-
-    // Validate no file overlaps
+    // Log file overlaps
     let mut seen_files = std::collections::HashSet::new();
     for task in &tasks {
         for file in &task.files {
             if !seen_files.insert(file.clone()) {
-                warn!(file, task = %task.id, "File overlap detected — planner output may cause conflicts");
+                warn!(file, task = %task.id, "File overlap detected");
             }
         }
     }
 
     info!(task_count = tasks.len(), "Goal decomposed into sub-tasks");
     for task in &tasks {
-        info!(
-            id = %task.id,
-            description = %task.description,
-            files = ?task.files,
-            complexity = ?task.complexity,
-            "Sub-task"
-        );
+        info!(id = %task.id, description = %task.description, files = ?task.files, complexity = ?task.complexity, "Sub-task");
     }
 
     Ok(tasks)

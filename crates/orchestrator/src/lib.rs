@@ -1,4 +1,5 @@
-// Planner is WASI-portable (only needs inference types + serde)
+// Planner types are portable, execution needs native inference
+pub mod planner_types;
 #[cfg(feature = "native")]
 mod planner;
 
@@ -10,8 +11,9 @@ mod memtree;
 #[cfg(feature = "native")]
 mod runner;
 
+pub use planner_types::SubTask;
 #[cfg(feature = "native")]
-pub use planner::{SubTask, plan_goal};
+pub use planner::plan_goal;
 #[cfg(feature = "native")]
 pub use worktree::WorktreeManager;
 #[cfg(feature = "native")]
