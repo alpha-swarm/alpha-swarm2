@@ -124,6 +124,11 @@ impl Agent {
         self
     }
 
+    /// Take the file provider out (for extracting modified files after agent completes).
+    pub fn take_file_provider(&mut self) -> Option<Box<dyn crate::file_provider::FileProvider>> {
+        self.file_provider.take()
+    }
+
     pub fn with_knowledge(mut self, config: KnowledgeConfig) -> Self {
         self.project = config.project.clone();
         self.knowledge = Some(config);

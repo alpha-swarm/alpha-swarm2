@@ -12,6 +12,7 @@ pub trait FileProvider: Send + Sync {
     fn write_file(&mut self, path: &str, content: &str) -> Result<(), String>;
     fn file_exists(&self, path: &str) -> bool;
     fn list_files(&self) -> Vec<String>;
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Filesystem-backed file provider (current behavior).
@@ -30,6 +31,8 @@ impl DiskFileProvider {
 }
 
 impl FileProvider for DiskFileProvider {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+
     fn read_file(&self, path: &str) -> Result<String, String> {
         std::fs::read_to_string(self.root.join(path))
             .map_err(|e| format!("read {path}: {e}"))
@@ -116,6 +119,8 @@ impl Default for VirtFileProvider {
 }
 
 impl FileProvider for VirtFileProvider {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+
     fn read_file(&self, path: &str) -> Result<String, String> {
         self.workspace.read_file(&self.store, path)
             .ok_or_else(|| format!("file not found: {path}"))

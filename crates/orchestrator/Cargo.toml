@@ -22,6 +22,7 @@ knowledge-base = { path = "../knowledge-base", optional = true }
 swarm-tools = { path = "../tools", optional = true }
 async-nats = { version = "0.38", optional = true }
 git2 = { version = "0.19", optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
 
 [features]
 default = ["native"]
@@ -29,5 +30,5 @@ native = [
     "inference-client/native", "agent-core/native",
     "tokio", "tracing", "uuid",
     "quality-gate-lib", "knowledge-base", "swarm-tools",
-    "async-nats", "git2", "virt-git",
+    "async-nats", "git2", "virt-git", "reqwest",
 ]

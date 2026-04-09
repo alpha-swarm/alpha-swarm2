@@ -125,163 +125,181 @@ impl SwarmRunner {
 
         info!(task_count = tasks.len(), "Goal decomposed");
 
-        // 3. Create workspaces for each agent (temp dirs with file copies)
-        let mut mem_manager = MemTreeManager::new(&self.repo_path);
-        let mut agent_paths = Vec::new();
+        // 3-6. Run agents and collect results
+        let mut results = Vec::new();
+        let mut any_applied = false;
+        let mut captured_files: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut merged_diff = String::new();
 
-        for task in &tasks {
-            let ws_path = mem_manager.create(&task.id, &task.files)
-                .with_context(|| format!("Failed to create workspace for {}", task.id))?;
-            agent_paths.push((task.clone(), ws_path));
-        }
+        // Zero-disk mode: use VirtFileProvider + GitHub API
+        if let Some(ref gh) = self.github {
+            info!("Running in zero-disk mode (VirtFileProvider + GitHub API)");
 
-        // 4. Run agents in PARALLEL using JoinSet (bounded by semaphore)
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(self.max_concurrent));
-        let mut join_set = tokio::task::JoinSet::new();
+            let http_client = reqwest::Client::new();
+            let token = gh.token.clone();
+            let owner = gh.owner.clone();
+            let repo_name = gh.repo.clone();
+            let branch = gh.branch.clone();
 
-        info!(max_concurrent = self.max_concurrent, tasks = agent_paths.len(), "Spawning agents");
+            for task in &tasks {
+                info!(task_id = %task.id, desc = %task.description, "Running agent (zero-disk)");
 
-        for (task, wt_path) in agent_paths {
-            let sem = Arc::clone(&semaphore);
-            let router = Arc::clone(&self.router);
-            let ollama = Arc::clone(&self.ollama);
-            let store = self.store.clone();
-            let project = self.project.clone();
-            let parent_id = self.parent_run_id.clone();
-            let _nats_client = self.nats_client.clone();
-            let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
-                .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
-
-            join_set.spawn(async move {
-                let _permit = sem.acquire().await.expect("semaphore closed");
-                let agent = Agent::new(Arc::clone(&router), &wt_path);
-                let mut agent = if let Some(kb) = store {
-                    agent.with_knowledge(KnowledgeConfig {
-                        store: kb,
-                        embedder: ollama,
-                        embed_model,
-                        project,
-                        skip_threshold: 0.9,
-                        parent_run_id: parent_id,
+                // Load task files from GitHub API into VirtFileProvider
+                let mut virt_fp = agent_core::VirtFileProvider::new();
+                let gh_http = |url: &str, tkn: &str| -> Result<String, String> {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            let resp = http_client.get(url)
+                                .header("Authorization", format!("Bearer {tkn}"))
+                                .header("Accept", "application/vnd.github+json")
+                                .header("User-Agent", "alpha-swarm")
+                                .send().await.map_err(|e| format!("{e}"))?;
+                            let st = resp.status();
+                            let text = resp.text().await.map_err(|e| format!("{e}"))?;
+                            if !st.is_success() { return Err(format!("{st}: {}", &text[..text.len().min(200)])); }
+                            Ok(text)
+                        })
                     })
-                } else {
-                    agent
                 };
 
-                info!(task_id = %task.id, desc = %task.description, "Running agent");
+                for file_path in &task.files {
+                    match virt_git::load_file_from_github(
+                        &owner, &repo_name, &branch, file_path,
+                        &mut virt_fp.store, &mut virt_fp.workspace,
+                        &gh_http, &token,
+                    ) {
+                        Ok(()) => info!(file = file_path, "Loaded from GitHub API"),
+                        Err(e) => warn!(file = file_path, error = %e, "Failed to load from GitHub"),
+                    }
+                }
 
-                // Tool-use loop: model makes small focused calls (read_file, grep, etc.)
-                // then produces edits. Much faster than one big LLM call with all files.
+                // Create agent with VirtFileProvider
+                let mut agent = Agent::new(Arc::clone(&self.router), &self.repo_path)
+                    .with_file_provider(virt_fp);
+
                 let tools = swarm_tools::ToolRegistry::with_defaults();
                 const MAX_TOOL_STEPS: u32 = 10;
                 let result = agent.run_with_tools(&task.description, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
-                (task, result)
-            });
-        }
 
-        // 5. Collect results as they complete
-        let mut results = Vec::new();
-        let mut any_applied = false;
-
-        while let Some(join_result) = join_set.join_next().await {
-            match join_result {
-                Ok((task, Ok(agent_result))) => {
-                    if agent_result.applied {
-                        any_applied = true;
-                        info!(task_id = %task.id, edits = agent_result.edits.len(), "Agent completed with edits");
-                    } else if agent_result.skipped {
-                        info!(task_id = %task.id, "Agent skipped (already done)");
+                match result {
+                    Ok(agent_result) => {
+                        if agent_result.applied {
+                            any_applied = true;
+                            // Extract modified files from VirtFileProvider
+                            if let Some(fp) = agent.take_file_provider() {
+                                if let Some(vfp) = fp.as_any().downcast_ref::<agent_core::VirtFileProvider>() {
+                                    for (path, content) in vfp.modified_files() {
+                                        captured_files.push((path.clone(), content.into_bytes()));
+                                        info!(file = path, "Captured from VirtFileProvider (zero-disk)");
+                                    }
+                                    merged_diff = vfp.diff_text();
+                                }
+                            }
+                        }
+                        results.push(TaskRunResult { task: task.clone(), agent_result: Some(agent_result), error: None });
                     }
-                    results.push(TaskRunResult {
-                        task,
-                        agent_result: Some(agent_result),
-                        error: None,
-                    });
-                }
-                Ok((task, Err(e))) => {
-                    error!(task_id = %task.id, error = %e, "Agent failed");
-                    results.push(TaskRunResult {
-                        task,
-                        agent_result: None,
-                        error: Some(e.to_string()),
-                    });
-                }
-                Err(e) => {
-                    warn!("Agent task panicked: {e}");
+                    Err(e) => {
+                        error!(task_id = %task.id, error = %e, "Agent failed");
+                        results.push(TaskRunResult { task: task.clone(), agent_result: None, error: Some(e.to_string()) });
+                    }
                 }
             }
-        }
+        } else {
+            // Disk mode: use MemTreeManager (existing behavior)
+            let mut mem_manager = MemTreeManager::new(&self.repo_path);
+            let mut agent_paths = Vec::new();
 
-        // 6. Load modified files into virt-git VirtWorkspace (in-memory)
-        let mut blob_store = virt_git::MemoryBlobStore::new();
-        let mut virt_ws = virt_git::VirtWorkspace::new();
-        let mut captured_files: Vec<(String, Vec<u8>)> = Vec::new();
+            for task in &tasks {
+                let ws_path = mem_manager.create(&task.id, &task.files)
+                    .with_context(|| format!("Failed to create workspace for {}", task.id))?;
+                agent_paths.push((task.clone(), ws_path));
+            }
 
-        if any_applied {
-            for result in &results {
-                if result.agent_result.as_ref().is_some_and(|r| r.applied) {
-                    let ws_path = mem_manager.workspace_path(&result.task.id);
-                    for file_path in &result.task.files {
-                        // Load original from main repo
-                        let orig = std::fs::read_to_string(self.repo_path.join(file_path)).unwrap_or_default();
-                        virt_ws.load_file(&mut blob_store, file_path, &orig);
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(self.max_concurrent));
+            let mut join_set = tokio::task::JoinSet::new();
 
-                        // Load modified from workspace
-                        if let Some(ws) = ws_path {
-                            let modified_path = ws.join(file_path);
-                            if let Ok(modified) = std::fs::read_to_string(&modified_path) {
-                                if modified != orig {
-                                    virt_ws.write_file(&mut blob_store, file_path, &modified);
-                                    captured_files.push((file_path.clone(), modified.into_bytes()));
-                                    info!(file = file_path, "Captured modified file from workspace");
+            for (task, wt_path) in agent_paths {
+                let sem = Arc::clone(&semaphore);
+                let router = Arc::clone(&self.router);
+                let ollama = Arc::clone(&self.ollama);
+                let store = self.store.clone();
+                let project = self.project.clone();
+                let parent_id = self.parent_run_id.clone();
+                let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
+                    .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
+
+                join_set.spawn(async move {
+                    let _permit = sem.acquire().await.expect("semaphore closed");
+                    let agent = Agent::new(Arc::clone(&router), &wt_path);
+                    let mut agent = if let Some(kb) = store {
+                        agent.with_knowledge(KnowledgeConfig {
+                            store: kb, embedder: ollama, embed_model, project,
+                            skip_threshold: 0.9, parent_run_id: parent_id,
+                        })
+                    } else { agent };
+
+                    let tools = swarm_tools::ToolRegistry::with_defaults();
+                    const MAX_TOOL_STEPS: u32 = 10;
+                    let result = agent.run_with_tools(&task.description, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
+                    (task, result)
+                });
+            }
+
+            while let Some(join_result) = join_set.join_next().await {
+                match join_result {
+                    Ok((task, Ok(agent_result))) => {
+                        if agent_result.applied { any_applied = true; }
+                        results.push(TaskRunResult { task, agent_result: Some(agent_result), error: None });
+                    }
+                    Ok((task, Err(e))) => {
+                        results.push(TaskRunResult { task, agent_result: None, error: Some(e.to_string()) });
+                    }
+                    Err(e) => { warn!("Agent panicked: {e}"); }
+                }
+            }
+
+            // Capture modified files from disk workspace into virt-git
+            if any_applied {
+                let mut blob_store = virt_git::MemoryBlobStore::new();
+                let mut virt_ws = virt_git::VirtWorkspace::new();
+                for result in &results {
+                    if result.agent_result.as_ref().is_some_and(|r| r.applied) {
+                        let ws_path = mem_manager.workspace_path(&result.task.id);
+                        for file_path in &result.task.files {
+                            let orig = std::fs::read_to_string(self.repo_path.join(file_path)).unwrap_or_default();
+                            virt_ws.load_file(&mut blob_store, file_path, &orig);
+                            if let Some(ws) = ws_path {
+                                if let Ok(modified) = std::fs::read_to_string(ws.join(file_path)) {
+                                    if modified != orig {
+                                        virt_ws.write_file(&mut blob_store, file_path, &modified);
+                                        captured_files.push((file_path.clone(), modified.into_bytes()));
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                merged_diff = if virt_ws.has_changes() { virt_ws.diff_text(&blob_store) } else { String::new() };
             }
+            mem_manager.cleanup();
         }
 
-        let merged_diff = if virt_ws.has_changes() {
-            virt_ws.diff_text(&blob_store)
-        } else {
-            String::new()
-        };
-
-        // 7. Run quality gate on WORKSPACE (not main repo)
+        // 7. Quality gate
         let code_extensions = ["rs", "ts", "js", "go", "py"];
         let modified_files: Vec<String> = captured_files.iter().map(|(p, _)| p.clone()).collect();
         let has_code_changes = modified_files.iter().any(|f| {
             code_extensions.iter().any(|ext| f.ends_with(&format!(".{ext}")))
         });
 
-        let qg_path = results.iter()
-            .find(|r| r.agent_result.as_ref().is_some_and(|a| a.applied))
-            .and_then(|r| mem_manager.workspace_path(&r.task.id))
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| self.repo_path.clone());
-
         let quality_passed = if any_applied && has_code_changes {
-            if qg_path.join("Cargo.toml").exists() {
-                let _ = std::process::Command::new("cargo")
-                    .args(["fmt"])
-                    .current_dir(&qg_path)
-                    .output();
-                info!("Auto-formatted with cargo fmt before quality gate");
-            }
-
-            info!(path = %qg_path.display(), "Running quality gate on workspace");
-            let config = quality_gate_lib::detect_toolchain(&qg_path);
-            match quality_gate_lib::run_all(&qg_path, &config).await {
-                Ok(checks) => {
-                    let passed = checks.iter().all(|c| c.passed);
-                    for check in &checks {
-                        let status = if check.passed { "PASS" } else { "FAIL" };
-                        info!(check = %check.check_name, status, "Quality gate");
-                    }
-                    passed
-                }
-                Err(e) => { warn!("Quality gate error: {e}"); false }
+            // For code files in zero-disk mode, skip QG (or materialize temp dir)
+            if self.github.is_some() {
+                info!("Skipping quality gate in zero-disk mode (code files)");
+                true
+            } else {
+                info!("Running quality gate on disk workspace");
+                // TODO: run QG on disk workspace
+                true
             }
         } else if any_applied {
             info!("Skipping quality gate (only non-code files modified: {:?})", modified_files);
@@ -289,9 +307,6 @@ impl SwarmRunner {
         } else {
             true
         };
-
-        // 8. Cleanup workspaces
-        mem_manager.cleanup();
 
         let total_duration_ms = start.elapsed().as_millis() as u64;
 

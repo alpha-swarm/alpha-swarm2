@@ -4700,6 +4700,7 @@ dependencies = [
  "inference-client",
  "knowledge-base",
  "quality-gate-lib",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "swarm-config",
