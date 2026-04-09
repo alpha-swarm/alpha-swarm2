@@ -16,7 +16,13 @@ mod tree;
 mod diff;
 mod workspace;
 
-pub use store::{BlobStore, MemoryBlobStore};
+mod wasi_store;
+
+pub use store::{BlobStore, MemoryBlobStore, content_hash};
 pub use tree::{TreeEntry, TreeSnapshot};
 pub use diff::{FileDiff, DiffKind, diff_trees, format_diff};
 pub use workspace::{VirtWorkspace, CommitInfo};
+pub use wasi_store::WasiBlobStoreAdapter;
+
+#[cfg(feature = "nats")]
+pub use store::NatsBlobStore;
