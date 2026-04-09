@@ -2339,6 +2339,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "knowledge-store-worker"
+version = "0.1.0"
+dependencies = [
+ "knowledge-base",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2861,6 +2871,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "orchestrator-worker"
+version = "0.1.0"
+dependencies = [
+ "edit-parser",
+ "inference-client",
+ "serde",
+ "serde_json",
+ "swarm-orchestrator",
+ "virt-git",
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
 name = "p256"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3314,6 +3337,16 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "quality-gate-worker"
+version = "0.1.0"
+dependencies = [
+ "quality-gate-lib",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.41.0",
 ]
 
 [[package]]
@@ -5224,6 +5257,16 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
+name = "tools-worker"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "virt-git",
  "wit-bindgen 0.41.0",
 ]
 

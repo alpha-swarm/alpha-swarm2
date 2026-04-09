@@ -1,0 +1,16 @@
+package alpha-swarm:orchestrator-worker@0.1.0;
+
+/// Orchestrator component: decomposes goals into sub-tasks via LLM.
+/// Uses wasi:http for Ollama inference, wasi:blobstore for workspace files.
+
+world orchestrator-worker {
+    import wasi:http/outgoing-handler@0.2.0;
+    import wasi:http/types@0.2.0;
+    import wasi:clocks/wall-clock@0.2.0;
+    import wasi:clocks/monotonic-clock@0.2.0;
+    import wasi:io/streams@0.2.0;
+    import wasi:io/poll@0.2.0;
+    import wasi:io/error@0.2.0;
+
+    export wasi:http/incoming-handler@0.2.0;
+}

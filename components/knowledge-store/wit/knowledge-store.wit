@@ -1,0 +1,16 @@
+package alpha-swarm:knowledge-store@0.1.0;
+
+/// Knowledge store component: manages agent runs, tasks, embeddings.
+/// Uses wasi:http for SurrealDB REST API access.
+
+world knowledge-store {
+    import wasi:http/outgoing-handler@0.2.0;
+    import wasi:http/types@0.2.0;
+    import wasi:io/streams@0.2.0;
+    import wasi:io/poll@0.2.0;
+    import wasi:io/error@0.2.0;
+    import wasi:clocks/wall-clock@0.2.0;
+    import wasi:clocks/monotonic-clock@0.2.0;
+
+    export wasi:http/incoming-handler@0.2.0;
+}

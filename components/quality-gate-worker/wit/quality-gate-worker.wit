@@ -1,0 +1,15 @@
+package alpha-swarm:quality-gate-worker@0.1.0;
+
+/// Quality gate component: toolchain detection and check config.
+/// Actual check execution delegated to quality-gate-provider (native).
+
+world quality-gate-worker {
+    import wasi:io/streams@0.2.0;
+    import wasi:io/poll@0.2.0;
+    import wasi:io/error@0.2.0;
+    import wasi:http/types@0.2.0;
+    import wasi:clocks/wall-clock@0.2.0;
+    import wasi:clocks/monotonic-clock@0.2.0;
+
+    export wasi:http/incoming-handler@0.2.0;
+}
