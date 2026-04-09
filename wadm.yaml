@@ -1,0 +1,123 @@
+apiVersion: core.oam.dev/v1beta1
+kind: Application
+metadata:
+  name: alpha-swarm
+  annotations:
+    version: v0.1.0
+    description: "Distributed AI agent swarm for code editing"
+spec:
+  components:
+    # === WASI Components ===
+
+    # Web UI — serves dashboard + API
+    - name: web-ui
+      type: component
+      properties:
+        image: file://target/wasm32-wasip2/release/web_ui.wasm
+      traits:
+        - type: spreadscaler
+          properties:
+            instances: 1
+        - type: link
+          properties:
+            target: httpserver
+            namespace: wasi
+            package: http
+            interfaces: [incoming-handler]
+            source_config:
+              - name: default-http
+                properties:
+                  address: 0.0.0.0:8080
+
+    # Agent Worker — runs LLM inference + edit parsing
+    - name: agent-worker
+      type: component
+      properties:
+        image: file://target/wasm32-wasip2/release/agent_worker.wasm
+      traits:
+        - type: spreadscaler
+          properties:
+            instances: 1
+        # HTTP outgoing for Ollama calls
+        - type: link
+          properties:
+            target: httpclient
+            namespace: wasi
+            package: http
+            interfaces: [outgoing-handler]
+        # Blobstore for workspace file operations
+        - type: link
+          properties:
+            target: blobstore-nats
+            namespace: wasi
+            package: blobstore
+            interfaces: [blobstore]
+            source_config:
+              - name: workspace-storage
+                properties:
+                  bucket_name: agent-workspaces
+
+    # Tool Search — code search via tree-sitter + grep
+    - name: tool-search
+      type: component
+      properties:
+        image: file://target/wasm32-wasip2/release/tool_search.wasm
+      traits:
+        - type: spreadscaler
+          properties:
+            instances: 1
+        - type: link
+          properties:
+            target: httpclient
+            namespace: wasi
+            package: http
+            interfaces: [outgoing-handler]
+
+    # Tool Web — web search + URL fetch
+    - name: tool-web
+      type: component
+      properties:
+        image: file://target/wasm32-wasip2/release/tool_web.wasm
+      traits:
+        - type: spreadscaler
+          properties:
+            instances: 1
+        - type: link
+          properties:
+            target: httpclient
+            namespace: wasi
+            package: http
+            interfaces: [outgoing-handler]
+
+    # === Capability Providers (host plugins) ===
+
+    # HTTP Server — serves incoming requests
+    - name: httpserver
+      type: capability
+      properties:
+        image: ghcr.io/wasmcloud/http-server:0.23.2
+
+    # HTTP Client — outgoing HTTP requests (Ollama, SurrealDB)
+    - name: httpclient
+      type: capability
+      properties:
+        image: ghcr.io/wasmcloud/http-client:0.12.1
+
+    # Blobstore NATS — file storage via NATS JetStream Object Store
+    - name: blobstore-nats
+      type: capability
+      properties:
+        image: ghcr.io/wasmcloud/blobstore-nats:0.3.0
+        config:
+          - name: nats-connection
+            properties:
+              endpoint: nats://127.0.0.1:4223
+
+    # === Native Providers (standalone NATS services) ===
+    # These run outside wasmCloud, communicate via NATS:
+    #   - inference-provider (swarm.inference.*)
+    #   - workspace-provider (swarm.workspace.*)
+    #   - quality-gate-provider (swarm.quality.*)
+    #   - git-provider (swarm.git.*)
+    #   - test-provider (swarm.test.*)
+    #   - agent-daemon (orchestrator, SurrealDB polling)
