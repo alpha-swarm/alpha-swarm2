@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use tracing::{info, warn, error};
 
-use agent_core::{Agent, AgentResult, KnowledgeConfig};
+use agent_core::{Agent, AgentResult, KnowledgeConfig, parse_edits};
 use inference_client::{InferenceRouter, OllamaBackend};
 use knowledge_base::KnowledgeStore;
 
@@ -173,32 +173,112 @@ impl SwarmRunner {
                     }
                 }
 
-                // Create agent with VirtFileProvider — use standard run() (not tool loop)
-                // because tools (read_file, grep) need disk which we don't have in zero-disk mode
-                let mut agent = Agent::new(Arc::clone(&self.router), &self.repo_path)
-                    .with_file_provider(virt_fp);
+                // Zero-disk: call WASI agent-worker via HTTP (it handles inference + edit parsing)
+                let agent_url = std::env::var("AGENT_WORKER_URL")
+                    .unwrap_or_else(|_| "http://localhost:8000".into());
 
-                let result = agent.run(&task.description, &task.files, task.complexity).await;
+                // Build file content for the agent
+                let mut file_inputs = Vec::new();
+                for file_path in &task.files {
+                    if let Some(content) = virt_fp.workspace.read_file(&virt_fp.store, file_path) {
+                        file_inputs.push(serde_json::json!({"path": file_path, "content": content}));
+                    }
+                }
 
-                match result {
-                    Ok(agent_result) => {
-                        if agent_result.applied {
-                            any_applied = true;
-                            // Extract modified files from VirtFileProvider
-                            if let Some(fp) = agent.take_file_provider() {
-                                if let Some(vfp) = fp.as_any().downcast_ref::<agent_core::VirtFileProvider>() {
-                                    for (path, content) in vfp.modified_files() {
-                                        captured_files.push((path.clone(), content.into_bytes()));
-                                        info!(file = path, "Captured from VirtFileProvider (zero-disk)");
+                let agent_model = std::env::var("ALPHA_SWARM_AGENT_MODEL")
+                    .unwrap_or_else(|_| "qwen2.5-coder:32b".into());
+                let ollama_url = std::env::var("ALPHA_SWARM_OLLAMA_URL")
+                    .unwrap_or_else(|_| "http://100.81.10.8:11434".into());
+
+                let task_json = serde_json::json!({
+                    "task": task.description,
+                    "model": agent_model,
+                    "ollama_url": ollama_url,
+                    "workspace_id": format!("zero-disk-{}", task.id),
+                    "files": file_inputs,
+                });
+
+                let agent_resp = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        http_client.post(&agent_url)
+                            .json(&task_json)
+                            .timeout(std::time::Duration::from_secs(300))
+                            .send().await
+                    })
+                });
+
+                match agent_resp {
+                    Ok(resp) => {
+                        if let Ok(body) = tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(resp.json::<serde_json::Value>())
+                        }) {
+                            let status = body["status"].as_str().unwrap_or("error");
+                            let edits = body["edits"].as_u64().unwrap_or(0);
+                            let raw = body["raw_response"].as_str().unwrap_or("");
+                            let diff = body["diff"].as_str().unwrap_or("");
+
+                            info!(task_id = %task.id, status, edits, "WASI agent response");
+
+                            if status == "ok" && edits > 0 {
+                                // Apply edits from the agent to VirtFileProvider
+                                let parsed = parse_edits(raw).unwrap_or_default();
+                                for edit in &parsed {
+                                    if let agent_core::FileEdit::Edit { path, old, new } = edit {
+                                        if let Some(current) = virt_fp.workspace.read_file(&virt_fp.store, path) {
+                                            let updated = current.replacen(old.as_str(), new.as_str(), 1);
+                                            virt_fp.workspace.write_file(&mut virt_fp.store, path, &updated);
+                                        }
+                                    } else if let agent_core::FileEdit::Create { path, content } = edit {
+                                        virt_fp.workspace.write_file(&mut virt_fp.store, path, content);
                                     }
-                                    merged_diff = vfp.diff_text();
                                 }
+
+                                if virt_fp.has_changes() {
+                                    any_applied = true;
+                                    for (path, content) in virt_fp.modified_files() {
+                                        captured_files.push((path.clone(), content.into_bytes()));
+                                        info!(file = path, "Captured from VirtFileProvider");
+                                    }
+                                    merged_diff = virt_fp.diff_text();
+                                } else if !diff.is_empty() {
+                                    // Use the diff from the agent response
+                                    any_applied = true;
+                                    merged_diff = diff.to_string();
+                                    // Capture from agent's modified_files response
+                                    if let Some(mods) = body["modified_files"].as_array() {
+                                        for m in mods {
+                                            if let Some(path) = m.as_str() {
+                                                if let Some(content) = virt_fp.workspace.read_file(&virt_fp.store, path) {
+                                                    captured_files.push((path.to_string(), content.into_bytes()));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                results.push(TaskRunResult {
+                                    task: task.clone(),
+                                    agent_result: Some(AgentResult {
+                                        edits: parsed,
+                                        inference_response: inference_client::InferenceResponse {
+                                            content: raw.to_string(),
+                                            model: body["model"].as_str().unwrap_or("").to_string(),
+                                            backend: inference_client::BackendKind::Ollama,
+                                            tokens_input: 0, tokens_output: 0, duration_ms: 0,
+                                        },
+                                        applied: any_applied,
+                                        skipped: false, run_id: None, attempt: 1,
+                                        escalated_from: None, tool_calls: vec![],
+                                    }),
+                                    error: None,
+                                });
+                            } else {
+                                results.push(TaskRunResult { task: task.clone(), agent_result: None, error: Some(format!("Agent: {status}, edits: {edits}")) });
                             }
                         }
-                        results.push(TaskRunResult { task: task.clone(), agent_result: Some(agent_result), error: None });
                     }
                     Err(e) => {
-                        error!(task_id = %task.id, error = %e, "Agent failed");
+                        error!(task_id = %task.id, error = %e, "WASI agent-worker call failed");
                         results.push(TaskRunResult { task: task.clone(), agent_result: None, error: Some(e.to_string()) });
                     }
                 }
