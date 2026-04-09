@@ -5538,7 +5538,9 @@ name = "virt-git"
 version = "0.1.0"
 dependencies = [
  "async-nats",
+ "edit-parser",
  "futures",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2",
