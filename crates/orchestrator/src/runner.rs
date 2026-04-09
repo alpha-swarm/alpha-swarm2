@@ -221,14 +221,25 @@ impl SwarmRunner {
                 let ollama_url = std::env::var("ALPHA_SWARM_OLLAMA_URL")
                     .unwrap_or_else(|_| "http://100.81.10.8:11434".into());
 
-                // Small HTTP body — only references, no file content
+                // Send file references for blobstore + inline content as fallback
+                // Inline is truncated to fit HTTP body limit (~3KB)
+                let mut inline_files = Vec::new();
+                for file_path in &file_paths_loaded {
+                    if let Some(content) = virt_fp.workspace.read_file(&virt_fp.store, file_path) {
+                        // Only include inline if small enough for HTTP body
+                        if content.len() < 3000 {
+                            inline_files.push(serde_json::json!({"path": file_path, "content": content}));
+                        }
+                    }
+                }
+
                 let task_json = serde_json::json!({
                     "task": task.description,
                     "model": agent_model,
                     "ollama_url": ollama_url,
                     "workspace_id": workspace_id,
                     "workspace_files": file_paths_loaded,
-                    "files": [],
+                    "files": inline_files,
                 });
 
                 let agent_resp = tokio::task::block_in_place(|| {
