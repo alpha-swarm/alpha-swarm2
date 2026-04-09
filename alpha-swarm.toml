@@ -70,3 +70,16 @@ token_limit = 100000            # 100K tokens
 max_iterations = 5
 max_backoff_secs = 10
 max_context_files = 20
+
+# --- Inference Providers ---
+# Multiple Ollama hosts, router picks best available
+[[providers]]
+type = "ollama"
+url = "http://100.81.10.8:11434"   # csatapaci M2 Max 96GB
+priority = 1
+
+# Uncomment when local Ollama is running:
+# [[providers]]
+# type = "ollama"
+# url = "http://localhost:11434"
+# priority = 2

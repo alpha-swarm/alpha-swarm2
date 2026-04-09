@@ -18,7 +18,28 @@ pub struct SwarmConfig {
     pub defaults: DefaultsConfig,
     pub tiers: TiersConfig,
     pub resources: ResourceConfig,
+    /// Inference providers (multiple Ollama hosts, etc.)
+    #[serde(default)]
+    pub providers: Vec<ProviderConfig>,
 }
+
+/// An inference provider configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderConfig {
+    /// Provider type: "ollama" or "llamacpp"
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    /// Base URL for the provider
+    pub url: String,
+    /// Priority (lower = preferred)
+    #[serde(default = "default_priority")]
+    pub priority: u32,
+    /// Specific models available on this host (optional, auto-discovered if empty)
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+fn default_priority() -> u32 { 10 }
 
 /// Resource usage thresholds for scheduling.
 #[derive(Debug, Clone, Deserialize)]
