@@ -290,6 +290,30 @@ impl SwarmRunner {
     }
 }
 
+/// Scans the repository for source files with specific extensions and skips certain directories.
+///
+/// # File Extensions
+/// The function scans for files with the following extensions:
+/// - `.rs` (Rust)
+/// - `.py` (Python)
+/// - `.js` (JavaScript)
+/// - `.ts` (TypeScript)
+///
+/// # Directories to Skip
+/// The function skips the following directories:
+/// - `target`
+/// - `node_modules`
+/// - `.git`
+/// Scans the repository for source files with specific extensions and skips certain directories.
+/// Currently, it scans for `.rs`, `.py`, and `.js` files and skips any directory named `target`.
+/// Discover source files in the given repository directory.
+///
+/// This function scans for files with specific extensions and skips certain directories.
+/// It looks for `.rs` (Rust) files by default, but other extensions can be specified.
+/// Directories such as `target`, `node_modules`, and `.git` are skipped during the scan.
+/// Discovers source files in the given repository path.
+/// It scans for files with the following extensions: `.rs`, `.toml`, and `.md`.
+/// It skips directories named `target` and `node_modules`.
 fn discover_source_files(repo: &Path) -> Result<Vec<String>> {
     let mut files = Vec::new();
     let extensions = ["rs", "ts", "js", "go", "py", "md", "toml", "json", "yaml", "yml"];
