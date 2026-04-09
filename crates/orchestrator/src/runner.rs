@@ -290,6 +290,15 @@ impl SwarmRunner {
     }
 }
 
+/// Scans the given repository for source files with specific extensions and skips certain directories.
+///
+/// # File Extensions
+/// `rs`, `ts`, `js`, `go`, `py`, `md`, `toml`, `json`, `yaml`, `yml`
+///
+/// # Directories Skipped
+/// - Dotfiles (directories starting with `.`)
+/// - `target`
+/// - `node_modules`
 fn discover_source_files(repo: &Path) -> Result<Vec<String>> {
     let mut files = Vec::new();
     let extensions = ["rs", "ts", "js", "go", "py", "md", "toml", "json", "yaml", "yml"];
