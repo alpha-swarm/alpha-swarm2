@@ -138,7 +138,7 @@ impl SwarmRunner {
             join_set.spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
                 let agent = Agent::new(Arc::clone(&router), &wt_path);
-                let agent = if let Some(kb) = store {
+                let mut agent = if let Some(kb) = store {
                     agent.with_knowledge(KnowledgeConfig {
                         store: kb,
                         embedder: ollama,

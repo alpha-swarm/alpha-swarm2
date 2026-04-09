@@ -11,6 +11,7 @@ serde_json.workspace = true
 inference-client = { path = "../inference-client", default-features = false }
 edit-parser = { path = "../edit-parser" }
 swarm-config = { path = "../config", default-features = false }
+virt-git = { path = "../virt-git" }
 
 # Native-only deps
 tokio = { workspace = true, optional = true }

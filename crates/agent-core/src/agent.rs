@@ -102,6 +102,8 @@ pub struct Agent {
     knowledge: Option<KnowledgeConfig>,
     events: Option<Arc<EventPublisher>>,
     project: String,
+    /// Optional file provider for zero-disk mode.
+    file_provider: Option<Box<dyn crate::file_provider::FileProvider>>,
 }
 
 impl Agent {
@@ -112,7 +114,14 @@ impl Agent {
             knowledge: None,
             events: None,
             project: "default".into(),
+            file_provider: None,
         }
+    }
+
+    /// Use a VirtFileProvider for zero-disk operation.
+    pub fn with_file_provider(mut self, provider: impl crate::file_provider::FileProvider + 'static) -> Self {
+        self.file_provider = Some(Box::new(provider));
+        self
     }
 
     pub fn with_knowledge(mut self, config: KnowledgeConfig) -> Self {
@@ -133,7 +142,7 @@ impl Agent {
 
     /// Run a one-shot task: read files, call LLM, parse edits, apply them.
     pub async fn run(
-        &self,
+        &mut self,
         task: &str,
         file_paths: &[String],
         complexity: Complexity,
@@ -369,7 +378,7 @@ impl Agent {
     /// Run with retry and model escalation.
     /// On quality gate failure: retry same model once, then escalate to larger model.
     pub async fn run_with_retry(
-        &self,
+        &mut self,
         task: &str,
         file_paths: &[String],
         complexity: Complexity,
@@ -533,7 +542,7 @@ impl Agent {
     /// Model outputs <<<TOOL>>>, <<<EDIT>>>, <<<CREATE>>>, <<<DELETE>>>, <<<DONE>>> blocks.
     /// Works with ANY model — no Ollama-specific API needed.
     pub async fn run_with_tools(
-        &self,
+        &mut self,
         task: &str,
         file_paths: &[String],
         complexity: Complexity,
@@ -738,13 +747,15 @@ impl Agent {
     fn read_files(&self, paths: &[String]) -> Result<Vec<(String, String)>> {
         let mut files = Vec::new();
         for path in paths {
-            let full_path = self.repo_path.join(path);
-            let content = match std::fs::read_to_string(&full_path) {
-                Ok(c) => c,
-                Err(_) => {
-                    // File doesn't exist yet — agent may need to create it
-                    info!(path = %path, "File not found, will be available for creation");
-                    String::new()
+            let content = if let Some(ref fp) = self.file_provider {
+                fp.read_file(path).unwrap_or_default()
+            } else {
+                match std::fs::read_to_string(self.repo_path.join(path)) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        info!(path = %path, "File not found, will be available for creation");
+                        String::new()
+                    }
                 }
             };
             files.push((path.clone(), content));
@@ -752,13 +763,16 @@ impl Agent {
         Ok(files)
     }
 
-    fn apply_edits(&self, edits: &[FileEdit]) -> Result<()> {
+    fn apply_edits(&mut self, edits: &[FileEdit]) -> Result<()> {
         for edit in edits {
             match edit {
                 FileEdit::Edit { path, old, new } => {
-                    let full_path = self.repo_path.join(path);
-                    let content = std::fs::read_to_string(&full_path)
-                        .with_context(|| format!("Cannot read {path} for editing"))?;
+                    let content = if let Some(ref fp) = self.file_provider {
+                        fp.read_file(path).map_err(|e| anyhow::anyhow!(e))?
+                    } else {
+                        std::fs::read_to_string(self.repo_path.join(path))
+                            .with_context(|| format!("Cannot read {path} for editing"))?
+                    };
 
                     let updated = if content.contains(old.as_str()) {
                         // Exact match
@@ -811,17 +825,26 @@ impl Agent {
                         info!(path, "Applied edit with trimmed matching");
                         result_lines.join("\n")
                     };
-                    std::fs::write(&full_path, updated)
-                        .with_context(|| format!("Failed to write {path}"))?;
+                    if let Some(ref mut fp) = self.file_provider {
+                        fp.write_file(path, &updated).map_err(|e| anyhow::anyhow!(e))?;
+                    } else {
+                        let full_path = self.repo_path.join(path);
+                        std::fs::write(&full_path, updated)
+                            .with_context(|| format!("Failed to write {path}"))?;
+                    }
                     info!(path, "Applied edit");
                 }
                 FileEdit::Create { path, content } => {
-                    let full_path = self.repo_path.join(path);
-                    if let Some(parent) = full_path.parent() {
-                        std::fs::create_dir_all(parent)?;
+                    if let Some(ref mut fp) = self.file_provider {
+                        fp.write_file(path, content).map_err(|e| anyhow::anyhow!(e))?;
+                    } else {
+                        let full_path = self.repo_path.join(path);
+                        if let Some(parent) = full_path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&full_path, content)
+                            .with_context(|| format!("Failed to create {path}"))?;
                     }
-                    std::fs::write(&full_path, content)
-                        .with_context(|| format!("Failed to create {path}"))?;
                     info!(path, "Created file");
                 }
                 FileEdit::Delete { path } => {
