@@ -195,47 +195,56 @@ impl SwarmRunner {
             }
         }
 
-        // 6. Create git2 commits from workspace changes (no main repo modification yet)
-        let mut merged_diff = String::new();
-        let mut commit_results = Vec::new();
+        // 6. Load modified files into virt-git VirtWorkspace (in-memory)
+        let mut blob_store = virt_git::MemoryBlobStore::new();
+        let mut virt_ws = virt_git::VirtWorkspace::new();
+        let mut captured_files: Vec<(String, Vec<u8>)> = Vec::new();
+
         if any_applied {
             for result in &results {
                 if result.agent_result.as_ref().is_some_and(|r| r.applied) {
-                    let msg = format!("agent({}): {}", result.task.id, result.task.description);
-                    match mem_manager.commit_changes(&result.task.id, &msg) {
-                        Ok(cr) => {
-                            if cr.has_changes {
-                                merged_diff.push_str(&cr.diff);
-                                commit_results.push(cr);
-                            } else {
-                                info!(task_id = %result.task.id, "No changes detected in workspace");
+                    let ws_path = mem_manager.workspace_path(&result.task.id);
+                    for file_path in &result.task.files {
+                        // Load original from main repo
+                        let orig = std::fs::read_to_string(self.repo_path.join(file_path)).unwrap_or_default();
+                        virt_ws.load_file(&mut blob_store, file_path, &orig);
+
+                        // Load modified from workspace
+                        if let Some(ws) = ws_path {
+                            let modified_path = ws.join(file_path);
+                            if let Ok(modified) = std::fs::read_to_string(&modified_path) {
+                                if modified != orig {
+                                    virt_ws.write_file(&mut blob_store, file_path, &modified);
+                                    captured_files.push((file_path.clone(), modified.into_bytes()));
+                                    info!(file = file_path, "Captured modified file from workspace");
+                                }
                             }
-                        }
-                        Err(e) => {
-                            warn!(task_id = %result.task.id, "Commit failed: {e}");
                         }
                     }
                 }
             }
         }
 
-        // 7. Run quality gate on WORKSPACE (not main repo) — never touch main during checks
+        let merged_diff = if virt_ws.has_changes() {
+            virt_ws.diff_text(&blob_store)
+        } else {
+            String::new()
+        };
+
+        // 7. Run quality gate on WORKSPACE (not main repo)
         let code_extensions = ["rs", "ts", "js", "go", "py"];
-        let modified_files: Vec<String> = results.iter()
-            .filter(|r| r.agent_result.as_ref().is_some_and(|a| a.applied))
-            .flat_map(|r| r.task.files.iter().cloned())
-            .collect();
+        let modified_files: Vec<String> = captured_files.iter().map(|(p, _)| p.clone()).collect();
         let has_code_changes = modified_files.iter().any(|f| {
             code_extensions.iter().any(|ext| f.ends_with(&format!(".{ext}")))
         });
 
-        // Use the first workspace that has changes for quality gate
-        let qg_path = commit_results.first()
-            .map(|cr| cr.workspace_path.clone())
+        let qg_path = results.iter()
+            .find(|r| r.agent_result.as_ref().is_some_and(|a| a.applied))
+            .and_then(|r| mem_manager.workspace_path(&r.task.id))
+            .map(|p| p.to_path_buf())
             .unwrap_or_else(|| self.repo_path.clone());
 
         let quality_passed = if any_applied && has_code_changes {
-            // Auto-format in workspace before quality gate
             if qg_path.join("Cargo.toml").exists() {
                 let _ = std::process::Command::new("cargo")
                     .args(["fmt"])
@@ -255,10 +264,7 @@ impl SwarmRunner {
                     }
                     passed
                 }
-                Err(e) => {
-                    warn!("Quality gate error: {e}");
-                    false
-                }
+                Err(e) => { warn!("Quality gate error: {e}"); false }
             }
         } else if any_applied {
             info!("Skipping quality gate (only non-code files modified: {:?})", modified_files);
@@ -267,31 +273,7 @@ impl SwarmRunner {
             true
         };
 
-        // 8. Capture modified files from workspace (before cleanup)
-        let mut captured_files: Vec<(String, Vec<u8>)> = Vec::new();
-        if quality_passed && !commit_results.is_empty() {
-            for cr in &commit_results {
-                if cr.has_changes {
-                    // Read modified files from workspace
-                    for result in &results {
-                        if result.agent_result.as_ref().is_some_and(|a| a.applied) {
-                            for file_path in &result.task.files {
-                                let full_path = cr.workspace_path.join(file_path);
-                                if let Ok(content) = std::fs::read(&full_path) {
-                                    captured_files.push((file_path.clone(), content));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            // Also try apply_to_main (best-effort, may fail)
-            for cr in &commit_results {
-                let _ = mem_manager.apply_to_main(cr);
-            }
-        }
-
-        // 9. Cleanup workspaces
+        // 8. Cleanup workspaces
         mem_manager.cleanup();
 
         let total_duration_ms = start.elapsed().as_millis() as u64;
