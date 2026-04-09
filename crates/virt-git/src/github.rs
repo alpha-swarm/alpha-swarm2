@@ -333,6 +333,7 @@ pub fn create_pr(
 }
 
 /// Simple base64 encoding (no external dep needed).
+/// Encodes bytes to base64 for GitHub blob API.
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
