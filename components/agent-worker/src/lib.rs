@@ -224,10 +224,24 @@ impl Guest for AgentWorker {
             // Use wasi:blobstore workspace
             let mut store = create_blobstore_adapter(ws_id);
             let mut ws = virt_git::VirtWorkspace::new();
-            // Also load files passed inline (fallback)
+
+            // Load files from blobstore (referenced by workspace_files)
+            for file_path in &task_req.workspace_files {
+                let key = format!("file/{file_path}");
+                if let Some(content_bytes) = <virt_git::WasiBlobStoreAdapter as virt_git::BlobStore>::get(&store, &key) {
+                    if let Ok(content) = String::from_utf8(content_bytes) {
+                        ws.load_file(&mut store, file_path, &content);
+                        file_context.push_str(&format!("=== {} ===\n{}\n\n", file_path, content));
+                    }
+                }
+            }
+
+            // Also load files passed inline (fallback for small files)
             for f in &task_req.files {
-                ws.load_file(&mut store, &f.path, &f.content);
-                file_context.push_str(&format!("=== {} ===\n{}\n\n", f.path, f.content));
+                if !f.content.is_empty() {
+                    ws.load_file(&mut store, &f.path, &f.content);
+                    file_context.push_str(&format!("=== {} ===\n{}\n\n", f.path, f.content));
+                }
             }
             workspace = Some((store, ws));
         } else {

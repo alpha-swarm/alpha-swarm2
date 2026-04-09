@@ -173,29 +173,62 @@ impl SwarmRunner {
                     }
                 }
 
-                // Zero-disk: call WASI agent-worker via HTTP (it handles inference + edit parsing)
-                let agent_url = std::env::var("AGENT_WORKER_URL")
-                    .unwrap_or_else(|_| "http://localhost:8000".into());
+                // Store files in NATS blobstore for the WASI component to read
+                let workspace_id = format!("ws-{}-{}", task.id, std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
 
-                // Build file content for the agent
-                let mut file_inputs = Vec::new();
-                for file_path in &task.files {
-                    if let Some(content) = virt_fp.workspace.read_file(&virt_fp.store, file_path) {
-                        file_inputs.push(serde_json::json!({"path": file_path, "content": content}));
+                let nats_url = std::env::var("ALPHA_SWARM_NATS_URL")
+                    .unwrap_or_else(|_| "nats://127.0.0.1:4223".into());
+
+                // Write files to NATS Object Store (blobstore)
+                let mut file_paths_loaded = Vec::new();
+                if let Ok(nats_client) = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async_nats::connect(&nats_url))
+                }) {
+                    let js = async_nats::jetstream::new(nats_client);
+                    if let Ok(obj_store) = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(
+                            js.create_object_store(async_nats::jetstream::object_store::Config {
+                                bucket: workspace_id.clone(),
+                                ..Default::default()
+                            })
+                        )
+                    }) {
+                        for file_path in &task.files {
+                            if let Some(content) = virt_fp.workspace.read_file(&virt_fp.store, file_path) {
+                                let key = format!("file/{file_path}");
+                                let data = content.into_bytes();
+                                let store_clone = obj_store.clone();
+                                let _ = tokio::task::block_in_place(|| {
+                                    tokio::runtime::Handle::current().block_on(async {
+                                        let mut reader = &data[..];
+                                        store_clone.put(key.as_str(), &mut reader).await
+                                    })
+                                });
+                                file_paths_loaded.push(file_path.clone());
+                                info!(file = file_path, bucket = %workspace_id, "Stored in NATS blobstore");
+                            }
+                        }
                     }
                 }
+
+                // Call WASI agent-worker — tiny payload, files are in blobstore
+                let agent_url = std::env::var("AGENT_WORKER_URL")
+                    .unwrap_or_else(|_| "http://localhost:8000".into());
 
                 let agent_model = std::env::var("ALPHA_SWARM_AGENT_MODEL")
                     .unwrap_or_else(|_| "qwen2.5-coder:32b".into());
                 let ollama_url = std::env::var("ALPHA_SWARM_OLLAMA_URL")
                     .unwrap_or_else(|_| "http://100.81.10.8:11434".into());
 
+                // Small HTTP body — only references, no file content
                 let task_json = serde_json::json!({
                     "task": task.description,
                     "model": agent_model,
                     "ollama_url": ollama_url,
-                    "workspace_id": format!("zero-disk-{}", task.id),
-                    "files": file_inputs,
+                    "workspace_id": workspace_id,
+                    "workspace_files": file_paths_loaded,
+                    "files": [],
                 });
 
                 let agent_resp = tokio::task::block_in_place(|| {

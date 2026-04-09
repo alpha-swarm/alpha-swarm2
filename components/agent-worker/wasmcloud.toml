@@ -7,4 +7,7 @@ command = "cargo build --target wasm32-wasip2 --release"
 artifact = "../../target/wasm32-wasip2/release/agent_worker.wasm"
 
 [dev]
-http_listen_address = "0.0.0.0:8080"
+http_listen_address = "0.0.0.0:8000"
+
+[dev.config.default]
+max_content_len = "10485760"
