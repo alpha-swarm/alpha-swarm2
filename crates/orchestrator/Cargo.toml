@@ -8,14 +8,25 @@ license.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-uuid = { version = "1", features = ["v4"] }
-inference-client = { path = "../inference-client" }
-agent-core = { path = "../agent-core" }
-quality-gate-lib = { path = "../quality-gate" }
-knowledge-base = { path = "../knowledge-base" }
-swarm-config = { path = "../config" }
-swarm-tools = { path = "../tools" }
-async-nats = "0.38"
-git2 = "0.19"
+inference-client = { path = "../inference-client", default-features = false }
+agent-core = { path = "../agent-core", default-features = false }
+swarm-config = { path = "../config", default-features = false }
+
+# Native-only
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+quality-gate-lib = { path = "../quality-gate", optional = true }
+knowledge-base = { path = "../knowledge-base", optional = true }
+swarm-tools = { path = "../tools", optional = true }
+async-nats = { version = "0.38", optional = true }
+git2 = { version = "0.19", optional = true }
+
+[features]
+default = ["native"]
+native = [
+    "inference-client/native", "agent-core/native",
+    "tokio", "tracing", "uuid",
+    "quality-gate-lib", "knowledge-base", "swarm-tools",
+    "async-nats", "git2",
+]
