@@ -153,15 +153,22 @@ impl MemTreeManager {
 
         let repo = git2::Repository::open(&self.repo_path)?;
         let commit = repo.find_commit(commit_id)?;
+        let msg = format!("alpha-swarm: {}", commit.message().unwrap_or("agent commit"));
 
-        // Fast-forward HEAD to the agent's commit
-        let mut head_ref = repo.head()?;
-        head_ref.set_target(commit_id, &format!("alpha-swarm: {}", commit.message().unwrap_or("agent commit")))?;
+        // Update the branch that HEAD points to (e.g., refs/heads/main)
+        let head = repo.head()?;
+        if head.is_branch() {
+            let branch_name = head.name().context("HEAD has no name")?;
+            repo.reference(branch_name, commit_id, true, &msg)?;
+        } else {
+            // Detached HEAD — just set HEAD directly
+            repo.set_head_detached(commit_id)?;
+        }
 
         // Checkout the new tree to update working directory
         let tree = commit.tree()?;
         let mut checkout = git2::build::CheckoutBuilder::new();
-        checkout.force(); // We've verified quality, safe to overwrite
+        checkout.force();
         repo.checkout_tree(tree.as_object(), Some(&mut checkout))?;
 
         info!(commit = %commit_id, "Applied agent commit to main repo");
