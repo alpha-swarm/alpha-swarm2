@@ -303,19 +303,14 @@ impl SwarmConfig {
     fn from_file() -> Option<Self> {
         let paths = ["alpha-swarm.toml", ".alpha-swarm.toml"];
         for path in paths {
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    match toml::from_str::<Self>(&content) {
-                        Ok(config) => {
-                            eprintln!("[config] Loaded from {path} (nats={}, orchestrator.model={})", config.nats.url, config.tiers.orchestrator.model);
-                            return Some(config);
-                        }
-                        Err(e) => {
-                            eprintln!("[config] Failed to parse {path}: {e}");
-                        }
+            if let Ok(content) = std::fs::read_to_string(path) {
+                match toml::from_str::<Self>(&content) {
+                    Ok(config) => {
+                        eprintln!("[config] Loaded from {path} (nats={}, orchestrator.model={})", config.nats.url, config.tiers.orchestrator.model);
+                        return Some(config);
                     }
+                    Err(e) => eprintln!("[config] Failed to parse {path}: {e}"),
                 }
-                Err(_) => {}
             }
         }
         None
