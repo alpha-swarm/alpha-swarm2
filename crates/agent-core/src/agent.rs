@@ -103,7 +103,7 @@ pub struct Agent {
     events: Option<Arc<EventPublisher>>,
     project: String,
     /// Optional file provider for zero-disk mode.
-    file_provider: Option<Box<dyn crate::file_provider::FileProvider>>,
+    file_provider: Option<Box<dyn virt_git::FileProvider>>,
 }
 
 impl Agent {
@@ -119,13 +119,13 @@ impl Agent {
     }
 
     /// Use a VirtFileProvider for zero-disk operation.
-    pub fn with_file_provider(mut self, provider: impl crate::file_provider::FileProvider + 'static) -> Self {
+    pub fn with_file_provider(mut self, provider: impl virt_git::FileProvider + 'static) -> Self {
         self.file_provider = Some(Box::new(provider));
         self
     }
 
     /// Take the file provider out (for extracting modified files after agent completes).
-    pub fn take_file_provider(&mut self) -> Option<Box<dyn crate::file_provider::FileProvider>> {
+    pub fn take_file_provider(&mut self) -> Option<Box<dyn virt_git::FileProvider>> {
         self.file_provider.take()
     }
 
@@ -573,6 +573,7 @@ impl Agent {
             repo_path: self.repo_path.clone(),
             project: self.project.clone(),
             timeout: std::time::Duration::from_secs(60),
+            file_provider: None, // TODO: wire from self.file_provider
         };
 
         let options = default_options();

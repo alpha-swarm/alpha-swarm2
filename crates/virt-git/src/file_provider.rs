@@ -74,15 +74,15 @@ fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
 
 /// VirtWorkspace-backed file provider (zero-disk).
 pub struct VirtFileProvider {
-    pub workspace: virt_git::VirtWorkspace,
-    pub store: virt_git::MemoryBlobStore,
+    pub workspace: crate::VirtWorkspace,
+    pub store: crate::MemoryBlobStore,
 }
 
 impl VirtFileProvider {
     pub fn new() -> Self {
         Self {
-            workspace: virt_git::VirtWorkspace::new(),
-            store: virt_git::MemoryBlobStore::new(),
+            workspace: crate::VirtWorkspace::new(),
+            store: crate::MemoryBlobStore::new(),
         }
     }
 
@@ -105,7 +105,7 @@ impl VirtFileProvider {
     pub fn modified_files(&self) -> Vec<(String, String)> {
         let diffs = self.workspace.diff(&self.store);
         diffs.iter().filter_map(|d| {
-            if d.kind == virt_git::DiffKind::Deleted { return None; }
+            if d.kind == crate::DiffKind::Deleted { return None; }
             let content = self.workspace.read_file(&self.store, &d.path)?;
             Some((d.path.clone(), content))
         }).collect()

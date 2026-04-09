@@ -4726,6 +4726,7 @@ dependencies = [
  "tracing",
  "tree-sitter",
  "tree-sitter-rust",
+ "virt-git",
 ]
 
 [[package]]

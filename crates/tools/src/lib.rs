@@ -1,38 +1,46 @@
+// WASI-portable tools (no native deps)
+mod virt_fs;
+mod virt_grep;
+
+// Native-only tools (need tokio, Command, reqwest, tree-sitter, etc.)
+#[cfg(feature = "native")]
 mod fs;
+#[cfg(feature = "native")]
 mod grep;
+#[cfg(feature = "native")]
 mod test_runner;
+#[cfg(feature = "native")]
 mod git;
+#[cfg(feature = "native")]
 mod shell;
+#[cfg(feature = "native")]
 mod tree_sitter_tools;
+#[cfg(feature = "native")]
 mod web;
-mod registry;
+#[cfg(feature = "native")]
 pub mod nats_dispatch;
 
+pub mod registry;
 pub use registry::ToolRegistry;
 
-use std::path::PathBuf;
-use std::time::Duration;
-
-use async_trait::async_trait;
 use serde_json::Value;
 
 /// Context provided to every tool execution.
 pub struct ToolContext {
-    /// Root of the repository being worked on.
-    pub repo_path: PathBuf,
-    /// Project name (for logging/tracking).
+    /// Root of the repository (for disk tools).
+    pub repo_path: std::path::PathBuf,
+    /// Project name.
     pub project: String,
-    /// Hard timeout for this tool execution.
-    pub timeout: Duration,
+    /// Hard timeout.
+    pub timeout: std::time::Duration,
+    /// Optional FileProvider for zero-disk tools.
+    pub file_provider: Option<std::sync::Arc<std::sync::Mutex<Box<dyn virt_git::FileProvider>>>>,
 }
 
-/// Result of a tool execution, fed back to the model.
+/// Result of a tool execution.
 pub struct ToolResult {
-    /// Output content to show the model.
     pub content: String,
-    /// Whether the tool encountered an error.
     pub is_error: bool,
-    /// Wall-clock time the tool took.
     pub duration_ms: u64,
 }
 
@@ -40,24 +48,16 @@ impl ToolResult {
     pub fn ok(content: impl Into<String>, duration_ms: u64) -> Self {
         Self { content: content.into(), is_error: false, duration_ms }
     }
-
     pub fn err(content: impl Into<String>, duration_ms: u64) -> Self {
         Self { content: content.into(), is_error: true, duration_ms }
     }
 }
 
-/// A deterministic tool that an agent can invoke instead of using LLM inference.
-#[async_trait]
+/// A deterministic tool.
+#[async_trait::async_trait]
 pub trait Tool: Send + Sync {
-    /// Unique name used in tool calls (e.g., "read_file", "run_tests").
     fn name(&self) -> &str;
-
-    /// Human-readable description for the model's system prompt.
     fn description(&self) -> &str;
-
-    /// JSON Schema describing the parameters this tool accepts.
     fn parameters_schema(&self) -> Value;
-
-    /// Execute the tool with the given parameters.
     async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult;
 }
