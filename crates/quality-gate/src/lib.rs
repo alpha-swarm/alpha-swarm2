@@ -1,9 +1,14 @@
 use std::path::Path;
-use std::time::Instant;
 
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "native")]
+use std::time::Instant;
+#[cfg(feature = "native")]
+use anyhow::{Context, Result};
+#[cfg(feature = "native")]
 use tokio::process::Command;
+#[cfg(feature = "native")]
 use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,7 +34,7 @@ pub struct ToolchainConfig {
 /// Auto-detect the toolchain based on files present in the repo.
 pub fn detect_toolchain(repo_path: &Path) -> ToolchainConfig {
     if repo_path.join("Cargo.toml").exists() {
-        info!("Detected Rust/Cargo toolchain");
+        // Rust/Cargo toolchain
         ToolchainConfig {
             build_cmd: Some("cargo check".into()),
             fmt_cmd: Some("cargo fmt -- --check".into()),
@@ -39,7 +44,7 @@ pub fn detect_toolchain(repo_path: &Path) -> ToolchainConfig {
             e2e_test_cmd: None,
         }
     } else if repo_path.join("package.json").exists() {
-        info!("Detected Node.js toolchain");
+        // Node.js toolchain
         ToolchainConfig {
             build_cmd: Some("npm run build".into()),
             fmt_cmd: Some("npm run fmt -- --check".into()),
@@ -49,7 +54,7 @@ pub fn detect_toolchain(repo_path: &Path) -> ToolchainConfig {
             e2e_test_cmd: None,
         }
     } else if repo_path.join("go.mod").exists() {
-        info!("Detected Go toolchain");
+        // Go toolchain
         ToolchainConfig {
             build_cmd: Some("go build ./...".into()),
             fmt_cmd: Some("gofmt -l .".into()),
@@ -59,7 +64,7 @@ pub fn detect_toolchain(repo_path: &Path) -> ToolchainConfig {
             e2e_test_cmd: None,
         }
     } else {
-        warn!("No known toolchain detected");
+        // No known toolchain
         ToolchainConfig {
             build_cmd: None,
             fmt_cmd: None,
@@ -71,6 +76,7 @@ pub fn detect_toolchain(repo_path: &Path) -> ToolchainConfig {
     }
 }
 
+#[cfg(feature = "native")]
 async fn run_check(name: &str, cmd: &str, cwd: &Path) -> Result<CheckResult> {
     info!(check = name, cmd, "Running quality check");
     let start = Instant::now();
@@ -109,6 +115,7 @@ async fn run_check(name: &str, cmd: &str, cwd: &Path) -> Result<CheckResult> {
 }
 
 /// Run all quality checks in order. Stops at first failure.
+#[cfg(feature = "native")]
 pub async fn run_all(repo_path: &Path, config: &ToolchainConfig) -> Result<Vec<CheckResult>> {
     let checks: Vec<(&str, &Option<String>)> = vec![
         ("fmt", &config.fmt_cmd),
@@ -133,6 +140,7 @@ pub async fn run_all(repo_path: &Path, config: &ToolchainConfig) -> Result<Vec<C
 }
 
 /// Run a single named check.
+#[cfg(feature = "native")]
 pub async fn run_single(
     name: &str,
     repo_path: &Path,

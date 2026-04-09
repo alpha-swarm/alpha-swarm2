@@ -127,7 +127,10 @@ impl AgentRun {
             tokens_input: 0,
             tokens_output: 0,
             duration_ms: 0,
+            #[cfg(feature = "native")]
             created_at: chrono::Utc::now().to_rfc3339(),
+            #[cfg(not(feature = "native"))]
+            created_at: String::new(),
             embedding: None,
             prompt_sent: None,
             response_text: None,

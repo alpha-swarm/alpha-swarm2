@@ -8,9 +8,15 @@ license.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-surrealdb = "3"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
-inference-client = { path = "../inference-client" }
+inference-client = { path = "../inference-client", default-features = false }
+
+# Native-only
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+surrealdb = { version = "3", optional = true }
+chrono = { version = "0.4", features = ["serde"], optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+
+[features]
+default = ["native"]
+native = ["inference-client/native", "tokio", "tracing", "surrealdb", "chrono", "uuid"]

@@ -8,8 +8,14 @@ license.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-async-nats = "0.38"
-futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
+
+# Native-only
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+async-nats = { version = "0.38", optional = true }
+futures = { version = "0.3", optional = true }
+
+[features]
+default = ["native"]
+native = ["tokio", "tracing", "async-nats", "futures"]
