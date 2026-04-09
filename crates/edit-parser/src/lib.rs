@@ -231,9 +231,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unclosed_block() {
+    fn test_unclosed_block_is_salvaged() {
+        // Unclosed blocks are salvaged instead of erroring
         let response = "<<<EDIT a.rs\n--- OLD\nx\n--- NEW\ny";
-        assert!(parse_edits(response).is_err());
+        let edits = parse_edits(response).unwrap();
+        assert_eq!(edits.len(), 1);
     }
 
     #[test]

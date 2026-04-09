@@ -271,7 +271,8 @@ mod tests {
     use crate::mock::MockBackend;
 
     #[tokio::test]
-    async fn simple_task_selects_smallest_code_model() {
+    async fn simple_task_selects_largest_code_model() {
+        // All tiers now prefer largest code model for quality
         let router = InferenceRouter::new()
             .add_backend(
                 MockBackend::new(BackendKind::Ollama)
@@ -281,7 +282,7 @@ mod tests {
             );
 
         let model = router.recommend_model(Complexity::Simple).await.unwrap();
-        assert_eq!(model.name, "qwen2.5-coder:7b");
+        assert_eq!(model.name, "deepseek-coder:33b");
     }
 
     #[tokio::test]
@@ -314,7 +315,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complex_falls_back_to_largest_ollama() {
+    async fn complex_falls_back_to_largest_code_model() {
+        // Without Claude, picks largest preferred code model
         let router = InferenceRouter::new()
             .add_backend(
                 MockBackend::new(BackendKind::Ollama)
@@ -323,7 +325,8 @@ mod tests {
             );
 
         let model = router.recommend_model(Complexity::Complex).await.unwrap();
-        assert_eq!(model.name, "codellama:34b");
+        // qwen2.5-coder is in PREFERRED_CODE_MODELS, codellama is not
+        assert_eq!(model.name, "qwen2.5-coder:7b");
     }
 
     #[tokio::test]
