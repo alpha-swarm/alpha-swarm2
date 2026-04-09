@@ -8,16 +8,16 @@ Everything except inference calls runs as WASI components. Inference stays local
 
 | Component | Currently | Target |
 |-----------|-----------|--------|
-| Agent core (edit/plan) | Native Rust binary | WASI component |
-| Tool registry | Native Rust, disk I/O | WASI + wasi:filesystem |
-| Orchestrator/planner | Native Rust binary | WASI component |
-| Quality gate | Native Rust, shell commands | WASI + wasi:cli |
-| Knowledge store | SurrealDB (native client) | WASI + wasi:http (REST) |
-| Event bus | async-nats (native) | WASI + wasi:messaging |
-| File workspace | git2 + local clone | WASI + wasi:blobstore (NATS) |
-| Inference client | reqwest to Ollama | **Abstraction trait** via wasi:http |
-| Web UI | WASI (done) | Keep |
-| Frontend | Leptos WASM (done) | Keep |
+| Agent core (edit/plan) | WASI component | WASI component |
+| Tool registry | WASI + wasi:filesystem | WASI + wasi:filesystem |
+| Orchestrator/planner | WASI component | WASI component |
+| Quality gate | WASI + wasi:cli | WASI + wasi:cli |
+| Knowledge store | WASI + wasi:http (REST) | WASI + wasi:http (REST) |
+| Event bus | WASI + wasi:messaging | WASI + wasi:messaging |
+| File workspace | WASI + wasi:blobstore (NATS) | WASI + wasi:blobstore (NATS) |
+| Inference client | **Abstraction trait** via wasi:http | **Abstraction trait** via wasi:http |
+| Web UI | Keep | Keep |
+| Frontend | Keep | Keep |
 
 ## Inference Abstraction
 
@@ -139,25 +139,25 @@ interface agent {
 
 ## Migration Path
 
-### Phase 1: Inference Abstraction (native Rust)
+### Phase 1: Inference Abstraction (native Rust) - COMPLETE
 - Extract `InferenceProvider` trait
 - Support multiple Ollama hosts (csatapaci + local)
 - Model routing by VRAM/queue depth
 - Config-driven provider list
 
-### Phase 2: Workspace via NATS blobstore
+### Phase 2: Workspace via NATS blobstore - COMPLETE
 - Replace local git clone with NATS object store
 - Read-through cache: NATS → git HEAD
 - Diff extraction from NATS keys vs git tree
 - Agent works distributed — no local filesystem needed
 
-### Phase 3: Agent Worker as WASI component
+### Phase 3: Agent Worker as WASI component - COMPLETE
 - Compile agent-core to `wasm32-wasip2`
 - Import `alpha-swarm:inference/provider` + `alpha-swarm:workspace/files`
 - Tool calls via WASI interfaces
 - Runs on any wasmCloud host
 
-### Phase 4: Full WASI stack
+### Phase 4: Full WASI stack - IN PROGRESS
 - Orchestrator as WASI component
 - Quality gate via `wasi:cli` provider
 - Event bus via `wasi:messaging`
@@ -168,4 +168,17 @@ interface agent {
 - **Ollama** — GPU inference server, HTTP API
 - **SurrealDB** — database, HTTP/WS API
 - **NATS** — messaging, native protocol
-- **cargo/git** — dev tools, invoked via `wasi:cli`
+
+### WASM Components
+- agent-worker
+- orchestrator-worker
+- tools-worker
+- knowledge-store
+- quality-gate-worker
+- web-ui
+- tool-search
+- tool-web
+
+## Zero-Disk E2E
+- Works via GitHub API for both file loading and PR creation
+- virt-git handles in-memory diffs
