@@ -81,22 +81,21 @@ impl MemTreeManager {
         Ok(work_dir)
     }
 
-    /// After agent finishes, extract diff from workspace and create a git2 commit
-    /// in the MAIN repo (without updating working directory).
+    /// After agent finishes, extract diff from workspace against its own HEAD.
     pub fn commit_changes(&self, agent_id: &str, message: &str) -> Result<CommitResult> {
         let ws = self.workspaces.iter()
             .find(|w| w.agent_id == agent_id)
             .context("Workspace not found")?;
 
-        // Open the main repo for commit creation
-        let repo = git2::Repository::open(&self.repo_path)
-            .context("Failed to open main git repo")?;
+        // Open the WORKSPACE's git repo (not main) to compare against its HEAD
+        let repo = git2::Repository::open(&ws.work_dir)
+            .context("Failed to open workspace git repo")?;
 
-        let head = repo.head().context("Failed to get HEAD")?;
+        let head = repo.head().context("Failed to get workspace HEAD")?;
         let head_commit = head.peel_to_commit().context("Failed to peel HEAD to commit")?;
         let base_tree = head_commit.tree().context("Failed to get HEAD tree")?;
 
-        // Collect changes: compare workspace files against main repo HEAD
+        // Collect changes: compare workspace working dir against workspace HEAD
         let changes = collect_changes(&repo, &base_tree, &ws.work_dir)?;
 
         if changes.is_empty() {
