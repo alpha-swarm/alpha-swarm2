@@ -14,6 +14,10 @@ const RESOURCE_TTL: Duration = Duration::from_secs(60);
 const TASKS_BUCKET: &str = "swarm-tasks";
 const LEASES_BUCKET: &str = "swarm-leases";
 const RESOURCES_BUCKET: &str = "swarm-resources";
+/// Key for the global execution lock (only 1 goal runs across all daemons).
+const EXECUTION_LOCK_KEY: &str = "goal-execution-lock";
+/// Execution lock TTL — auto-releases if daemon dies.
+const EXECUTION_LOCK_TTL: Duration = Duration::from_secs(900); // 15 minutes
 
 /// A task entry in the KV store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +179,52 @@ impl NatsScheduler {
             if entry.operation != kv::Operation::Put { return None; }
             serde_json::from_slice::<TaskEntry>(&entry.value).ok()
         }))
+    }
+
+    /// Try to acquire the global execution lock. Only 1 goal runs across all daemons.
+    /// Returns Ok(true) if acquired, Ok(false) if another daemon holds it.
+    pub async fn try_acquire_execution_lock(&self, run_id: &str) -> Result<bool> {
+        let value = serde_json::to_vec(&serde_json::json!({
+            "daemon_id": self.daemon_id,
+            "run_id": run_id,
+            "acquired_at": chrono::Utc::now().to_rfc3339(),
+        }))?;
+
+        match self.leases.create(EXECUTION_LOCK_KEY, value.into()).await {
+            Ok(_) => {
+                info!(run_id, daemon = %self.daemon_id, "Acquired global execution lock");
+                Ok(true)
+            }
+            Err(_) => {
+                debug!(run_id, "Execution lock held by another daemon");
+                Ok(false)
+            }
+        }
+    }
+
+    /// Release the global execution lock (goal completed or failed).
+    pub async fn release_execution_lock(&self) -> Result<()> {
+        self.leases.purge(EXECUTION_LOCK_KEY).await
+            .context("Failed to release execution lock")?;
+        info!(daemon = %self.daemon_id, "Released global execution lock");
+        Ok(())
+    }
+
+    /// Renew the execution lock (prevents expiry during long goals).
+    pub async fn renew_execution_lock(&self, run_id: &str) -> Result<()> {
+        let value = serde_json::to_vec(&serde_json::json!({
+            "daemon_id": self.daemon_id,
+            "run_id": run_id,
+            "acquired_at": chrono::Utc::now().to_rfc3339(),
+        }))?;
+        self.leases.put(EXECUTION_LOCK_KEY, value.into()).await
+            .context("Failed to renew execution lock")?;
+        Ok(())
+    }
+
+    /// Check if the execution lock is free.
+    pub async fn is_execution_lock_free(&self) -> bool {
+        matches!(self.leases.get(EXECUTION_LOCK_KEY).await, Ok(None) | Err(_))
     }
 
     pub fn daemon_id(&self) -> &str {

@@ -198,8 +198,8 @@ pub fn model_role(name: &str) -> Option<ModelRole> {
 impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
-            max_cpu_percent: 80.0,
-            max_ram_percent: 80.0,
+            max_cpu_percent: 75.0,
+            max_ram_percent: 75.0,
             check_interval_secs: 10,
             max_concurrent_agents: default_max_concurrent_agents(),
             hosts: default_hosts(),

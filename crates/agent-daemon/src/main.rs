@@ -131,30 +131,38 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Process initial pending tasks
+    // Process initial pending tasks (first one only)
     process_pending(&config, &router, &ollama, &store, &publisher, &scheduler).await;
 
-    // Main loop: always poll SurrealDB, use NATS KV for claiming
-    info!("Polling SurrealDB every {:?} with NATS KV claiming", FALLBACK_POLL_INTERVAL);
+    // Main loop: poll SurrealDB, run 1 goal at a time via NATS KV execution lock
+    info!("Polling SurrealDB every {:?} (1 goal at a time via NATS KV lock)", FALLBACK_POLL_INTERVAL);
     loop {
         tokio::time::sleep(FALLBACK_POLL_INTERVAL).await;
         if !resources::can_schedule(&config.resources) { continue; }
+
+        // Check if execution lock is free (another goal may be running on this or another daemon)
+        if let Some(sched) = &scheduler {
+            if !sched.is_execution_lock_free().await { continue; }
+        }
+
         if let Ok(pending) = store.list_pending().await {
-            for task in pending {
-                if !resources::can_schedule(&config.resources) { break; }
+            if let Some(task) = pending.into_iter().next() {
                 let id = task.id.clone().unwrap_or_default();
+
+                // Try to acquire the global execution lock
+                if let Some(sched) = &scheduler {
+                    match sched.try_acquire_execution_lock(&id).await {
+                        Ok(true) => { info!(id = %id, "Acquired execution lock"); }
+                        Ok(false) => { info!(id = %id, "Execution lock held, skipping"); continue; }
+                        Err(e) => { warn!(id = %id, error = %e, "Execution lock error"); continue; }
+                    }
+                    // Also claim the task lease
+                    let _ = sched.try_claim(&id).await;
+                }
+
                 let project = task.project.clone();
                 let goal = task.task_description.clone();
                 let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
-
-                // NATS KV claim (best-effort, proceed even if fails)
-                if let Some(sched) = &scheduler {
-                    match sched.try_claim(&id).await {
-                        Ok(true) => { info!(id = %id, "Claimed via NATS KV"); }
-                        Ok(false) => { info!(id = %id, "NATS KV claim failed, proceeding anyway"); }
-                        Err(e) => { warn!(id = %id, error = %e, "NATS KV error"); }
-                    }
-                }
 
                 spawn_task(config.clone(), Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), scheduler.clone(), id, project, goal, status);
             }
@@ -165,7 +173,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Process any tasks already pending in SurrealDB.
+/// Process any tasks already pending in SurrealDB (first one only).
 async fn process_pending(
     config: &SwarmConfig,
     router: &Arc<InferenceRouter>,
@@ -177,28 +185,26 @@ async fn process_pending(
     match store.list_pending().await {
         Ok(pending) => {
             info!(count = pending.len(), "Found pending tasks");
-            for task in pending {
+            if let Some(task) = pending.into_iter().next() {
                 if !resources::can_schedule(&config.resources) {
-                    info!("Deferring remaining tasks until resources free up");
-                    break;
+                    info!("Deferring tasks until resources free up");
+                    return;
                 }
 
                 let id = task.id.clone().unwrap_or_default();
+
+                if let Some(sched) = scheduler {
+                    match sched.try_acquire_execution_lock(&id).await {
+                        Ok(true) => { info!(id = %id, "Acquired execution lock"); }
+                        Ok(false) => { info!(id = %id, "Execution lock held, deferring"); return; }
+                        Err(e) => { warn!(id = %id, error = %e, "Execution lock error"); return; }
+                    }
+                    let _ = sched.try_claim(&id).await;
+                }
+
                 let project = task.project.clone();
                 let goal = task.task_description.clone();
                 let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
-
-                // Try to claim via NATS KV (skip if lease exists from previous daemon)
-                if let Some(sched) = scheduler {
-                    match sched.try_claim(&id).await {
-                        Ok(true) => { info!(id = %id, "Claimed via NATS KV"); }
-                        Ok(false) => {
-                            info!(id = %id, "NATS KV claim failed (lease exists), proceeding with SurrealDB claim");
-                            // Don't skip — SurrealDB atomic claim is the fallback
-                        }
-                        Err(e) => { warn!(id = %id, error = %e, "NATS KV claim error"); }
-                    }
-                }
 
                 spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), scheduler.clone(), id, project, goal, status);
             }
@@ -294,7 +300,7 @@ async fn run_surreal_poll_loop(
     }
 }
 
-/// Spawn a task with lease management.
+/// Spawn a task with lease management and NATS KV execution lock.
 #[allow(clippy::too_many_arguments)]
 fn spawn_task(
     config: SwarmConfig,
@@ -309,14 +315,17 @@ fn spawn_task(
     status: String,
 ) {
     tokio::spawn(async move {
-        // Start lease renewal heartbeat
+        info!(id = %id, "Goal starting execution");
+
+        // Start lease + execution lock renewal heartbeat
         let lease_handle = if let Some(sched) = &scheduler {
             let sched = Arc::clone(sched);
             let id = id.clone();
             Some(tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(LEASE_RENEWAL_INTERVAL).await;
-                    if sched.renew_lease(&id).await.is_err() { break; }
+                    let _ = sched.renew_lease(&id).await;
+                    let _ = sched.renew_execution_lock(&id).await;
                 }
             }))
         } else {
@@ -326,8 +335,9 @@ fn spawn_task(
         // Execute the task
         executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal, &status).await;
 
-        // Release lease
+        // Release execution lock + task lease
         if let Some(sched) = &scheduler {
+            let _ = sched.release_execution_lock().await;
             let _ = sched.release_lease(&id).await;
         }
         if let Some(handle) = lease_handle {

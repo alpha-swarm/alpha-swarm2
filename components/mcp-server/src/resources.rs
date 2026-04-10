@@ -20,6 +20,9 @@ pub fn list_resources() -> Vec<Value> {
         resource_def("runs/{id}", "Run Detail", "Full detail of a single run (replace {id})."),
         resource_def("runs/{id}/sub-runs", "Sub-Runs", "Child agent runs under a parent run."),
         resource_def("runs/{id}/plans", "Plans", "Plan versions for a run."),
+        resource_def("runs/{id}/timeline", "Run Timeline", "Ordered tool calls + phase transitions for a run."),
+        resource_def("live", "Live Agents", "Currently running agents with progress messages."),
+        resource_def("dashboard", "Dashboard", "Global aggregate stats across all projects."),
     ]
 }
 
@@ -75,6 +78,9 @@ pub fn read_resource(uri: &str) -> Result<Value, String> {
             uri,
             &format!("SELECT * FROM goal_plan WHERE run_id = '{}' ORDER BY version DESC", id.replace('\'', "")),
         ),
+        ["runs", id, "timeline"] => resource_run_timeline(uri, id),
+        ["live"] => resource_live(uri),
+        ["dashboard"] => resource_dashboard(uri),
         ["models"] => resource_models(uri),
         ["resources"] => query_resource(uri, "SELECT * FROM resource_snapshot ORDER BY timestamp DESC LIMIT 5"),
         ["health"] => Ok(content_response(uri, r#"{"status":"ok"}"#)),
@@ -104,4 +110,38 @@ fn content_response(uri: &str, text: &str) -> Value {
 fn resource_models(uri: &str) -> Result<Value, String> {
     let text = crate::http_get(crate::OLLAMA_HOST, "/api/tags")?;
     Ok(content_response(uri, &text))
+}
+
+fn resource_run_timeline(uri: &str, id: &str) -> Result<Value, String> {
+    let safe_id = id.replace('\'', "");
+    let ref_ = if id.contains(':') { id.to_string() } else { format!("type::thing('agent_run', '{safe_id}')") };
+
+    // Fetch the run with tool_calls and attempts
+    let query = format!("SELECT tool_calls, attempts, phase_timings, progress_message, status FROM {ref_}");
+    let result = crate::surreal_query(&query)?;
+    Ok(content_response(uri, &result))
+}
+
+fn resource_live(uri: &str) -> Result<Value, String> {
+    let result = crate::surreal_query(
+        "SELECT id, project, task_description, status, progress_message, last_activity_at \
+         FROM agent_run WHERE status = 'running' OR status = 'planning'"
+    )?;
+    Ok(content_response(uri, &result))
+}
+
+fn resource_dashboard(uri: &str) -> Result<Value, String> {
+    let result = crate::surreal_query(
+        "SELECT \
+            count() as total_runs, \
+            math::sum(IF status = 'running' THEN 1 ELSE 0 END) as active, \
+            math::sum(IF status = 'passed' THEN 1 ELSE 0 END) as passed, \
+            math::sum(IF status = 'failed' THEN 1 ELSE 0 END) as failed, \
+            math::sum(IF status = 'pending' THEN 1 ELSE 0 END) as pending, \
+            math::sum(tokens_input) as total_tokens_in, \
+            math::sum(tokens_output) as total_tokens_out, \
+            math::sum(duration_ms) as total_duration_ms \
+         FROM agent_run"
+    )?;
+    Ok(content_response(uri, &result))
 }
