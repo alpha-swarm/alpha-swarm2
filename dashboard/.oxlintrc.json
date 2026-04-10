@@ -1,0 +1,10 @@
+{
+  "plugins": ["react", "typescript"],
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-console": "off",
+    "react/no-direct-mutation-state": "error",
+    "complexity": ["warn", { "max": 10 }],
+    "max-lines-per-function": ["warn", { "max": 60 }]
+  }
+}

@@ -174,31 +174,49 @@ export async function findSimilarRuns(project: string, query: string, limit?: nu
 
 // --- Resources (read-only data) ---
 
-function parseResourceJson<T>(result: McpResourceResult): T {
-  const text = result.contents[0]?.text ?? "[]";
-  return JSON.parse(text) as T;
+// SurrealDB REST returns [{result: [...], status: "OK"}]
+// MCP resource passes this through as text. We unwrap it.
+interface SurrealResponse<T> {
+  result: T[];
+  status: string;
 }
 
-export async function readResource<T = unknown>(uri: string): Promise<T> {
+function parseResourceJson<T>(result: McpResourceResult): T[] {
+  const text = result.contents[0]?.text ?? "[]";
+  const parsed = JSON.parse(text);
+  // Unwrap SurrealDB response format
+  if (Array.isArray(parsed) && parsed.length > 0 && "result" in parsed[0]) {
+    return (parsed as SurrealResponse<T>[]).flatMap((r) => r.result);
+  }
+  if (Array.isArray(parsed)) return parsed as T[];
+  return [parsed as T];
+}
+
+export async function readResource<T = unknown>(uri: string): Promise<T[]> {
   const result = await rpc<McpResourceResult>("resources/read", { uri });
   return parseResourceJson<T>(result);
 }
 
-// Typed resource helpers
+import type { Project, AgentRun, DashboardStats, GoalPlan } from "./types";
+
+// Re-export types path for hooks
+export type { Project, AgentRun, DashboardStats, GoalPlan };
+
+// Typed resource helpers — all return unwrapped arrays
 export const resources = {
-  projects: () => readResource("swarm://projects"),
+  projects: () => readResource<Project>("swarm://projects"),
   models: () => readResource("swarm://models"),
   systemResources: () => readResource("swarm://resources"),
   health: () => readResource("swarm://health"),
-  live: () => readResource("swarm://live"),
-  dashboard: () => readResource("swarm://dashboard"),
+  live: () => readResource<AgentRun>("swarm://live"),
+  dashboard: () => readResource<DashboardStats>("swarm://dashboard"),
 
-  projectRuns: (project: string) => readResource(`swarm://projects/${project}/runs`),
+  projectRuns: (project: string) => readResource<AgentRun>(`swarm://projects/${project}/runs`),
   projectGoals: (project: string) => readResource(`swarm://projects/${project}/goals`),
   projectMetrics: (project: string) => readResource(`swarm://projects/${project}/metrics`),
 
-  runDetail: (id: string) => readResource(`swarm://runs/${id}`),
-  subRuns: (id: string) => readResource(`swarm://runs/${id}/sub-runs`),
-  plans: (id: string) => readResource(`swarm://runs/${id}/plans`),
+  runDetail: (id: string) => readResource<AgentRun>(`swarm://runs/${id}`),
+  subRuns: (id: string) => readResource<AgentRun>(`swarm://runs/${id}/sub-runs`),
+  plans: (id: string) => readResource<GoalPlan>(`swarm://runs/${id}/plans`),
   timeline: (id: string) => readResource(`swarm://runs/${id}/timeline`),
 };
