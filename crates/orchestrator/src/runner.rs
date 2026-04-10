@@ -222,9 +222,10 @@ impl SwarmRunner {
                     .unwrap_or_else(|_| "http://100.81.10.8:11434".into());
 
                 // Include file content inline for the WASI component
+                // Use task.files (not file_paths_loaded which depends on NATS)
                 let mut inline_files = Vec::new();
                 let mut total_content_size = 0usize;
-                for file_path in &file_paths_loaded {
+                for file_path in &task.files {
                     if let Some(content) = virt_fp.workspace.read_file(&virt_fp.store, file_path) {
                         total_content_size += content.len();
                         inline_files.push(serde_json::json!({"path": file_path, "content": content}));

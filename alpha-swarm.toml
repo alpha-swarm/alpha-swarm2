@@ -25,8 +25,9 @@ project = "default"
 
 # --- Agent Tiers ---
 # Orchestrator + Agent: same model to avoid swap overhead
+# Orchestrator: fast planner
 [tiers.orchestrator]
-model = "qwen2.5-coder:32b"
+model = "qwen2.5-coder:14b"
 context_window = 16384
 time_limit_secs = 14400         # 4 hours
 token_limit = 1000000           # 1M tokens
