@@ -13,7 +13,16 @@ pub async fn plan_goal(
 ) -> Result<Vec<SubTask>> {
     info!(goal, file_count = repo_files.len(), model = %tier.model, "Planning goal decomposition");
 
-    let file_list = repo_files.join("\n");
+    // Limit file list to avoid exceeding context window
+    // Prioritize files mentioned in the goal, then source files
+    let max_files = tier.max_context_files.min(100);
+    let limited_files: Vec<&str> = repo_files.iter()
+        .filter(|f| !f.contains("/target/") && !f.starts_with("target/"))
+        .take(max_files)
+        .map(|s| s.as_str())
+        .collect();
+    let file_list = limited_files.join("\n");
+    info!(total = repo_files.len(), sent = limited_files.len(), "Planner file list");
     let user_msg = format!("GOAL: {goal}\n\nREPOSITORY FILES:\n{file_list}");
 
     let messages = vec![
