@@ -47,34 +47,27 @@ mod tests {
             })
         };
 
-        // === 1. Fetch README.md from GitHub API into blobstore ===
-        println!("1. Fetching README.md from GitHub API...");
+        // === 1. Fetch CHANGELOG.md from GitHub API into blobstore ===
+        println!("1. Fetching CHANGELOG.md from GitHub API...");
         let mut store = MemoryBlobStore::new();
         let mut ws = VirtWorkspace::new();
 
-        load_file_from_github(owner, repo, branch, "README.md", &mut store, &mut ws, &gh_http, token_ref)
-            .expect("Failed to load README.md from GitHub");
+        load_file_from_github(owner, repo, branch, "CHANGELOG.md", &mut store, &mut ws, &gh_http, token_ref)
+            .expect("Failed to load CHANGELOG.md from GitHub");
 
-        let original = ws.read_file(&store, "README.md").expect("README.md not in workspace");
+        let original = ws.read_file(&store, "CHANGELOG.md").expect("CHANGELOG.md not in workspace");
         println!("   Loaded {} bytes into blobstore", original.len());
-        assert!(original.contains("ASCII") || original.contains("┌"), "Expected ASCII art in README");
+        assert!(original.contains("v0.1.0"), "Expected v0.1.0 in CHANGELOG");
 
-        // === 2. Call WASI agent-worker for mermaid edit ===
-        println!("2. Calling WASI agent-worker...");
-
-        // Send only the architecture section to avoid body size limits
-        let arch_section = if let Some(start) = original.find("## Architecture") {
-            if let Some(end) = original[start..].find("## Components") {
-                &original[start..start+end]
-            } else { &original[start..] }
-        } else { &original };
+        // === 2. Call WASI agent-worker (gemma4:26b) ===
+        println!("2. Calling WASI agent-worker with gemma4:26b...");
 
         let task = serde_json::json!({
-            "task": "Replace the ASCII art diagram with a MermaidJS diagram using graph TD. Keep: picur (SurrealDB, Web UI, Daemon, NATS), csatapaci (Ollama 72B/33B/7B, Daemon, NATS), malna (NATS quorum, WASI tools), Tailscale mesh.",
-            "model": "qwen2.5-coder:32b",
+            "task": "Add a v0.2.0 section to the CHANGELOG dated 2026-04-10 with these entries: Added gemma4:26b model support, Added 4 new WASI components (orchestrator-worker, tools-worker, knowledge-store, quality-gate-worker), Moved FileProvider trait to virt-git crate, All 10 crates compile to wasm32-wasip2",
+            "model": "gemma4:26b",
             "ollama_url": "http://100.81.10.8:11434",
             "workspace_id": "zero-disk-e2e",
-            "files": [{"path": "README.md", "content": arch_section}]
+            "files": [{"path": "CHANGELOG.md", "content": original}]
         });
 
         let resp: serde_json::Value = tokio::task::block_in_place(|| {
@@ -116,7 +109,7 @@ mod tests {
         let diff_text = ws.diff_text(&store);
         println!("4. Diff (in-memory):");
         println!("{}", diff_text.chars().take(500).collect::<String>());
-        assert!(diff_text.contains("mermaid") || diff_text.contains("graph"), "Diff should contain mermaid");
+        assert!(diff_text.contains("v0.2.0") || diff_text.contains("gemma4"), "Diff should contain v0.2.0 or gemma4");
 
         // === 5. Create PR via GitHub API ===
         println!("5. Creating PR via GitHub API...");
@@ -130,8 +123,8 @@ mod tests {
 
         let pr = create_pr(
             &gh_config, &ws, &store,
-            "docs: replace ASCII diagram with MermaidJS (zero-disk agent)",
-            "docs: replace ASCII diagram with MermaidJS (zero-disk)",
+            "docs: add v0.2.0 to CHANGELOG (gemma4:26b zero-disk E2E)",
+            "docs: add v0.2.0 to CHANGELOG (gemma4:26b zero-disk)",
             &format!("## Zero-Disk E2E\n\nEntire pipeline with no filesystem:\n1. README.md fetched via GitHub API\n2. Stored in NATS blobstore\n3. Agent edit via wasi:http → Ollama\n4. Diff via virt-git (in-memory SHA256)\n5. PR via GitHub API\n\n```diff\n{}\n```\n\n🤖 alpha-swarm", diff_text.chars().take(2000).collect::<String>()),
             &branch_name,
             &|method, url, body, token| {

@@ -2155,21 +2155,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inference-provider"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-nats",
- "futures",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3323,20 +3308,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "quality-gate-provider"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-nats",
- "futures",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -6533,21 +6504,6 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser 0.244.0",
-]
-
-[[package]]
-name = "workspace-provider"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-nats",
- "futures",
- "git2",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

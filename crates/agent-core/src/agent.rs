@@ -32,16 +32,9 @@ fn tier_options(tier: &swarm_config::TierConfig) -> InferenceOptions {
     }
 }
 
-/// Default inference options — agent tier.
-/// Respects ALPHA_SWARM_AGENT_MODEL env var for model override.
+/// Default inference options — agent tier from config.
 fn default_options() -> InferenceOptions {
-    let mut tier = swarm_config::TierConfig::agent();
-    if let Ok(model) = std::env::var("ALPHA_SWARM_AGENT_MODEL") {
-        tier.model = model;
-    }
-    if let Ok(ctx) = std::env::var("ALPHA_SWARM_AGENT_CTX")
-        && let Ok(n) = ctx.parse() { tier.context_window = n; }
-    tier_options(&tier)
+    tier_options(&swarm_config::TierConfig::agent())
 }
 
 /// Auto-wrap heuristic: if model output content without <<< blocks,
@@ -573,7 +566,7 @@ impl Agent {
             repo_path: self.repo_path.clone(),
             project: self.project.clone(),
             timeout: std::time::Duration::from_secs(60),
-            file_provider: None, // TODO: wire from self.file_provider
+            file_provider: None, // Tools use disk fallback; FileProvider used by agent's read_files/apply_edits
         };
 
         let options = default_options();
@@ -780,13 +773,18 @@ impl Agent {
                             .with_context(|| format!("Cannot read {path} for editing"))?
                     };
 
-                    let updated = if content.contains(old.as_str()) {
-                        // Exact match
-                        content.replacen(old.as_str(), new.as_str(), 1)
+                    // Normalize line endings for comparison
+                    let content_norm = content.replace("\r\n", "\n");
+                    let old_norm = old.replace("\r\n", "\n");
+                    let new_norm = new.replace("\r\n", "\n");
+
+                    let updated = if content_norm.contains(old_norm.trim()) {
+                        // Exact match (after normalization + trim)
+                        content_norm.replacen(old_norm.trim(), new_norm.trim(), 1)
                     } else {
-                        // Try trimmed match — normalize whitespace
-                        let old_trimmed = old.trim();
-                        let lines: Vec<&str> = content.lines().collect();
+                        // Try substring match — find OLD content anywhere
+                        let old_trimmed = old_norm.trim();
+                        let lines: Vec<&str> = content_norm.lines().collect();
                         let old_lines: Vec<&str> = old_trimmed.lines().map(|l| l.trim()).collect();
 
                         if old_lines.is_empty() {
@@ -794,42 +792,59 @@ impl Agent {
                             continue;
                         }
 
-                        // Find the first line of OLD in the file
-                        let mut found = false;
-                        let mut start_line = 0;
-                        for (i, line) in lines.iter().enumerate() {
-                            if line.trim() == old_lines[0] {
-                                // Check if subsequent lines match
-                                let mut all_match = true;
-                                for (j, old_line) in old_lines.iter().enumerate() {
-                                    if i + j >= lines.len() || lines[i + j].trim() != *old_line {
-                                        all_match = false;
+                        // Single-line OLD: find it anywhere in the file
+                        if old_lines.len() == 1 {
+                            let target = old_lines[0];
+                            if let Some(idx) = lines.iter().position(|l| l.trim() == target) {
+                                let mut result: Vec<String> = lines[..idx].iter().map(|l| l.to_string()).collect();
+                                for new_line in new_norm.trim().lines() {
+                                    result.push(new_line.to_string());
+                                }
+                                result.extend(lines[idx + 1..].iter().map(|l| l.to_string()));
+                                info!(path, line = idx + 1, "Applied single-line fuzzy match");
+                                result.join("\n")
+                            } else {
+                                let preview: String = old_lines[0].chars().take(80).collect();
+                                warn!(path, old_preview = %preview, "OLD block not found — skipping");
+                                continue;
+                            }
+                        } else {
+                            // Multi-line: trimmed line-by-line match
+                            let mut found = false;
+                            let mut start_line = 0;
+                            for (i, line) in lines.iter().enumerate() {
+                                if line.trim() == old_lines[0] {
+                                    let mut all_match = true;
+                                    for (j, old_line) in old_lines.iter().enumerate() {
+                                        if i + j >= lines.len() || lines[i + j].trim() != *old_line {
+                                            all_match = false;
+                                            break;
+                                        }
+                                    }
+                                    if all_match {
+                                        start_line = i;
+                                        found = true;
                                         break;
                                     }
                                 }
-                                if all_match {
-                                    start_line = i;
-                                    found = true;
-                                    break;
-                                }
                             }
-                        }
 
-                        if !found {
-                            warn!(path, "OLD block not found in file (even with trimmed match) — skipping");
-                            continue;
-                        }
+                            if !found {
+                                let preview: String = old_lines[0].chars().take(80).collect();
+                                warn!(path, old_preview = %preview, lines = old_lines.len(), "OLD block not found — skipping");
+                                continue;
+                            }
 
-                        // Replace the matched lines preserving original indentation
-                        let mut result_lines: Vec<String> = Vec::new();
-                        result_lines.extend(lines[..start_line].iter().map(|l| l.to_string()));
-                        // Use new content as-is
-                        for new_line in new.lines() {
-                            result_lines.push(new_line.to_string());
+                            // Replace matched lines
+                            let mut result_lines: Vec<String> = Vec::new();
+                            result_lines.extend(lines[..start_line].iter().map(|l| l.to_string()));
+                            for new_line in new_norm.trim().lines() {
+                                result_lines.push(new_line.to_string());
+                            }
+                            result_lines.extend(lines[start_line + old_lines.len()..].iter().map(|l| l.to_string()));
+                            info!(path, line = start_line + 1, "Applied multi-line fuzzy match");
+                            result_lines.join("\n")
                         }
-                        result_lines.extend(lines[start_line + old_lines.len()..].iter().map(|l| l.to_string()));
-                        info!(path, "Applied edit with trimmed matching");
-                        result_lines.join("\n")
                     };
                     if let Some(ref mut fp) = self.file_provider {
                         fp.write_file(path, &updated).map_err(|e| anyhow::anyhow!(e))?;

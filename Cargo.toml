@@ -24,9 +24,6 @@ members = [
     "components/quality-gate-worker",
     "providers/git-provider",
     "providers/test-provider",
-    "providers/inference-provider",
-    "providers/workspace-provider",
-    "providers/quality-gate-provider",
     "eval",
 ]
 resolver = "2"

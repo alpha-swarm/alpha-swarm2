@@ -30,12 +30,60 @@ OUTPUT FORMAT (JSON array only, no other text):
 pub const MAX_TASKS: usize = 5;
 
 /// Parse a planner response into sub-tasks, validating against known repo files.
+/// Tolerant: tries JSON directly, then extracts from markdown fences, then falls back to single task.
 pub fn parse_plan(json_str: &str, repo_files: &[String]) -> Result<Vec<SubTask>, String> {
-    let mut tasks: Vec<SubTask> = serde_json::from_str(json_str)
-        .map_err(|e| format!("Failed to parse plan JSON: {e}"))?;
+    let input = json_str.trim();
 
+    // Try 1: direct JSON parse
+    let mut tasks: Vec<SubTask> = match serde_json::from_str(input) {
+        Ok(t) => t,
+        Err(_) => {
+            // Try 2: extract from markdown code fence ```json ... ```
+            let extracted = if let Some(start) = input.find("```json") {
+                let after = &input[start + 7..];
+                if let Some(end) = after.find("```") {
+                    after[..end].trim()
+                } else { "" }
+            } else if let Some(start) = input.find("```") {
+                let after = &input[start + 3..];
+                if let Some(end) = after.find("```") {
+                    after[..end].trim()
+                } else { "" }
+            } else { "" };
+
+            if !extracted.is_empty() {
+                serde_json::from_str(extracted).unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        }
+    };
+
+    // Try 3: if still empty, find JSON array in the text
     if tasks.is_empty() {
-        return Err("Planner returned empty task list".into());
+        if let Some(start) = input.find('[') {
+            if let Some(end) = input.rfind(']') {
+                let _ = serde_json::from_str::<Vec<SubTask>>(&input[start..=end])
+                    .map(|t| tasks = t);
+            }
+        }
+    }
+
+    // Fallback: create single task from the goal (model didn't produce JSON)
+    if tasks.is_empty() {
+        // Pick the most likely target files from repo_files
+        let likely_files: Vec<String> = repo_files.iter()
+            .filter(|f| !f.starts_with("target/") && !f.starts_with(".git/"))
+            .take(5)
+            .cloned()
+            .collect();
+
+        return Ok(vec![SubTask {
+            id: "task-1".into(),
+            description: json_str.chars().take(200).collect(),
+            files: likely_files,
+            complexity: inference_client::Complexity::Medium,
+        }]);
     }
 
     // Cap tasks

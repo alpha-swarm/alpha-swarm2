@@ -1,21 +1,17 @@
-// Planner types are portable, execution needs native inference
+// Planner types are WASI-portable
 pub mod planner_types;
+pub use planner_types::SubTask;
+
+// Native-only: inference, git2, tokio runtime
 #[cfg(feature = "native")]
 mod planner;
-
-// Native-only: git operations, file I/O, tokio runtime
-#[cfg(feature = "native")]
-mod worktree;
 #[cfg(feature = "native")]
 mod memtree;
 #[cfg(feature = "native")]
 mod runner;
 
-pub use planner_types::SubTask;
 #[cfg(feature = "native")]
 pub use planner::plan_goal;
-#[cfg(feature = "native")]
-pub use worktree::WorktreeManager;
 #[cfg(feature = "native")]
 pub use memtree::MemTreeManager;
 #[cfg(feature = "native")]
