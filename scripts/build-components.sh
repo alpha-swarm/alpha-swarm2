@@ -14,6 +14,7 @@ COMPONENTS=(
     "agent-worker"
     "tool-search"
     "tool-web"
+    "mcp-server"
 )
 
 for comp in "${COMPONENTS[@]}"; do

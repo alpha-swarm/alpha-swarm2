@@ -89,6 +89,32 @@ spec:
             package: http
             interfaces: [outgoing-handler]
 
+    # MCP Server — Model Context Protocol (Streamable HTTP)
+    - name: mcp-server
+      type: component
+      properties:
+        image: file://target/wasm32-wasip2/release/mcp_server.wasm
+      traits:
+        - type: spreadscaler
+          properties:
+            instances: 1
+        - type: link
+          properties:
+            target: httpserver
+            namespace: wasi
+            package: http
+            interfaces: [incoming-handler]
+            source_config:
+              - name: mcp-http
+                properties:
+                  address: 0.0.0.0:8090
+        - type: link
+          properties:
+            target: httpclient
+            namespace: wasi
+            package: http
+            interfaces: [outgoing-handler]
+
     # === Capability Providers (host plugins) ===
 
     # HTTP Server — serves incoming requests

@@ -22,6 +22,7 @@ members = [
     "components/tools-worker",
     "components/knowledge-store",
     "components/quality-gate-worker",
+    "components/mcp-server",
     "providers/git-provider",
     "providers/test-provider",
     "eval",
