@@ -273,15 +273,14 @@ async fn handle_execute(
     let emb_manager = std::sync::Arc::new(knowledge_base::embedding_manager::EmbeddingManager::new(
         Arc::clone(&store), Arc::clone(&ollama), embed_model,
     ));
-    // Index embeddings in BACKGROUND (non-blocking — doesn't delay planner)
+    // Index embeddings ONCE (blocking first time, instant when cached)
     {
-        let emb = Arc::clone(&emb_manager);
-        let project = project.to_string();
-        let repo = repo_path.clone();
-        tokio::spawn(async move {
-            let indexed = emb.on_agent_start(&project, &repo).await;
-            if indexed > 0 { info!(indexed, "Background: indexed files for RAG"); }
-        });
+        let indexed = emb_manager.on_agent_start(project, &repo_path).await;
+        if indexed > 0 {
+            info!(indexed, "Indexed files for RAG (first run)");
+        } else {
+            info!("Embeddings cached, skipping indexing");
+        }
     }
 
     // Helper: update progress on the running task

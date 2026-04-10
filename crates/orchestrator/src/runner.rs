@@ -426,7 +426,7 @@ impl SwarmRunner {
                             let msg = format!("Step {}/{}: {} → {}", p.step, p.max_steps, p.action, p.result.chars().take(80).collect::<String>());
                             let tokens_msg = format!("{}in/{}out, {} edits", p.tokens_in, p.tokens_out, p.edits_count);
                             let full_msg = format!("{} [{}]", msg, tokens_msg);
-                            let safe = full_msg.replace('\'', "");
+                            let safe = full_msg.replace('\'', "").replace('\\', "").replace('\n', " ").replace('\r', "");
                             let now = chrono::Utc::now().to_rfc3339();
                             let query = if tid.contains(':') {
                                 format!("UPDATE {} SET progress_message = '{}', last_activity_at = '{}'", tid, safe, now)
