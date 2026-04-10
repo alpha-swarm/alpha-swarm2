@@ -71,17 +71,29 @@ pub fn parse_plan(json_str: &str, repo_files: &[String]) -> Result<Vec<SubTask>,
 
     // Fallback: create single task from the goal (model didn't produce JSON)
     if tasks.is_empty() {
-        // Pick the most likely target files from repo_files
-        let likely_files: Vec<String> = repo_files.iter()
-            .filter(|f| !f.starts_with("target/") && !f.starts_with(".git/"))
-            .take(5)
-            .cloned()
-            .collect();
+        // Extract file paths mentioned in the goal text (look for path-like strings)
+        let mut files: Vec<String> = extract_file_paths_from_text(json_str);
+
+        // Also include existing repo files that are referenced in the goal
+        for repo_file in repo_files {
+            if json_str.contains(repo_file.as_str()) && !files.contains(repo_file) {
+                files.push(repo_file.clone());
+            }
+        }
+
+        // If still empty, pick first 5 repo files as fallback
+        if files.is_empty() {
+            files = repo_files.iter()
+                .filter(|f| !f.starts_with("target/") && !f.starts_with(".git/"))
+                .take(5)
+                .cloned()
+                .collect();
+        }
 
         return Ok(vec![SubTask {
             id: "task-1".into(),
-            description: json_str.chars().take(200).collect(),
-            files: likely_files,
+            description: json_str.chars().take(500).collect(),
+            files,
             complexity: inference_client::Complexity::Medium,
         }]);
     }
@@ -114,6 +126,25 @@ pub fn parse_plan(json_str: &str, repo_files: &[String]) -> Result<Vec<SubTask>,
     Ok(tasks)
 }
 
+/// Extract file paths from free text (e.g. goal descriptions).
+/// Looks for strings that look like file paths: contain '/' and end with a known extension.
+fn extract_file_paths_from_text(text: &str) -> Vec<String> {
+    let extensions = [".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".toml", ".json", ".yaml", ".yml", ".md", ".css", ".html"];
+    let mut paths = Vec::new();
+
+    for word in text.split_whitespace() {
+        // Strip punctuation from edges
+        let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-');
+        if clean.contains('/') && extensions.iter().any(|ext| clean.ends_with(ext)) {
+            if !paths.contains(&clean.to_string()) {
+                paths.push(clean.to_string());
+            }
+        }
+    }
+
+    paths
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +174,25 @@ mod tests {
         let tasks = parse_plan(json, &repo_files).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].files, vec!["src/lib.rs"]);
+    }
+
+    #[test]
+    fn extract_paths_from_goal_text() {
+        let text = "Read crates/knowledge-base/src/schema.rs then CREATE dashboard/src/types/swarm.ts";
+        let paths = extract_file_paths_from_text(text);
+        assert!(paths.contains(&"crates/knowledge-base/src/schema.rs".to_string()));
+        assert!(paths.contains(&"dashboard/src/types/swarm.ts".to_string()));
+    }
+
+    #[test]
+    fn fallback_uses_goal_paths() {
+        let repo_files = vec!["crates/knowledge-base/src/schema.rs".into(), "src/lib.rs".into()];
+        // This text won't parse as JSON, triggering fallback
+        let text = "Read crates/knowledge-base/src/schema.rs and create dashboard/src/types/swarm.ts";
+        let tasks = parse_plan(text, &repo_files).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].files.contains(&"crates/knowledge-base/src/schema.rs".to_string()));
+        assert!(tasks[0].files.contains(&"dashboard/src/types/swarm.ts".to_string()));
     }
 
     #[test]
