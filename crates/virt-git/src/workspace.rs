@@ -3,12 +3,7 @@
 //! Usage:
 //! ```ignore
 //! let mut ws = VirtWorkspace::new();
-//! ws.load_files(&mut store, &[("src/main.rs", "fn main() {/// Returns the blob count from the store for diagnostics.
-    pub fn blob_count(&self) -> usize {
-        self.store.blob_count()
-    }
-
-}")]);
+//! ws.load_files(&mut store, &[("src/main.rs", "fn main() {}")]);
 //! ws.write_file(&mut store, "src/main.rs", "/// Doc\nfn main() {}");
 //! let diff = ws.diff(&store);
 //! let commit = ws.commit("added doc comment");
@@ -39,24 +34,36 @@ pub struct VirtWorkspace {
     commits: Vec<CommitInfo>,
     /// Auto-incrementing commit counter.
     next_commit: u32,
-    /// Reference to the blob store.
-    store: Box<dyn BlobStore>,
+}
+
+impl VirtWorkspace {
+    /// Returns a summary of the workspace state as a String.
+    pub fn summary(&self) -> String {
+        format!(
+            "VirtWorkspace Summary:\n\
+             - Files in working tree: {}\n\
+             - Has uncommitted changes: {}\n\
+             - Number of commits: {}",
+            self.list_files().join(", "),
+            self.has_changes(),
+            self.commits.len()
+        )
+    }
 }
 
 impl VirtWorkspace {
     /// Create an empty workspace.
-    pub fn new(store: &'static mut dyn BlobStore) -> Self {
+    pub fn new() -> Self {
         Self {
             base: TreeSnapshot::new(),
             working: TreeSnapshot::new(),
             commits: Vec::new(),
             next_commit: 1,
-            store,
         }
     }
 
     /// Create workspace from a set of files (the "base" state).
-    pub fn from_files(store: &'static mut dyn BlobStore, files: &[(&str, &str)]) -> Self {
+    pub fn from_files(store: &mut dyn BlobStore, files: &[(&str, &str)]) -> Self {
         let file_bytes: Vec<(&str, &[u8])> = files.iter()
             .map(|(p, c)| (*p, c.as_bytes()))
             .collect();
@@ -66,7 +73,6 @@ impl VirtWorkspace {
             working: tree,
             commits: Vec::new(),
             next_commit: 1,
-            store,
         }
     }
 
