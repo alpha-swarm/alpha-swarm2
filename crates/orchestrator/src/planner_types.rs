@@ -17,14 +17,14 @@ pub const PLANNER_SYSTEM: &str = r#"You decompose a goal into the MINIMUM number
 
 RULES:
 - Create as FEW tasks as possible. If the goal can be done in 1 task, output 1 task.
-- ONLY list files that ACTUALLY EXIST in the repository file list below.
-- Never invent or guess file paths. If a file isn't in the list, don't reference it.
-- Each task lists the specific files it will read or modify.
+- For EDITING existing files: list files from the repository file list below.
+- For CREATING new files: you MAY list file paths that don't exist yet. The agent will use <<<CREATE>>> to make them.
+- Each task lists the specific files it will read, modify, or create.
 - Classify complexity: simple (1-2 files, small change), medium (2-4 files), complex (4+ files).
 - Maximum 5 tasks. Most goals need 1-3.
 
 OUTPUT FORMAT (JSON array only, no other text):
-[{"id":"task-1","description":"what to do","files":["existing/file.rs"],"complexity":"simple"}]"#;
+[{"id":"task-1","description":"what to do","files":["existing/file.rs","new/file/to/create.ts"],"complexity":"simple"}]"#;
 
 /// Maximum number of sub-tasks the planner can create.
 pub const MAX_TASKS: usize = 5;
@@ -91,14 +91,66 @@ pub fn parse_plan(json_str: &str, repo_files: &[String]) -> Result<Vec<SubTask>,
         tasks.truncate(MAX_TASKS);
     }
 
-    // Filter out tasks referencing non-existent files
-    let tasks: Vec<SubTask> = tasks.into_iter().filter(|task| {
-        task.files.iter().all(|f| repo_files.iter().any(|rf| rf == f))
-    }).collect();
+    // Validate files: existing files must match repo, new files are allowed (agent will CREATE them)
+    for task in &mut tasks {
+        let (existing, new): (Vec<_>, Vec<_>) = task.files.iter()
+            .partition(|f| repo_files.iter().any(|rf| rf == *f));
+
+        // Keep all files — existing ones for EDIT, new ones for CREATE
+        // But if a task has ONLY non-existent files and none look like valid paths, flag it
+        if existing.is_empty() && !new.is_empty() {
+            // Ensure new file paths look reasonable (have an extension, no spaces)
+            task.files.retain(|f| f.contains('.') && !f.contains(' '));
+        }
+    }
+
+    // Remove tasks with no files left
+    tasks.retain(|t| !t.files.is_empty());
 
     if tasks.is_empty() {
-        return Err("All planned tasks reference non-existent files".into());
+        return Err("All planned tasks have no valid files".into());
     }
 
     Ok(tasks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_plan_allows_new_files() {
+        let repo_files = vec!["src/lib.rs".into(), "Cargo.toml".into()];
+        let json = r#"[{"id":"task-1","description":"Create types","files":["src/lib.rs","dashboard/src/types/swarm.ts"],"complexity":"simple"}]"#;
+        let tasks = parse_plan(json, &repo_files).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].files.len(), 2);
+        assert!(tasks[0].files.contains(&"dashboard/src/types/swarm.ts".to_string()));
+    }
+
+    #[test]
+    fn parse_plan_rejects_invalid_new_paths() {
+        let repo_files = vec!["src/lib.rs".into()];
+        let json = r#"[{"id":"task-1","description":"Bad","files":["no extension"],"complexity":"simple"}]"#;
+        let result = parse_plan(json, &repo_files);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_plan_keeps_existing_files() {
+        let repo_files = vec!["src/lib.rs".into(), "src/main.rs".into()];
+        let json = r#"[{"id":"task-1","description":"Edit","files":["src/lib.rs"],"complexity":"simple"}]"#;
+        let tasks = parse_plan(json, &repo_files).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].files, vec!["src/lib.rs"]);
+    }
+
+    #[test]
+    fn parse_plan_only_new_files() {
+        let repo_files = vec!["src/lib.rs".into()];
+        let json = r#"[{"id":"task-1","description":"Create","files":["new/file.ts"],"complexity":"simple"}]"#;
+        let tasks = parse_plan(json, &repo_files).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].files, vec!["new/file.ts"]);
+    }
 }
