@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["frontend"]
+exclude = ["frontend", "dashboard"]
 members = [
     "crates/config",
     "crates/inference-client",
