@@ -141,7 +141,7 @@ async fn handle_planning(
     };
     let _ = store.db_query_raw(&format_update(task_id, &format!("SET progress_message = '{}'", progress.replace('\'', "")))).await;
 
-    match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files, &config.tiers.orchestrator).await {
+    match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files, &config.tiers.orchestrator, None).await {
         Ok(tasks) => {
             let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -273,12 +273,16 @@ async fn handle_execute(
     let emb_manager = std::sync::Arc::new(knowledge_base::embedding_manager::EmbeddingManager::new(
         Arc::clone(&store), Arc::clone(&ollama), embed_model,
     ));
-    // Skip embedding indexing — it blocks Ollama for minutes and causes planner timeouts.
-    // TODO: Run embedding on a separate Ollama instance or after task completion.
-    // {
-    //     let indexed = emb_manager.on_agent_start(project, &repo_path).await;
-    //     if indexed > 0 { info!(indexed, "Indexed project files for RAG"); }
-    // }
+    // Index embeddings in BACKGROUND (non-blocking — doesn't delay planner)
+    {
+        let emb = Arc::clone(&emb_manager);
+        let project = project.to_string();
+        let repo = repo_path.clone();
+        tokio::spawn(async move {
+            let indexed = emb.on_agent_start(&project, &repo).await;
+            if indexed > 0 { info!(indexed, "Background: indexed files for RAG"); }
+        });
+    }
 
     // Helper: update progress on the running task
     async fn update_progress(store: &KnowledgeStore, task_id: &str, msg: &str) {

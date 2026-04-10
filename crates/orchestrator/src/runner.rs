@@ -119,9 +119,32 @@ impl SwarmRunner {
         let repo_files = discover_source_files(&self.repo_path)?;
         info!(file_count = repo_files.len(), "Discovered repo files");
 
-        // 2. Plan: decompose goal into sub-tasks
-        let tasks = plan_goal(&self.router, goal, &repo_files, &self.planner_tier).await
-            .context("Goal planning failed")?;
+        // 2. RAG: find relevant files for this goal (if embeddings available)
+        let relevant_files = if let Some(ref store) = self.store {
+            let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
+                .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
+            match self.ollama.embed(&embed_model, goal).await {
+                Ok(embedding) => {
+                    match store.find_relevant_files(&self.project, &embedding, 15, 0.3).await {
+                        Ok(files) if !files.is_empty() => {
+                            let result: Vec<(String, f32)> = files.iter()
+                                .map(|(path, _summary, score)| (path.clone(), *score))
+                                .collect();
+                            info!(count = result.len(), "RAG: found relevant files for goal");
+                            Some(result)
+                        }
+                        _ => None,
+                    }
+                }
+                Err(_) => None,
+            }
+        } else { None };
+
+        // 3. Plan: decompose goal into sub-tasks (with RAG context)
+        let tasks = plan_goal(
+            &self.router, goal, &repo_files, &self.planner_tier,
+            relevant_files.as_deref(),
+        ).await.context("Goal planning failed")?;
 
         info!(task_count = tasks.len(), "Goal decomposed");
 
