@@ -394,7 +394,7 @@ impl SwarmRunner {
                     } else { agent };
 
                     let tools = swarm_tools::ToolRegistry::with_defaults();
-                    const MAX_TOOL_STEPS: u32 = 10;
+                    const MAX_TOOL_STEPS: u32 = 20; // More steps for edit → test → fix loops
                     let result = agent.run_with_tools(&task.description, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
                     (task, result)
                 });

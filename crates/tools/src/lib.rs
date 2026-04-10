@@ -8,6 +8,8 @@ mod fs;
 #[cfg(feature = "native")]
 mod grep;
 #[cfg(feature = "native")]
+mod quality_tools;
+#[cfg(feature = "native")]
 mod test_runner;
 #[cfg(feature = "native")]
 mod git;
