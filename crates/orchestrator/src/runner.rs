@@ -408,6 +408,9 @@ impl SwarmRunner {
 
                 join_set.spawn(async move {
                     let _permit = sem.acquire().await.expect("semaphore closed");
+                    let task_id_for_progress = parent_id.clone().unwrap_or_default();
+                    let store_for_progress = store.clone();
+
                     let agent = Agent::new(Arc::clone(&router), &wt_path);
                     let mut agent = if let Some(kb) = store {
                         agent.with_knowledge(KnowledgeConfig {
@@ -416,8 +419,31 @@ impl SwarmRunner {
                         })
                     } else { agent };
 
+                    // Wire progress callback — writes to SurrealDB in real time
+                    if let Some(progress_store) = store_for_progress {
+                        let tid = task_id_for_progress.clone();
+                        agent = agent.with_progress(move |p: agent_core::AgentProgress| {
+                            let msg = format!("Step {}/{}: {} → {}", p.step, p.max_steps, p.action, p.result.chars().take(80).collect::<String>());
+                            let tokens_msg = format!("{}in/{}out, {} edits", p.tokens_in, p.tokens_out, p.edits_count);
+                            let full_msg = format!("{} [{}]", msg, tokens_msg);
+                            let safe = full_msg.replace('\'', "");
+                            let now = chrono::Utc::now().to_rfc3339();
+                            let query = if tid.contains(':') {
+                                format!("UPDATE {} SET progress_message = '{}', last_activity_at = '{}'", tid, safe, now)
+                            } else if !tid.is_empty() {
+                                format!("UPDATE type::thing('agent_run', '{}') SET progress_message = '{}', last_activity_at = '{}'", tid, safe, now)
+                            } else { return; };
+                            let store = progress_store.clone();
+                            tokio::task::block_in_place(|| {
+                                tokio::runtime::Handle::current().block_on(async {
+                                    let _ = store.db_query_raw(&query).await;
+                                });
+                            });
+                        });
+                    }
+
                     let tools = swarm_tools::ToolRegistry::with_defaults();
-                    const MAX_TOOL_STEPS: u32 = 20; // More steps for edit → test → fix loops
+                    const MAX_TOOL_STEPS: u32 = 20;
                     let result = agent.run_with_tools(&task.description, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
                     (task, result)
                 });

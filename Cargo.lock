@@ -4700,6 +4700,7 @@ dependencies = [
  "agent-core",
  "anyhow",
  "async-nats",
+ "chrono",
  "git2",
  "inference-client",
  "knowledge-base",

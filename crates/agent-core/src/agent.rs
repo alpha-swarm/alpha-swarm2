@@ -93,6 +93,22 @@ pub struct KnowledgeConfig {
     pub parent_run_id: Option<String>,
 }
 
+/// Progress update from the agent's tool loop.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentProgress {
+    pub step: u32,
+    pub max_steps: u32,
+    pub action: String,        // "tool:read_file", "edit:path.rs", "build", "done"
+    pub result: String,        // "OK", "FAILED: error...", "applied"
+    pub duration_ms: u64,
+    pub tokens_in: u32,
+    pub tokens_out: u32,
+    pub edits_count: usize,
+}
+
+/// Callback for real-time progress updates.
+pub type ProgressFn = Box<dyn Fn(AgentProgress) + Send + Sync>;
+
 /// A one-shot code modification agent.
 pub struct Agent {
     router: Arc<InferenceRouter>,
@@ -102,6 +118,8 @@ pub struct Agent {
     project: String,
     /// Optional file provider for zero-disk mode.
     file_provider: Option<Box<dyn virt_git::FileProvider>>,
+    /// Optional progress callback for real-time updates.
+    progress_fn: Option<ProgressFn>,
 }
 
 impl Agent {
@@ -113,7 +131,14 @@ impl Agent {
             events: None,
             project: "default".into(),
             file_provider: None,
+            progress_fn: None,
         }
+    }
+
+    /// Set a progress callback for real-time updates during tool loop.
+    pub fn with_progress(mut self, f: impl Fn(AgentProgress) + Send + Sync + 'static) -> Self {
+        self.progress_fn = Some(Box::new(f));
+        self
     }
 
     /// Use a VirtFileProvider for zero-disk operation.
@@ -660,6 +685,18 @@ impl Agent {
                             duration_ms: result.duration_ms,
                         });
 
+                        // Progress callback
+                        if let Some(ref progress) = self.progress_fn {
+                            progress(AgentProgress {
+                                step, max_steps,
+                                action: format!("tool:{}", call.name),
+                                result: format!("{prefix}: {}", result.content.chars().take(100).collect::<String>()),
+                                duration_ms: result.duration_ms,
+                                tokens_in: total_tokens_in, tokens_out: total_tokens_out,
+                                edits_count: all_edits.len(),
+                            });
+                        }
+
                         // Truncate long results to avoid context bloat
                         let content = if result.content.len() > TOOL_RESULT_MAX_CHARS {
                             format!("{}...(truncated)", &result.content[..TOOL_RESULT_MAX_CHARS])
@@ -669,14 +706,26 @@ impl Agent {
                         feedback_parts.push(format!("[{} {}] {}", call.name, prefix, content));
                     }
                     AgentAction::Edit(edit) => {
+                        let edit_path = match edit {
+                            FileEdit::Edit { path, .. } | FileEdit::Create { path, .. } | FileEdit::Delete { path } => path.clone(),
+                        };
                         let validated = self.validate_edits(vec![edit.clone()]);
                         if validated.is_empty() {
                             feedback_parts.push("[edit REJECTED] Invalid file path".into());
+                            if let Some(ref progress) = self.progress_fn {
+                                progress(AgentProgress { step, max_steps, action: format!("edit:{edit_path}"), result: "REJECTED".into(), duration_ms: 0, tokens_in: total_tokens_in, tokens_out: total_tokens_out, edits_count: all_edits.len() });
+                            }
                         } else if let Err(e) = self.apply_edits(&validated) {
                             feedback_parts.push(format!("[edit ERROR] {e}"));
+                            if let Some(ref progress) = self.progress_fn {
+                                progress(AgentProgress { step, max_steps, action: format!("edit:{edit_path}"), result: format!("ERROR: {e}"), duration_ms: 0, tokens_in: total_tokens_in, tokens_out: total_tokens_out, edits_count: all_edits.len() });
+                            }
                         } else {
                             all_edits.extend(validated);
                             feedback_parts.push("[edit OK] Applied".into());
+                            if let Some(ref progress) = self.progress_fn {
+                                progress(AgentProgress { step, max_steps, action: format!("edit:{edit_path}"), result: "Applied".into(), duration_ms: 0, tokens_in: total_tokens_in, tokens_out: total_tokens_out, edits_count: all_edits.len() });
+                            }
                         }
                     }
                     AgentAction::Agent { description, files, .. } => {
@@ -691,12 +740,17 @@ impl Agent {
                     }
                     AgentAction::Done { summary } => {
                         if all_edits.is_empty() && step <= 2 {
-                            // Model said DONE without making edits — nudge it
                             info!(step, summary = %summary, "Tool loop: DONE with no edits, nudging");
                             feedback_parts.push(format!("[DONE] {summary}\n\nYou haven't made any edits yet. Please produce <<<EDIT>>> blocks to modify the files. Read the file first if needed, then output the edit."));
+                            if let Some(ref progress) = self.progress_fn {
+                                progress(AgentProgress { step, max_steps, action: "done:nudged".into(), result: summary.clone(), duration_ms: 0, tokens_in: total_tokens_in, tokens_out: total_tokens_out, edits_count: 0 });
+                            }
                         } else {
                             info!(step, summary = %summary, "Tool loop: DONE");
                             done = true;
+                            if let Some(ref progress) = self.progress_fn {
+                                progress(AgentProgress { step, max_steps, action: "done".into(), result: summary.clone(), duration_ms: 0, tokens_in: total_tokens_in, tokens_out: total_tokens_out, edits_count: all_edits.len() });
+                            }
                         }
                     }
                 }
