@@ -273,10 +273,12 @@ async fn handle_execute(
     let emb_manager = std::sync::Arc::new(knowledge_base::embedding_manager::EmbeddingManager::new(
         Arc::clone(&store), Arc::clone(&ollama), embed_model,
     ));
-    {
-        let indexed = emb_manager.on_agent_start(project, &repo_path).await;
-        if indexed > 0 { info!(indexed, "Indexed project files for RAG"); }
-    }
+    // Skip embedding indexing — it blocks Ollama for minutes and causes planner timeouts.
+    // TODO: Run embedding on a separate Ollama instance or after task completion.
+    // {
+    //     let indexed = emb_manager.on_agent_start(project, &repo_path).await;
+    //     if indexed > 0 { info!(indexed, "Indexed project files for RAG"); }
+    // }
 
     // Helper: update progress on the running task
     async fn update_progress(store: &KnowledgeStore, task_id: &str, msg: &str) {
