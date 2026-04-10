@@ -38,7 +38,6 @@ pub struct VirtWorkspace {
 
 impl VirtWorkspace {
     /// Create an empty workspace.
-    /// Creates a new empty workspace.
     pub fn new() -> Self {
         Self {
             base: TreeSnapshot::new(),
@@ -49,7 +48,6 @@ impl VirtWorkspace {
     }
 
     /// Create workspace from a set of files (the "base" state).
-    /// Creates a workspace from a set of initial files.
     pub fn from_files(store: &mut dyn BlobStore, files: &[(&str, &str)]) -> Self {
         let file_bytes: Vec<(&str, &[u8])> = files.iter()
             .map(|(p, c)| (*p, c.as_bytes()))
@@ -64,62 +62,52 @@ impl VirtWorkspace {
     }
 
     /// Load a file into the base + working tree.
-    /// Loads a file into the base and working trees.
     pub fn load_file(&mut self, store: &mut dyn BlobStore, path: &str, content: &str) {
         self.base.insert(store, path, content.as_bytes());
         self.working.insert(store, path, content.as_bytes());
     }
 
     /// Read a file from the working tree.
-    /// Reads a file from the working tree.
     pub fn read_file(&self, store: &dyn BlobStore, path: &str) -> Option<String> {
         self.working.read_string(store, path)
     }
 
     /// Write a file to the working tree (not base).
-    /// Writes a file to the working tree.
     pub fn write_file(&mut self, store: &mut dyn BlobStore, path: &str, content: &str) {
         self.working.insert(store, path, content.as_bytes());
     }
 
     /// Delete a file from the working tree.
-    /// Deletes a file from the working tree.
     pub fn delete_file(&mut self, path: &str) {
         self.working.remove(path);
     }
 
     /// Check if file exists in working tree.
-    /// Checks if a file exists in the working tree.
     pub fn file_exists(&self, path: &str) -> bool {
         self.working.exists(path)
     }
 
     /// List all files in working tree.
-    /// Lists all files in the working tree.
     pub fn list_files(&self) -> Vec<&str> {
         self.working.list_files()
     }
 
     /// Check if there are uncommitted changes.
-    /// Checks if there are uncommitted changes in the working tree.
     pub fn has_changes(&self) -> bool {
         !self.diff_entries().is_empty()
     }
 
     /// Get the diff between base and working tree.
-    /// Gets the diff between the base and working trees.
     pub fn diff(&self, store: &dyn BlobStore) -> Vec<FileDiff> {
         diff::diff_trees(store, &self.base, &self.working)
     }
 
     /// Get formatted diff as patch text.
-    /// Gets the formatted diff as patch text.
     pub fn diff_text(&self, store: &dyn BlobStore) -> String {
         diff::format_diff(&self.diff(store))
     }
 
     /// Commit the current working tree state.
-    /// Commits the current state of the working tree.
     pub fn commit(&mut self, message: &str) -> CommitInfo {
         let tree_hash = self.working.hash();
         let parent = self.commits.last().map(|c| c.id.clone());
@@ -141,7 +129,6 @@ impl VirtWorkspace {
     }
 
     /// Get commit history.
-    /// Gets the commit history.
     pub fn commits(&self) -> &[CommitInfo] {
         &self.commits
     }
@@ -166,6 +153,10 @@ impl VirtWorkspace {
         }
 
         changed
+    }
+/// Get the number of files in the working tree.
+    pub fn file_count(&self) -> usize {
+        self.working.file_count()
     }
 }
 
