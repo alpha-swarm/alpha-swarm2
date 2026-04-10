@@ -41,15 +41,15 @@ ssh "$REMOTE" "pgrep -f 'ollama serve' > /dev/null 2>&1 && echo '  Ollama alread
 
 # --- WasmCloud Host ---
 echo "[4/4] Starting WasmCloud host..."
-ssh "$REMOTE" "nohup wasmcloud --nats-host 127.0.0.1 --nats-port 4222 --label alpha-swarm-role=inference --label alpha-swarm-gpu=false --label alpha-swarm-ram-gb=96 --label alpha-swarm-models=deepseek-coder:33b,codellama:34b,qwen2.5-coder:7b > $DATA_DIR/wasmcloud.log 2>&1 &"
+ssh "$REMOTE" "nohup wash host --scheduler-nats-url nats://127.0.0.1:4222 --data-nats-url nats://127.0.0.1:4222 --host-name alpha-swarm-csatapaci --host-group alpha-swarm --non-interactive > $DATA_DIR/wasmcloud.log 2>&1 &"
 sleep 2
-ssh "$REMOTE" "pgrep -f 'wasmcloud' > /dev/null && echo '  WasmCloud running' || echo '  ERROR: WasmCloud failed'"
+ssh "$REMOTE" "pgrep -f 'wash host' > /dev/null && echo '  WasmCloud running' || echo '  ERROR: WasmCloud failed'"
 
 echo ""
 echo "=== csatapaci infrastructure running ==="
 echo "  NATS:      nats://csatapaci:4222"
 echo "  SurrealDB: ws://csatapaci:8000"
 echo "  Ollama:    http://csatapaci:11434"
-echo "  WasmCloud: ssh csatapaci 'wash get hosts'"
+echo "  WasmCloud: running (wash host)"
 echo ""
 echo "  Stop with: ./scripts/infra-down-csatapaci.sh"

@@ -44,11 +44,12 @@ echo "  SurrealDB listening on :8000"
 
 # --- WasmCloud Host ---
 echo "[3/3] Starting WasmCloud host..."
-wasmcloud \
-    --nats-host 127.0.0.1 \
-    --nats-port 4222 \
-    --label alpha-swarm-role=orchestrator \
-    --label alpha-swarm-gpu=false &
+wash host \
+    --scheduler-nats-url nats://127.0.0.1:4222 \
+    --data-nats-url nats://127.0.0.1:4222 \
+    --host-name alpha-swarm-local \
+    --host-group alpha-swarm \
+    --non-interactive &
 WASMCLOUD_PID=$!
 echo "  WasmCloud PID: $WASMCLOUD_PID"
 sleep 2
@@ -70,7 +71,7 @@ echo ""
 echo "=== Local infrastructure running ==="
 echo "  NATS:      nats://127.0.0.1:4222"
 echo "  SurrealDB: ws://127.0.0.1:8000"
-echo "  WasmCloud: wash get hosts"
+echo "  WasmCloud: running (wash host)"
 echo ""
 echo "  Stop with: ./scripts/infra-down-local.sh"
 

@@ -26,7 +26,8 @@ if [ -f "$PID_FILE" ]; then
     rm -f "$PID_FILE"
 else
     echo "  No PID file found. Killing by process name..."
-    pkill -f "wasmcloud" 2>/dev/null || true
+    pkill -f "wash host" 2>/dev/null || true
+    pkill -f "wadm" 2>/dev/null || true
     pkill -f "surreal start" 2>/dev/null || true
     pkill -f "nats-server.*nats-local.conf" 2>/dev/null || true
 fi

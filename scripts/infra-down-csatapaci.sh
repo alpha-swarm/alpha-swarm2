@@ -9,7 +9,8 @@ echo "=== Stopping alpha-swarm infrastructure (csatapaci) ==="
 
 ssh "$REMOTE" bash <<'EOF'
 echo "  Stopping WasmCloud..."
-pkill -f "wasmcloud" 2>/dev/null || echo "    not running"
+pkill -f "wash host" 2>/dev/null || echo "    not running"
+pkill -f "wadm" 2>/dev/null || echo "    not running"
 
 echo "  Stopping SurrealDB..."
 pkill -f "surreal start" 2>/dev/null || echo "    not running"

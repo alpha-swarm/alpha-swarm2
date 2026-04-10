@@ -113,11 +113,6 @@ spec:
             properties:
               endpoint: nats://127.0.0.1:4223
 
-    # === Native Providers (standalone NATS services) ===
-    # These run outside wasmCloud, communicate via NATS:
-    #   - inference-provider (swarm.inference.*)
-    #   - workspace-provider (swarm.workspace.*)
-    #   - quality-gate-provider (swarm.quality.*)
+    # === Native Services (standalone, communicate via NATS) ===
     #   - git-provider (swarm.git.*)
-    #   - test-provider (swarm.test.*)
     #   - agent-daemon (orchestrator, SurrealDB polling)
