@@ -352,18 +352,21 @@ async fn handle_execute(
             .with_max_concurrent(config.resources.max_concurrent_agents)
             .with_planner_tier(config.tiers.orchestrator.clone());
 
-        // Enable zero-disk mode when GITHUB_TOKEN is set
-        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-            let gh_repo = std::env::var("GITHUB_REPO").unwrap_or_else(|_| "alpha-swarm/alpha-swarm2".into());
-            let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                runner = runner.with_github(swarm_orchestrator::GitHubRepo {
-                    owner: parts[0].into(),
-                    repo: parts[1].into(),
-                    token,
-                    branch: "main".into(),
-                });
-                info!("Zero-disk mode enabled (GitHub API)");
+        // Zero-disk mode: opt-in via ZERO_DISK=1 (not just GITHUB_TOKEN)
+        // GITHUB_TOKEN is used for PR creation regardless
+        if std::env::var("ZERO_DISK").is_ok() {
+            if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+                let gh_repo = std::env::var("GITHUB_REPO").unwrap_or_else(|_| "alpha-swarm/alpha-swarm2".into());
+                let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
+                if parts.len() == 2 {
+                    runner = runner.with_github(swarm_orchestrator::GitHubRepo {
+                        owner: parts[0].into(),
+                        repo: parts[1].into(),
+                        token,
+                        branch: "main".into(),
+                    });
+                    info!("Zero-disk mode enabled (ZERO_DISK=1)");
+                }
             }
         }
 
