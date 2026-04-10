@@ -15,4 +15,4 @@ pub use planner::plan_goal;
 #[cfg(feature = "native")]
 pub use memtree::MemTreeManager;
 #[cfg(feature = "native")]
-pub use runner::{SwarmRunner, SwarmResult, GitHubRepo};
+pub use runner::{SwarmRunner, SwarmResult, GitHubRepo, PhaseTimings};

@@ -13,6 +13,31 @@ use crate::planner::plan_goal;
 use crate::planner_types::SubTask;
 use crate::memtree::MemTreeManager;
 
+/// Timing breakdown for each phase of a swarm run.
+#[derive(Debug, Clone, Default)]
+pub struct PhaseTimings {
+    pub rag_ms: u64,
+    pub planning_ms: u64,
+    pub agent_execution_ms: u64,
+    pub quality_gate_ms: u64,
+    pub total_ms: u64,
+}
+
+impl PhaseTimings {
+    /// Format a summary line with percentages.
+    pub fn summary(&self) -> String {
+        let total = self.total_ms.max(1);
+        format!(
+            "RAG: {}ms ({:.0}%), Planning: {}ms ({:.0}%), Agents: {}ms ({:.0}%), QG: {}ms ({:.0}%), Total: {}ms",
+            self.rag_ms, self.rag_ms as f64 / total as f64 * 100.0,
+            self.planning_ms, self.planning_ms as f64 / total as f64 * 100.0,
+            self.agent_execution_ms, self.agent_execution_ms as f64 / total as f64 * 100.0,
+            self.quality_gate_ms, self.quality_gate_ms as f64 / total as f64 * 100.0,
+            self.total_ms,
+        )
+    }
+}
+
 /// Result of a full swarm run.
 pub struct SwarmResult {
     pub goal: String,
@@ -23,6 +48,8 @@ pub struct SwarmResult {
     pub total_duration_ms: u64,
     /// Files modified by agents (path → new content).
     pub modified_files: Vec<(String, Vec<u8>)>,
+    /// Phase timing breakdown.
+    pub phase_timings: PhaseTimings,
 }
 
 pub struct TaskRunResult {
@@ -119,7 +146,8 @@ impl SwarmRunner {
         let repo_files = discover_source_files(&self.repo_path)?;
         info!(file_count = repo_files.len(), "Discovered repo files");
 
-        // 2. RAG: find relevant files for this goal (if embeddings available)
+        // 2. RAG: find relevant files for this goal
+        let rag_start = Instant::now();
         let relevant_files = if let Some(ref store) = self.store {
             let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
                 .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
@@ -140,15 +168,21 @@ impl SwarmRunner {
             }
         } else { None };
 
+        let rag_ms = rag_start.elapsed().as_millis() as u64;
+        info!(rag_ms, "Phase 2a: RAG file selection");
+
         // 3. Plan: decompose goal into sub-tasks (with RAG context)
+        let plan_start = Instant::now();
         let tasks = plan_goal(
             &self.router, goal, &repo_files, &self.planner_tier,
             relevant_files.as_deref(),
         ).await.context("Goal planning failed")?;
 
-        info!(task_count = tasks.len(), "Goal decomposed");
+        let planning_ms = plan_start.elapsed().as_millis() as u64;
+        info!(task_count = tasks.len(), planning_ms, "Phase 2b: Planning complete");
 
         // 3-6. Run agents and collect results
+        let agent_start = Instant::now();
         let mut results = Vec::new();
         let mut any_applied = false;
         let mut captured_files: Vec<(String, Vec<u8>)> = Vec::new();
@@ -488,7 +522,11 @@ impl SwarmRunner {
             mem_manager.cleanup();
         }
 
+        let agent_execution_ms = agent_start.elapsed().as_millis() as u64;
+        info!(agent_execution_ms, tasks = tasks.len(), any_applied, "Phase 3: Agent execution complete");
+
         // 7. Quality gate
+        let qg_start = Instant::now();
         let code_extensions = ["rs", "ts", "js", "go", "py"];
         let modified_files: Vec<String> = captured_files.iter().map(|(p, _)| p.clone()).collect();
         let has_code_changes = modified_files.iter().any(|f| {
@@ -512,7 +550,17 @@ impl SwarmRunner {
             true
         };
 
+        let quality_gate_ms = qg_start.elapsed().as_millis() as u64;
         let total_duration_ms = start.elapsed().as_millis() as u64;
+
+        let phase_timings = PhaseTimings {
+            rag_ms,
+            planning_ms,
+            agent_execution_ms,
+            quality_gate_ms,
+            total_ms: total_duration_ms,
+        };
+        info!(summary = %phase_timings.summary(), "Phase timing breakdown");
 
         Ok(SwarmResult {
             goal: goal.to_string(),
@@ -522,6 +570,7 @@ impl SwarmRunner {
             quality_passed,
             total_duration_ms,
             modified_files: captured_files,
+            phase_timings,
         })
     }
 }

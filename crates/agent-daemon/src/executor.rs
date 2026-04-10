@@ -268,19 +268,24 @@ async fn handle_execute(
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
 
-    // Lifecycle: index embeddings BEFORE planning (avoids Ollama contention)
+    // === PHASE TIMING ===
+    let phase_start = std::time::Instant::now();
+    let mut embed_ms: u64 = 0;
+
+    // Phase 1: Embeddings
     let embed_model = config.defaults.embed_model.clone();
     let emb_manager = std::sync::Arc::new(knowledge_base::embedding_manager::EmbeddingManager::new(
         Arc::clone(&store), Arc::clone(&ollama), embed_model,
     ));
-    // Index embeddings ONCE (blocking first time, instant when cached)
     {
         let indexed = emb_manager.on_agent_start(project, &repo_path).await;
+        embed_ms = phase_start.elapsed().as_millis() as u64;
         if indexed > 0 {
-            info!(indexed, "Indexed files for RAG (first run)");
+            info!(indexed, duration_ms = embed_ms, "Phase 1: Embeddings (indexed)");
         } else {
-            info!("Embeddings cached, skipping indexing");
+            info!(duration_ms = embed_ms, "Phase 1: Embeddings (cached)");
         }
+        update_progress(&store, task_id, &format!("Phase 1: Embeddings done ({}ms)", embed_ms)).await;
     }
 
     // Helper: update progress on the running task
@@ -378,8 +383,20 @@ async fn handle_execute(
             runner = runner.with_nats_client(nats_client);
         }
 
+        let run_start = std::time::Instant::now();
+        update_progress(&store, task_id, "Phase 2: Planning + Agent execution...").await;
+
         match runner.run(&augmented_goal).await {
             Ok(result) => {
+                let run_ms = run_start.elapsed().as_millis() as u64;
+                let total_ms = phase_start.elapsed().as_millis() as u64;
+                let pt = &result.phase_timings;
+                info!(task_id, run_ms, total_ms, quality = result.quality_passed,
+                    tasks = result.tasks.len(),
+                    rag_ms = pt.rag_ms, planning_ms = pt.planning_ms,
+                    agent_ms = pt.agent_execution_ms, qg_ms = pt.quality_gate_ms,
+                    "Phase 2+3: Plan + Execute + QG complete");
+                info!(task_id, summary = %pt.summary(), "Phase timing breakdown");
                 // Track token usage
                 let iter_tokens: u32 = result.results.iter()
                     .filter_map(|r| r.agent_result.as_ref())
@@ -389,7 +406,10 @@ async fn handle_execute(
 
                 if result.quality_passed {
                     let tasks_done = result.results.iter().filter(|r| r.agent_result.as_ref().is_some_and(|a| a.applied)).count();
-                    update_progress(&store, task_id, &format!("Quality passed — {} tasks done, creating PR...", tasks_done)).await;
+                    update_progress(&store, task_id, &format!(
+                        "Quality passed — {} tasks done, creating PR... [{}]",
+                        tasks_done, pt.summary()
+                    )).await;
                     info!(task_id, iteration, total_tokens_used, "Quality gate passed!");
                     final_result = Some(result);
                     break;
@@ -475,6 +495,21 @@ async fn handle_execute(
             final_run.tokens_output = total_out;
             final_run.started_at = Some(start_time_rfc3339);
             final_run.last_activity_at = Some(chrono::Utc::now().to_rfc3339());
+
+            // Store phase timing breakdown
+            let pt = &result.phase_timings;
+            final_run.phase_timings = Some(knowledge_base::PhaseTimingRecord {
+                embedding_ms: embed_ms,
+                rag_ms: pt.rag_ms,
+                planning_ms: pt.planning_ms,
+                agent_execution_ms: pt.agent_execution_ms,
+                quality_gate_ms: pt.quality_gate_ms,
+            });
+            let total_profiled = embed_ms + pt.rag_ms + pt.planning_ms + pt.agent_execution_ms + pt.quality_gate_ms;
+            info!(task_id, embed_ms, rag_ms = pt.rag_ms, planning_ms = pt.planning_ms,
+                agent_ms = pt.agent_execution_ms, qg_ms = pt.quality_gate_ms,
+                total_profiled, total_wall = duration,
+                "Full phase timing (embed + runner)");
 
             // Build attempts from sub-agent results (one per sub-task)
             final_run.attempts = result.results.iter().enumerate().map(|(i, r)| {

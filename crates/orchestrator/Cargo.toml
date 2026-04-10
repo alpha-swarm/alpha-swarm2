@@ -21,7 +21,6 @@ quality-gate-lib = { path = "../quality-gate", optional = true }
 knowledge-base = { path = "../knowledge-base", optional = true }
 swarm-tools = { path = "../tools", optional = true }
 async-nats = { version = "0.38", optional = true }
-git2 = { version = "0.19", optional = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 chrono = { version = "0.4", optional = true }
 
@@ -31,5 +30,5 @@ native = [
     "inference-client/native", "agent-core/native",
     "tokio", "tracing", "uuid",
     "quality-gate-lib", "knowledge-base", "swarm-tools",
-    "async-nats", "git2", "virt-git", "reqwest", "chrono",
+    "async-nats", "virt-git", "reqwest", "chrono",
 ]

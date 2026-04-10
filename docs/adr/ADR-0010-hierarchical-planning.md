@@ -131,7 +131,7 @@ Goal → Agent reads relevant files → Makes edit → Runs tests
 **Option B (improved flat planning) for now, with Option D (agent iteration) as the execution model.**
 
 Rationale:
-1. **Our models aren't reliable enough for hierarchical planning.** gemma4:26b can't even produce valid JSON. qwen2.5-coder:32b produces good plans but takes 45s per call. Multi-level planning would take minutes of just planning.
+1. **Our models aren't reliable enough for hierarchical planning.** Smaller models can't produce valid JSON reliably. qwen2.5-coder:32b produces good plans but takes 45s per call. Multi-level planning would take minutes of just planning.
 
 2. **The biggest wins come from better execution, not better planning.** The agent's edit application (fuzzy matching, format compliance) is the bottleneck, not the plan quality.
 

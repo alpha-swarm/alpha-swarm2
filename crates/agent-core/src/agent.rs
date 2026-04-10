@@ -32,13 +32,9 @@ fn tier_options(tier: &swarm_config::TierConfig) -> InferenceOptions {
     }
 }
 
-/// Default inference options — agent tier.
-/// Uses ALPHA_SWARM_AGENT_MODEL env var if set, otherwise config default.
+/// Default inference options — agent tier from config.
 fn default_options() -> InferenceOptions {
-    let mut tier = swarm_config::SwarmConfig::load().tiers.agent;
-    if let Ok(model) = std::env::var("ALPHA_SWARM_AGENT_MODEL") {
-        tier.model = model;
-    }
+    let tier = swarm_config::SwarmConfig::load().tiers.agent;
     tier_options(&tier)
 }
 

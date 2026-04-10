@@ -42,6 +42,7 @@ impl SimilarRun {
             parent_run_id: None,
             progress_message: None,
             tool_calls: Vec::new(),
+            phase_timings: None,
         }
     }
 }

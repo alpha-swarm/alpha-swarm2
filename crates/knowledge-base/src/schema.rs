@@ -34,6 +34,19 @@ pub struct AgentRun {
     pub progress_message: Option<String>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRecord>,
+    /// Phase timing breakdown (embedding_ms, rag_ms, planning_ms, agent_ms, qg_ms).
+    #[serde(default)]
+    pub phase_timings: Option<PhaseTimingRecord>,
+}
+
+/// Timing breakdown for each phase of a swarm run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseTimingRecord {
+    pub embedding_ms: u64,
+    pub rag_ms: u64,
+    pub planning_ms: u64,
+    pub agent_execution_ms: u64,
+    pub quality_gate_ms: u64,
 }
 
 /// Record of a tool call made during agent execution.
@@ -140,6 +153,7 @@ impl AgentRun {
             parent_run_id: None,
             progress_message: None,
             tool_calls: Vec::new(),
+            phase_timings: None,
         }
     }
 }

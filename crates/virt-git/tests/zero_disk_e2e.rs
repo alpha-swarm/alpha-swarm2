@@ -59,12 +59,12 @@ mod tests {
         println!("   Loaded {} bytes into blobstore", original.len());
         assert!(original.contains("v0.1.0"), "Expected v0.1.0 in CHANGELOG");
 
-        // === 2. Call WASI agent-worker (gemma4:26b) ===
-        println!("2. Calling WASI agent-worker with gemma4:26b...");
+        // === 2. Call WASI agent-worker ===
+        println!("2. Calling WASI agent-worker...");
 
         let task = serde_json::json!({
-            "task": "Add a v0.2.0 section to the CHANGELOG dated 2026-04-10 with these entries: Added gemma4:26b model support, Added 4 new WASI components (orchestrator-worker, tools-worker, knowledge-store, quality-gate-worker), Moved FileProvider trait to virt-git crate, All 10 crates compile to wasm32-wasip2",
-            "model": "gemma4:26b",
+            "task": "Add a v0.2.0 section to the CHANGELOG dated 2026-04-10 with these entries: Added WASI agent-worker, Added 4 new WASI components (orchestrator-worker, tools-worker, knowledge-store, quality-gate-worker), Moved FileProvider trait to virt-git crate, All 10 crates compile to wasm32-wasip2",
+            "model": "qwen2.5-coder:32b",
             "ollama_url": "http://100.81.10.8:11434",
             "workspace_id": "zero-disk-e2e",
             "files": [{"path": "CHANGELOG.md", "content": original}]
@@ -109,7 +109,7 @@ mod tests {
         let diff_text = ws.diff_text(&store);
         println!("4. Diff (in-memory):");
         println!("{}", diff_text.chars().take(500).collect::<String>());
-        assert!(diff_text.contains("v0.2.0") || diff_text.contains("gemma4"), "Diff should contain v0.2.0 or gemma4");
+        assert!(diff_text.contains("v0.2.0"), "Diff should contain v0.2.0");
 
         // === 5. Create PR via GitHub API ===
         println!("5. Creating PR via GitHub API...");
@@ -123,8 +123,8 @@ mod tests {
 
         let pr = create_pr(
             &gh_config, &ws, &store,
-            "docs: add v0.2.0 to CHANGELOG (gemma4:26b zero-disk E2E)",
-            "docs: add v0.2.0 to CHANGELOG (gemma4:26b zero-disk)",
+            "docs: add v0.2.0 to CHANGELOG (zero-disk E2E)",
+            "docs: add v0.2.0 to CHANGELOG (zero-disk)",
             &format!("## Zero-Disk E2E\n\nEntire pipeline with no filesystem:\n1. README.md fetched via GitHub API\n2. Stored in NATS blobstore\n3. Agent edit via wasi:http → Ollama\n4. Diff via virt-git (in-memory SHA256)\n5. PR via GitHub API\n\n```diff\n{}\n```\n\n🤖 alpha-swarm", diff_text.chars().take(2000).collect::<String>()),
             &branch_name,
             &|method, url, body, token| {
