@@ -23,6 +23,7 @@ members = [
     "components/knowledge-store",
     "components/quality-gate-worker",
     "components/mcp-server",
+    "crates/tui",
     "providers/git-provider",
     "providers/test-provider",
     "eval",
