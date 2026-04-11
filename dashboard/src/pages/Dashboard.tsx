@@ -6,7 +6,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useLiveAgents } from "@/hooks/useLiveAgents";
 import { useRuns } from "@/hooks/useRuns";
 import { useProjects } from "@/hooks/useProjects";
-import { createProject, deleteProject } from "@/lib/mcp";
+import { createProject, deleteProject, submitTask } from "@/lib/mcp";
 import type { AgentRun, Project } from "@/types/swarm";
 
 function sortGoals(live: AgentRun[], all: AgentRun[]) {
@@ -43,13 +43,40 @@ function ProjectHeader({ p, open }: { p: Project; open: boolean }) {
   );
 }
 
+function NewGoalInput({ project }: { project: string }) {
+  const [goal, setGoal] = useState("");
+  const [busy, setBusy] = useState(false);
+  const handle = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!goal.trim()) return;
+    setBusy(true);
+    try { await submitTask(project, goal); setGoal(""); } catch { /* */ }
+    finally { setBusy(false); }
+  };
+  return (
+    <form onSubmit={handle} className="flex gap-2 mb-2">
+      <input value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="Describe a goal for the agents..."
+        className="flex-1 border rounded px-2 py-1 text-xs bg-transparent font-mono" disabled={busy} />
+      <Button size="sm" variant="outline" className="h-7 text-xs" type="submit" disabled={busy || !goal.trim()}>
+        {busy ? "..." : "Run"}
+      </Button>
+    </form>
+  );
+}
+
 function ProjectGoals({ project }: { project: string }) {
   const { agents: live } = useLiveAgents();
   const { runs: all, loading } = useRuns(project);
   if (loading) return <p className="text-[11px] text-muted-foreground/40 py-2">Loading...</p>;
   const goals = sortGoals(live, all);
-  if (goals.length === 0) return <p className="text-[11px] text-muted-foreground/40 py-2">No goals.</p>;
-  return <div className="space-y-1">{goals.map((g) => <GoalCard key={g.id} run={g} />)}</div>;
+  return (
+    <div>
+      <NewGoalInput project={project} />
+      {goals.length === 0 ? <p className="text-[11px] text-muted-foreground/40 py-2">No goals yet.</p> : (
+        <div className="space-y-1">{goals.map((g) => <GoalCard key={g.id} run={g} />)}</div>
+      )}
+    </div>
+  );
 }
 
 function ProjectAccordion({ p, onDelete }: { p: Project; onDelete: () => void }) {
