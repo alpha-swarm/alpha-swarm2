@@ -112,10 +112,14 @@ pub struct Agent {
     knowledge: Option<KnowledgeConfig>,
     events: Option<Arc<EventPublisher>>,
     project: String,
-    /// Optional file provider for zero-disk mode.
     file_provider: Option<Box<dyn virt_git::FileProvider>>,
-    /// Optional progress callback for real-time updates.
     progress_fn: Option<ProgressFn>,
+    /// Inter-agent messaging (receive from peers).
+    message_rx: Option<tokio::sync::mpsc::Receiver<swarm_events::AgentMessage>>,
+    /// Inter-agent messaging (send to peers).
+    message_tx: Option<tokio::sync::mpsc::Sender<swarm_events::AgentMessage>>,
+    /// This agent's ID for messaging.
+    agent_id: String,
 }
 
 impl Agent {
@@ -128,7 +132,23 @@ impl Agent {
             project: "default".into(),
             file_provider: None,
             progress_fn: None,
+            message_rx: None,
+            message_tx: None,
+            agent_id: String::new(),
         }
+    }
+
+    /// Enable inter-agent messaging via mpsc channels.
+    pub fn with_messaging(
+        mut self,
+        agent_id: String,
+        tx: tokio::sync::mpsc::Sender<swarm_events::AgentMessage>,
+        rx: tokio::sync::mpsc::Receiver<swarm_events::AgentMessage>,
+    ) -> Self {
+        self.agent_id = agent_id;
+        self.message_tx = Some(tx);
+        self.message_rx = Some(rx);
+        self
     }
 
     /// Set a progress callback for real-time updates during tool loop.
@@ -603,6 +623,21 @@ impl Agent {
         let mut tool_call_records = Vec::new();
 
         for step in 1..=max_steps {
+            // Drain peer messages before each inference call
+            if let Some(ref mut rx) = self.message_rx {
+                while let Ok(msg) = rx.try_recv() {
+                    let context = match &msg.kind {
+                        swarm_events::AgentMessageKind::FileModified { path, .. } =>
+                            format!("Peer agent {} modified file: {}", msg.from_agent, path),
+                        swarm_events::AgentMessageKind::TaskCompleted { task_id, summary, .. } =>
+                            format!("Task {} completed: {}", task_id, summary),
+                        swarm_events::AgentMessageKind::Context { key, value } =>
+                            format!("{}: {}", key, value),
+                    };
+                    messages.push(inference_client::ChatMessage::user(format!("PEER UPDATE: {context}")));
+                }
+            }
+
             let response = match self.router.chat(&messages, complexity, &options).await {
                 Ok(r) => r,
                 Err(e) => {
