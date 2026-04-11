@@ -99,6 +99,12 @@ async fn main() -> Result<()> {
         "UPDATE agent_run SET status = 'pending', agent_id = 'recovered' WHERE status = 'running'"
     ).await;
 
+    // Clear stale execution locks from previous daemon crashes
+    if let Some(ref sched) = scheduler {
+        let _ = sched.release_execution_lock().await;
+        info!("Cleared stale execution locks");
+    }
+
     // Start resource heartbeat
     {
         let store = Arc::clone(&store);

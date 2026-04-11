@@ -241,11 +241,6 @@ impl NatsScheduler {
         matches!(self.leases.get(&key).await, Ok(None) | Err(_))
     }
 
-    /// Check if the execution lock is free.
-    pub async fn is_execution_lock_free(&self) -> bool {
-        matches!(self.leases.get(EXECUTION_LOCK_KEY).await, Ok(None) | Err(_))
-    }
-
     pub fn daemon_id(&self) -> &str {
         &self.daemon_id
     }
