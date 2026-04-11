@@ -4,81 +4,110 @@
 use serde_json::{json, Value};
 use crate::{Tool, ToolContext, ToolResult};
 
-/// Run cargo fmt --check on the workspace.
+/// Detect which crate a file belongs to by walking up to find Cargo.toml.
+fn detect_crate(repo: &std::path::Path, file_path: &str) -> Option<String> {
+    let full = repo.join(file_path);
+    let mut dir = full.parent()?;
+    loop {
+        let cargo = dir.join("Cargo.toml");
+        if cargo.exists() {
+            let content = std::fs::read_to_string(&cargo).ok()?;
+            for line in content.lines() {
+                if let Some(name) = line.strip_prefix("name = ") {
+                    return Some(name.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+        dir = dir.parent()?;
+        if dir == repo { break; }
+    }
+    None
+}
+
+/// Build a scoped cargo check command from the ToolContext.
+fn scoped_check_cmd(ctx: &ToolContext) -> String {
+    // Try to detect crate from project name (which is often the edited file's crate)
+    let crate_dir = ctx.repo_path.join("crates");
+    if crate_dir.exists() {
+        // Check if there's a recent file modification hint in the project field
+        if let Some(crate_name) = detect_crate(&ctx.repo_path, &ctx.project) {
+            return format!("cargo check -p {crate_name}");
+        }
+    }
+    "cargo check".to_string()
+}
+
 pub struct RunFmtTool;
 
 #[async_trait::async_trait]
 impl Tool for RunFmtTool {
     fn name(&self) -> &str { "run_fmt" }
-    fn description(&self) -> &str { "Check code formatting (cargo fmt --check). Returns OK or list of files that need formatting." }
-    fn parameters_schema(&self) -> Value {
-        json!({"type": "object", "properties": {}})
-    }
-
+    fn description(&self) -> &str { "Check formatting (cargo fmt --check)." }
+    fn parameters_schema(&self) -> Value { json!({"type": "object", "properties": {}}) }
     async fn execute(&self, _params: Value, ctx: &ToolContext) -> ToolResult {
         run_cmd("cargo fmt -- --check", &ctx.repo_path)
     }
 }
 
-/// Run cargo clippy on the workspace.
 pub struct RunLintTool;
 
 #[async_trait::async_trait]
 impl Tool for RunLintTool {
     fn name(&self) -> &str { "run_lint" }
-    fn description(&self) -> &str { "Run linter (cargo clippy). Returns warnings and errors." }
-    fn parameters_schema(&self) -> Value {
-        json!({"type": "object", "properties": {}})
-    }
-
+    fn description(&self) -> &str { "Run linter (cargo clippy)." }
+    fn parameters_schema(&self) -> Value { json!({"type": "object", "properties": {}}) }
     async fn execute(&self, _params: Value, ctx: &ToolContext) -> ToolResult {
         run_cmd("cargo clippy", &ctx.repo_path)
     }
 }
 
-/// Run cargo check on the workspace.
 pub struct RunBuildTool;
 
 #[async_trait::async_trait]
 impl Tool for RunBuildTool {
     fn name(&self) -> &str { "run_build" }
-    fn description(&self) -> &str { "Check if code compiles (cargo check). Returns OK or compilation errors." }
+    fn description(&self) -> &str { "Check compilation (cargo check). Auto-scopes to the edited crate when possible." }
     fn parameters_schema(&self) -> Value {
-        json!({"type": "object", "properties": {}})
+        json!({"type": "object", "properties": {"crate_name": {"type": "string", "description": "Optional: specific crate to check (e.g. swarm-orchestrator). Omit for auto-detect."}}})
     }
-
-    async fn execute(&self, _params: Value, ctx: &ToolContext) -> ToolResult {
-        run_cmd("cargo check", &ctx.repo_path)
+    async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
+        let cmd = if let Some(name) = params.get("crate_name").and_then(|v| v.as_str()) {
+            format!("cargo check -p {name}")
+        } else {
+            scoped_check_cmd(ctx)
+        };
+        run_cmd(&cmd, &ctx.repo_path)
     }
 }
 
-/// Run cargo test --lib on the workspace.
 pub struct RunTestTool;
 
 #[async_trait::async_trait]
 impl Tool for RunTestTool {
     fn name(&self) -> &str { "run_test" }
-    fn description(&self) -> &str { "Run unit tests (cargo test --lib). Returns test results." }
+    fn description(&self) -> &str { "Run unit tests (cargo test --lib). Auto-scopes to edited crate." }
     fn parameters_schema(&self) -> Value {
-        json!({"type": "object", "properties": {}})
+        json!({"type": "object", "properties": {"crate_name": {"type": "string", "description": "Optional: specific crate to test."}}})
     }
-
-    async fn execute(&self, _params: Value, ctx: &ToolContext) -> ToolResult {
-        run_cmd("cargo test --lib", &ctx.repo_path)
+    async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
+        let cmd = if let Some(name) = params.get("crate_name").and_then(|v| v.as_str()) {
+            format!("cargo test --lib -p {name}")
+        } else {
+            "cargo test --lib".to_string()
+        };
+        run_cmd(&cmd, &ctx.repo_path)
     }
 }
 
-/// Run a shell command in the repo dir, capture output.
+/// Max output chars to avoid flooding context.
+const MAX_OUTPUT_CHARS: usize = 3000;
+
 fn run_cmd(cmd: &str, cwd: &std::path::Path) -> ToolResult {
     let start = std::time::Instant::now();
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     let (program, args) = parts.split_first().unwrap_or((&"echo", &[]));
 
-    match std::process::Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .output()
-    {
+    match std::process::Command::new(program).args(args).current_dir(cwd).output() {
         Ok(output) => {
             let duration = start.elapsed().as_millis() as u64;
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -86,20 +115,16 @@ fn run_cmd(cmd: &str, cwd: &std::path::Path) -> ToolResult {
 
             let content = if output.status.success() {
                 if stdout.is_empty() && stderr.is_empty() {
-                    "OK — no issues found".to_string()
+                    "OK".to_string()
                 } else {
-                    format!("OK\n{}{}", stdout, stderr).chars().take(5000).collect()
+                    format!("OK\n{}{}", stdout, stderr).chars().take(MAX_OUTPUT_CHARS).collect()
                 }
             } else {
                 format!("FAILED (exit {})\n{}{}", output.status.code().unwrap_or(-1), stderr, stdout)
-                    .chars().take(5000).collect()
+                    .chars().take(MAX_OUTPUT_CHARS).collect()
             };
 
-            if output.status.success() {
-                ToolResult::ok(content, duration)
-            } else {
-                ToolResult::err(content, duration)
-            }
+            if output.status.success() { ToolResult::ok(content, duration) } else { ToolResult::err(content, duration) }
         }
         Err(e) => ToolResult::err(format!("Command failed: {e}"), 0),
     }

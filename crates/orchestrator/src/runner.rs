@@ -535,7 +535,7 @@ impl SwarmRunner {
                         }
 
                         let tools = swarm_tools::ToolRegistry::with_defaults();
-                        const MAX_TOOL_STEPS: u32 = 20;
+                        const MAX_TOOL_STEPS: u32 = 10;
                         let result = agent.run_with_tools(&augmented_desc, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
                         (task, result)
                     });

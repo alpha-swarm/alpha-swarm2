@@ -63,6 +63,19 @@ async fn main() -> Result<()> {
     let router = Arc::new(router);
     let ollama = Arc::new(OllamaBackend::new(&config.ollama.url));
 
+    // Warm model into Ollama memory (background, non-blocking)
+    {
+        let model = config.tiers.agent.model.clone();
+        let ollama_warm = Arc::clone(&ollama);
+        tokio::spawn(async move {
+            info!(model = %model, "Warming model into Ollama memory...");
+            match ollama_warm.embed(&model, "warmup").await {
+                Ok(_) => info!(model = %model, "Model warmed"),
+                Err(e) => warn!(model = %model, error = %e, "Model warmup failed (will load on first use)"),
+            }
+        });
+    }
+
     // Connect to SurrealDB (always needed for run storage)
     let store = Arc::new(
         KnowledgeStore::connect(&config.surrealdb.url, &config.surrealdb.namespace, &config.surrealdb.database).await?
