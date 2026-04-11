@@ -6,6 +6,8 @@ import { MetricsGrid } from "@/components/MetricsGrid";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useLiveAgents } from "@/hooks/useLiveAgents";
 import { useRuns } from "@/hooks/useRuns";
+import { useEventStream } from "@/hooks/useEventStream";
+import { ActivityFeed } from "@/components/ActivityFeed";
 import type { DashboardStats, AgentRun } from "@/types/swarm";
 
 function buildItems(s: DashboardStats) {
@@ -100,6 +102,7 @@ export function DashboardPage() {
   const { stats, loading, error } = useDashboard();
   const { agents: live } = useLiveAgents();
   const { runs: all } = useRuns("alpha-swarm2");
+  const { events, connected } = useEventStream();
 
   if (loading) return <p className="text-muted-foreground">Loading...</p>;
   if (error) return <p className="text-destructive">Error: {error}</p>;
@@ -112,6 +115,7 @@ export function DashboardPage() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Dashboard</h1>
       {stats && <MetricsGrid items={buildItems(stats)} columns="grid-cols-2 md:grid-cols-3 lg:grid-cols-5" />}
+      <ActivityFeed events={events} connected={connected} />
       <Section title="Running" runs={running} color="text-yellow-500" />
       <Section title="Scheduled" runs={scheduled} color="text-muted-foreground" />
       <Section title="Completed" runs={completed} />
