@@ -85,9 +85,9 @@ export function AgentCard({ run, depth = 0, maxDepth = 3 }: AgentCardProps) {
             {(fullRun.tool_calls?.length ?? 0) > 0 && (
               <div>
                 <div className="text-[10px] text-muted-foreground mb-1 font-semibold uppercase">
-                  Tool Calls ({fullRun.tool_calls.length})
+                  Tool Calls ({fullRun.tool_calls!.length})
                 </div>
-                <ToolCallList calls={fullRun.tool_calls} />
+                <ToolCallList calls={fullRun.tool_calls!} />
               </div>
             )}
 

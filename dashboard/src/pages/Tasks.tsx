@@ -55,13 +55,13 @@ function TaskAccordion({ run }: { run: AgentRun }) {
             </div>
           )}
 
-          {run.tool_calls.length > 0 && (
+          {(run.tool_calls?.length ?? 0) > 0 && (
             <div>
               <div className="text-[10px] text-muted-foreground mb-1 font-semibold uppercase">
-                Tool Calls ({run.tool_calls.length})
+                Tool Calls ({run.tool_calls!.length})
               </div>
               <div className="space-y-1 max-h-64 overflow-auto">
-                {run.tool_calls.map((tc, i) => (
+                {run.tool_calls!.map((tc, i) => (
                   <div key={i} className={`rounded border p-2 ${tc.is_error ? "border-destructive/30" : ""}`}>
                     <div className="flex items-center gap-2">
                       <Badge variant={tc.is_error ? "destructive" : "secondary"} className="text-[10px]">{tc.tool}</Badge>

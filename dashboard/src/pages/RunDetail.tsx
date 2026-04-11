@@ -61,19 +61,19 @@ function RunSections({ run, subRuns }: { run: AgentRun; subRuns: AgentRun[] }) {
         </div>
       )}
 
-      {run.tool_calls.length > 0 && (
+      {(run.tool_calls?.length ?? 0) > 0 && (
         <div>
           <Separator className="mb-4" />
-          <h3 className="text-sm font-semibold mb-3">Tool Calls ({run.tool_calls.length})</h3>
-          <ToolCallList calls={run.tool_calls} />
+          <h3 className="text-sm font-semibold mb-3">Tool Calls ({run.tool_calls?.length ?? 0})</h3>
+          <ToolCallList calls={run.tool_calls ?? []} />
         </div>
       )}
 
-      {run.attempts.length > 0 && (
+      {(run.attempts?.length ?? 0) > 0 && (
         <div>
           <Separator className="mb-4" />
-          <h3 className="text-sm font-semibold mb-3">Attempts ({run.attempts.length})</h3>
-          {run.attempts.map((a, i) => <AttemptRow key={i} attempt={a} />)}
+          <h3 className="text-sm font-semibold mb-3">Attempts ({run.attempts?.length ?? 0})</h3>
+          {(run.attempts ?? []).map((a, i) => <AttemptRow key={i} attempt={a} />)}
         </div>
       )}
 

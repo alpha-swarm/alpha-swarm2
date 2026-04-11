@@ -61,7 +61,7 @@ function TaskRow({ run }: { run: AgentRun }) {
               ))}
             </div>
           )}
-          {run.tool_calls?.length > 0 && (
+          {(run.tool_calls?.length ?? 0) > 0 && (
             <div className="space-y-1 max-h-48 overflow-auto">
               {(run.tool_calls ?? []).map((tc, i) => (
                 <div key={i} className={`rounded border p-1.5 ${tc.is_error ? "border-destructive/30" : ""}`}>

@@ -56,9 +56,9 @@ export interface AgentRun {
   last_activity_at: string | null;
   parent_run_id: string | null;
   progress_message: string | null;
-  attempts: AttemptRecord[];
-  tool_calls: ToolCallRecord[];
-  phase_timings: PhaseTimingRecord | null;
+  attempts?: AttemptRecord[];
+  tool_calls?: ToolCallRecord[];
+  phase_timings?: PhaseTimingRecord | null;
 }
 
 export interface PlannedTask {

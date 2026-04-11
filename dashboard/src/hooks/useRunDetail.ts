@@ -12,11 +12,12 @@ export function useRunDetail(runId: string) {
 
   useEffect(() => {
     if (!runId) return;
+    const decodedId = decodeURIComponent(runId);
     const fetchDetail = async () => {
       try {
         const [runData, subData] = await Promise.all([
-          resources.runDetail(runId),
-          resources.subRuns(runId),
+          resources.runDetail(decodedId),
+          resources.subRuns(decodedId),
         ]);
         setRun(runData[0] ?? null);
         setSubRuns(subData);
