@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard" },
   { to: "/projects", label: "Projects" },
+  { to: "/tasks", label: "Tasks" },
   { to: "/submit", label: "Submit Task" },
 ];
 

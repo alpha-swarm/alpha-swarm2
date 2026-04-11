@@ -17,6 +17,7 @@ const RESOURCES_BUCKET: &str = "swarm-resources";
 /// Key for the global execution lock (only 1 goal runs across all daemons).
 const EXECUTION_LOCK_KEY: &str = "goal-execution-lock";
 /// Execution lock TTL — auto-releases if daemon dies.
+#[allow(dead_code)]
 const EXECUTION_LOCK_TTL: Duration = Duration::from_secs(900); // 15 minutes
 
 /// A task entry in the KV store.

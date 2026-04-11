@@ -4,8 +4,10 @@ mod virt_grep;
 
 // Native-only tools (need tokio, Command, reqwest, tree-sitter, etc.)
 #[cfg(feature = "native")]
+#[allow(dead_code)]
 mod fs;
 #[cfg(feature = "native")]
+#[allow(dead_code)]
 mod grep;
 #[cfg(feature = "native")]
 mod quality_tools;

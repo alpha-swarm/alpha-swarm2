@@ -6,22 +6,77 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useProjects } from "@/hooks/useProjects";
 import { createProject, deleteProject } from "@/lib/mcp";
+import type { Project } from "@/types/swarm";
+
+interface CreateProjectFormProps {
+  submitting: boolean;
+  onCreate: (name: string, repoUrl: string, desc: string) => void;
+}
+
+function CreateProjectForm({ submitting, onCreate }: CreateProjectFormProps) {
+  const [name, setName] = useState("");
+  const [repoUrl, setRepoUrl] = useState("");
+  const [desc, setDesc] = useState("");
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name || !repoUrl) return;
+    onCreate(name, repoUrl, desc);
+    setName("");
+    setRepoUrl("");
+    setDesc("");
+  };
+
+  return (
+    <Card className="mb-6">
+      <CardHeader><CardTitle className="text-base">Create Project</CardTitle></CardHeader>
+      <CardContent>
+        <form onSubmit={handleSubmit} className="grid grid-cols-3 gap-3">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name"
+            className="rounded-md border bg-background px-3 py-2 text-sm" />
+          <input value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="Repo URL or path"
+            className="rounded-md border bg-background px-3 py-2 text-sm" />
+          <input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Description (optional)"
+            className="rounded-md border bg-background px-3 py-2 text-sm" />
+          <Button type="submit" disabled={submitting || !name || !repoUrl} className="col-span-3 w-fit">
+            {submitting ? "Creating..." : "Create"}
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ProjectRow({ project, onDelete }: { project: Project; onDelete: (name: string) => void }) {
+  return (
+    <TableRow>
+      <TableCell className="font-medium">
+        <Link to={`/runs/${project.name}`} className="text-primary hover:underline">{project.name}</Link>
+      </TableCell>
+      <TableCell className="text-xs text-muted-foreground font-mono truncate max-w-xs">
+        {project.repo_url}
+      </TableCell>
+      <TableCell><Badge variant="secondary">{project.status}</Badge></TableCell>
+      <TableCell>
+        <div className="flex gap-2">
+          <Link to={`/runs/${project.name}`}><Button variant="outline" size="sm">Runs</Button></Link>
+          <Button variant="destructive" size="sm" onClick={() => onDelete(project.name)}>Delete</Button>
+        </div>
+      </TableCell>
+    </TableRow>
+  );
+}
 
 export function ProjectsPage() {
   const { projects, loading, error, refetch } = useProjects();
   const [showForm, setShowForm] = useState(false);
-  const [name, setName] = useState("");
-  const [repoUrl, setRepoUrl] = useState("");
-  const [desc, setDesc] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name || !repoUrl) return;
+  const handleCreate = async (name: string, repoUrl: string, desc: string) => {
     setSubmitting(true);
     try {
       await createProject(name, repoUrl, desc || undefined);
-      setName(""); setRepoUrl(""); setDesc(""); setShowForm(false);
+      setShowForm(false);
       refetch();
     } catch { /* toast later */ }
     finally { setSubmitting(false); }
@@ -44,26 +99,7 @@ export function ProjectsPage() {
           {showForm ? "Cancel" : "New Project"}
         </Button>
       </div>
-
-      {showForm && (
-        <Card className="mb-6">
-          <CardHeader><CardTitle className="text-base">Create Project</CardTitle></CardHeader>
-          <CardContent>
-            <form onSubmit={handleCreate} className="grid grid-cols-3 gap-3">
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name"
-                className="rounded-md border bg-background px-3 py-2 text-sm" />
-              <input value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="Repo URL or path"
-                className="rounded-md border bg-background px-3 py-2 text-sm" />
-              <input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Description (optional)"
-                className="rounded-md border bg-background px-3 py-2 text-sm" />
-              <Button type="submit" disabled={submitting || !name || !repoUrl} className="col-span-3 w-fit">
-                {submitting ? "Creating..." : "Create"}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
-      )}
-
+      {showForm && <CreateProjectForm submitting={submitting} onCreate={handleCreate} />}
       {projects.length === 0 ? (
         <p className="text-muted-foreground">No projects yet.</p>
       ) : (
@@ -78,21 +114,7 @@ export function ProjectsPage() {
           </TableHeader>
           <TableBody>
             {projects.map((p) => (
-              <TableRow key={p.name}>
-                <TableCell className="font-medium">
-                  <Link to={`/runs/${p.name}`} className="text-primary hover:underline">{p.name}</Link>
-                </TableCell>
-                <TableCell className="text-xs text-muted-foreground font-mono truncate max-w-xs">
-                  {p.repo_url}
-                </TableCell>
-                <TableCell><Badge variant="secondary">{p.status}</Badge></TableCell>
-                <TableCell>
-                  <div className="flex gap-2">
-                    <Link to={`/runs/${p.name}`}><Button variant="outline" size="sm">Runs</Button></Link>
-                    <Button variant="destructive" size="sm" onClick={() => handleDelete(p.name)}>Delete</Button>
-                  </div>
-                </TableCell>
-              </TableRow>
+              <ProjectRow key={p.name} project={p} onDelete={handleDelete} />
             ))}
           </TableBody>
         </Table>

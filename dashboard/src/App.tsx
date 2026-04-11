@@ -5,6 +5,7 @@ import { ProjectsPage } from "@/pages/Projects";
 import { RunsPage } from "@/pages/Runs";
 import { RunDetailPage } from "@/pages/RunDetail";
 import { SubmitPage } from "@/pages/Submit";
+import { TasksPage } from "@/pages/Tasks";
 
 export function App() {
   return (
@@ -12,6 +13,7 @@ export function App() {
       <Route element={<Layout />}>
         <Route index element={<DashboardPage />} />
         <Route path="projects" element={<ProjectsPage />} />
+        <Route path="tasks" element={<TasksPage />} />
         <Route path="runs/:project" element={<RunsPage />} />
         <Route path="run/:id" element={<RunDetailPage />} />
         <Route path="submit" element={<SubmitPage />} />

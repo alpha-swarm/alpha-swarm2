@@ -270,7 +270,7 @@ async fn handle_execute(
 
     // === PHASE TIMING ===
     let phase_start = std::time::Instant::now();
-    let mut embed_ms: u64 = 0;
+    let mut embed_ms: u64;
 
     // Phase 1: Embeddings
     let embed_model = config.defaults.embed_model.clone();

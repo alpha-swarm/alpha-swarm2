@@ -31,7 +31,7 @@ impl Guest for ToolsWorker {
         };
 
         let tool = req["tool"].as_str().unwrap_or("");
-        let workspace_id = req["workspace_id"].as_str().unwrap_or("default");
+        let _workspace_id = req["workspace_id"].as_str().unwrap_or("default");
 
         // Create in-memory workspace
         let mut store = virt_git::MemoryBlobStore::new();

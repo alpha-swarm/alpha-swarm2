@@ -79,7 +79,7 @@ pub fn diff_trees(
 
 /// Generate unified diff text for a single file.
 fn text_diff(path: &str, old: &str, new: &str) -> String {
-    use similar::{ChangeTag, TextDiff};
+    use similar::TextDiff;
 
     let diff = TextDiff::from_lines(old, new);
     let mut output = format!("--- a/{path}\n+++ b/{path}\n");

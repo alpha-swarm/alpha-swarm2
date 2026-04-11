@@ -12,7 +12,6 @@
 //!   6. Create PR from branch to base
 
 use serde::{Deserialize, Serialize};
-use crate::diff::FileDiff;
 use crate::store::BlobStore;
 use crate::workspace::VirtWorkspace;
 
