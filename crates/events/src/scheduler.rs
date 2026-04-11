@@ -182,45 +182,63 @@ impl NatsScheduler {
         }))
     }
 
-    /// Try to acquire the global execution lock. Only 1 goal runs across all daemons.
-    /// Returns Ok(true) if acquired, Ok(false) if another daemon holds it.
+    /// Try to acquire per-project execution lock. Different projects can run in parallel.
     pub async fn try_acquire_execution_lock(&self, run_id: &str) -> Result<bool> {
+        self.try_acquire_project_lock(EXECUTION_LOCK_KEY, run_id).await
+    }
+
+    /// Per-project lock — allows parallel execution across projects.
+    pub async fn try_acquire_project_lock(&self, project: &str, run_id: &str) -> Result<bool> {
+        let key = format!("{}.{}", EXECUTION_LOCK_KEY, sanitize_key(project));
         let value = serde_json::to_vec(&serde_json::json!({
             "daemon_id": self.daemon_id,
             "run_id": run_id,
             "acquired_at": chrono::Utc::now().to_rfc3339(),
         }))?;
 
-        match self.leases.create(EXECUTION_LOCK_KEY, value.into()).await {
+        match self.leases.create(&key, value.into()).await {
             Ok(_) => {
-                info!(run_id, daemon = %self.daemon_id, "Acquired global execution lock");
+                info!(run_id, project, daemon = %self.daemon_id, "Acquired execution lock");
                 Ok(true)
             }
             Err(_) => {
-                debug!(run_id, "Execution lock held by another daemon");
+                debug!(run_id, project, "Execution lock held");
                 Ok(false)
             }
         }
     }
 
-    /// Release the global execution lock (goal completed or failed).
+    /// Release execution lock (global or per-project).
     pub async fn release_execution_lock(&self) -> Result<()> {
-        self.leases.purge(EXECUTION_LOCK_KEY).await
-            .context("Failed to release execution lock")?;
-        info!(daemon = %self.daemon_id, "Released global execution lock");
+        self.release_project_lock(EXECUTION_LOCK_KEY).await
+    }
+
+    pub async fn release_project_lock(&self, project: &str) -> Result<()> {
+        let key = format!("{}.{}", EXECUTION_LOCK_KEY, sanitize_key(project));
+        self.leases.purge(&key).await.context("Failed to release lock")?;
+        info!(project, daemon = %self.daemon_id, "Released execution lock");
         Ok(())
     }
 
-    /// Renew the execution lock (prevents expiry during long goals).
+    /// Renew execution lock.
     pub async fn renew_execution_lock(&self, run_id: &str) -> Result<()> {
+        self.renew_project_lock(EXECUTION_LOCK_KEY, run_id).await
+    }
+
+    pub async fn renew_project_lock(&self, project: &str, run_id: &str) -> Result<()> {
+        let key = format!("{}.{}", EXECUTION_LOCK_KEY, sanitize_key(project));
         let value = serde_json::to_vec(&serde_json::json!({
-            "daemon_id": self.daemon_id,
-            "run_id": run_id,
+            "daemon_id": self.daemon_id, "run_id": run_id,
             "acquired_at": chrono::Utc::now().to_rfc3339(),
         }))?;
-        self.leases.put(EXECUTION_LOCK_KEY, value.into()).await
-            .context("Failed to renew execution lock")?;
+        self.leases.put(&key, value.into()).await.context("Failed to renew lock")?;
         Ok(())
+    }
+
+    /// Check if execution lock is free (backward compat — checks global key).
+    pub async fn is_execution_lock_free(&self) -> bool {
+        let key = format!("{}.{}", EXECUTION_LOCK_KEY, sanitize_key(EXECUTION_LOCK_KEY));
+        matches!(self.leases.get(&key).await, Ok(None) | Err(_))
     }
 
     /// Check if the execution lock is free.

@@ -19,7 +19,7 @@ url = "nats://127.0.0.1:4223"
 model = "claude-sonnet-4-20250514"
 
 [defaults]
-embed_model = "qwen2.5-coder:7b"
+embed_model = "nomic-embed-text"
 simple_model = "qwen2.5-coder:7b"
 project = "default"
 

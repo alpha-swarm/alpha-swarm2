@@ -62,13 +62,22 @@ impl MemTreeManager {
             anyhow::bail!("git clone failed: {stderr}");
         }
 
+        // Symlink target/ to shared cache for faster incremental builds
+        let shared_target = std::path::PathBuf::from("/tmp/alpha-swarm/shared-target");
+        let _ = std::fs::create_dir_all(&shared_target);
+        let ws_target = work_dir.join("target");
+        if !ws_target.exists() {
+            #[cfg(unix)]
+            { let _ = std::os::unix::fs::symlink(&shared_target, &ws_target); }
+        }
+
         if let Ok(out) = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&work_dir)
             .output()
         {
             let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            info!(agent = agent_id, path = %work_dir.display(), head = %head, "Created workspace (local clone)");
+            info!(agent = agent_id, path = %work_dir.display(), head = %head, "Created workspace (shared build cache)");
         }
 
         self.workspaces.push(WorkspaceInfo {
