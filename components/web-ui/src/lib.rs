@@ -977,6 +977,10 @@ fn mcp_read_resource(uri: &str) -> Result<serde_json::Value, String> {
             let run_id = path.strip_prefix("runs/").unwrap().strip_suffix("/sub-runs").unwrap().replace('\'', "");
             format!("SELECT id, task_description, status, model_used, duration_ms, progress_message FROM agent_run WHERE parent_run_id = '{}'", run_id)
         }
+        _ if path.starts_with("runs/") && path.ends_with("/plan-tree") => {
+            let run_id = path.strip_prefix("runs/").unwrap().strip_suffix("/plan-tree").unwrap().replace('\'', "");
+            format!("SELECT * FROM goal_plan WHERE run_id = '{}' ORDER BY version DESC LIMIT 1; SELECT id, task_description, status, parent_run_id, progress_message, duration_ms FROM agent_run WHERE parent_run_id = '{}'", run_id, run_id)
+        }
         _ if path.starts_with("runs/") && path.ends_with("/plans") => {
             let run_id = path.strip_prefix("runs/").unwrap().strip_suffix("/plans").unwrap().replace('\'', "");
             format!("SELECT * FROM goal_plan WHERE run_id = '{}' ORDER BY version DESC", run_id)
