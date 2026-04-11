@@ -2,7 +2,7 @@
 # Override with environment variables: ALPHA_SWARM_OLLAMA_URL, etc.
 
 [ollama]
-url = "http://100.81.10.8:11434"
+url = "http://127.0.0.1:11434"   # picur — embeddings run local
 
 [surrealdb]
 url = "127.0.0.1:8001"
@@ -24,10 +24,10 @@ simple_model = "qwen2.5-coder:7b"
 project = "default"
 
 # --- Agent Tiers ---
-# Orchestrator + Agent: same model to avoid swap overhead
-# Orchestrator: fast planner
+# Orchestrator: fast planner on picur (local)
+# Agent: smart model on csatapaci (remote)
 [tiers.orchestrator]
-model = "qwen3:32b"
+model = "qwen2.5-coder:14b"
 context_window = 16384
 time_limit_secs = 14400         # 4 hours
 token_limit = 1000000           # 1M tokens
@@ -79,8 +79,8 @@ type = "ollama"
 url = "http://100.81.10.8:11434"   # csatapaci M2 Max 96GB
 priority = 1
 
-# Uncomment when local Ollama is running:
-# [[providers]]
-# type = "ollama"
-# url = "http://localhost:11434"
-# priority = 2
+# picur M4 24GB — planning + embeddings
+[[providers]]
+type = "ollama"
+url = "http://127.0.0.1:11434"
+priority = 2
