@@ -51,12 +51,16 @@ pub struct ResourceConfig {
     /// Max parallel sub-agents per swarm run (to avoid OOM with large models).
     #[serde(default = "default_max_concurrent_agents")]
     pub max_concurrent_agents: usize,
+    /// Maximum depth for recursive sub-plan decomposition.
+    #[serde(default = "default_max_sub_plan_depth")]
+    pub max_sub_plan_depth: u32,
     /// Monitored hosts.
     #[serde(default = "default_hosts")]
     pub hosts: Vec<HostConfig>,
 }
 
 fn default_max_concurrent_agents() -> usize { 2 }
+fn default_max_sub_plan_depth() -> u32 { 3 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HostConfig {
@@ -202,6 +206,7 @@ impl Default for ResourceConfig {
             max_ram_percent: 75.0,
             check_interval_secs: 10,
             max_concurrent_agents: default_max_concurrent_agents(),
+            max_sub_plan_depth: default_max_sub_plan_depth(),
             hosts: default_hosts(),
         }
     }

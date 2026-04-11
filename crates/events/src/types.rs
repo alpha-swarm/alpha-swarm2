@@ -99,3 +99,83 @@ impl SwarmEvent {
         chrono::Utc::now().to_rfc3339()
     }
 }
+
+/// Message passed between agents during execution via NATS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMessage {
+    pub from_agent: String,
+    pub to_agent: Option<String>, // None = broadcast to all agents in run
+    pub run_id: String,
+    pub kind: AgentMessageKind,
+    pub timestamp: String,
+}
+
+/// Types of inter-agent messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentMessageKind {
+    /// Notify peers about a file modification.
+    FileModified { path: String, content: String },
+    /// Share task completion summary for dependent tasks.
+    TaskCompleted {
+        task_id: String,
+        summary: String,
+        modified_files: Vec<String>,
+    },
+    /// Free-form context sharing.
+    Context { key: String, value: String },
+}
+
+impl AgentMessage {
+    pub fn file_modified(from: &str, run_id: &str, path: &str, content: &str) -> Self {
+        Self {
+            from_agent: from.into(),
+            to_agent: None,
+            run_id: run_id.into(),
+            kind: AgentMessageKind::FileModified {
+                path: path.into(),
+                content: content.into(),
+            },
+            timestamp: Self::now(),
+        }
+    }
+
+    pub fn task_completed(
+        from: &str,
+        run_id: &str,
+        task_id: &str,
+        summary: &str,
+        files: Vec<String>,
+    ) -> Self {
+        Self {
+            from_agent: from.into(),
+            to_agent: None,
+            run_id: run_id.into(),
+            kind: AgentMessageKind::TaskCompleted {
+                task_id: task_id.into(),
+                summary: summary.into(),
+                modified_files: files,
+            },
+            timestamp: Self::now(),
+        }
+    }
+
+    fn now() -> String {
+        chrono::Utc::now().to_rfc3339()
+    }
+
+    /// NATS subject for this message.
+    pub fn nats_subject(&self, project: &str) -> String {
+        match &self.to_agent {
+            Some(target) => {
+                format!("alpha-swarm.{}.agent.{}.inbox", project, target)
+            }
+            None => {
+                format!(
+                    "alpha-swarm.{}.run.{}.broadcast",
+                    project, self.run_id
+                )
+            }
+        }
+    }
+}

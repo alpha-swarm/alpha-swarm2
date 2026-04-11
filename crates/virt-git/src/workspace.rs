@@ -10,7 +10,7 @@
 //! ```
 
 use serde::{Serialize, Deserialize};
-use crate::store::{BlobStore, BlobHash};
+use crate::store::{BlobStore, BlobHash, MemoryBlobStore};
 use crate::tree::TreeSnapshot;
 use crate::diff::{self, FileDiff};
 
@@ -171,6 +171,94 @@ impl VirtWorkspace {
     }
 }
 
+impl VirtWorkspace {
+    /// Fork: create an independent copy. The fork starts from the current working tree.
+    pub fn fork(&self, store: &MemoryBlobStore) -> (VirtWorkspace, MemoryBlobStore) {
+        let forked = VirtWorkspace {
+            base: self.working.clone(),
+            working: self.working.clone(),
+            commits: Vec::new(),
+            next_commit: 1,
+        };
+        (forked, store.clone())
+    }
+
+    /// Merge another workspace's changes into this one (3-way merge).
+    /// Uses self.base as the common ancestor.
+    /// On conflict (both modified same file), theirs wins.
+    /// Returns list of conflicted paths.
+    pub fn merge(
+        &mut self,
+        store: &mut MemoryBlobStore,
+        theirs: &VirtWorkspace,
+        their_store: &MemoryBlobStore,
+    ) -> Vec<String> {
+        // Clone entries to avoid borrowing self while we mutate self.working.
+        let base_entries = self.base.entries().clone();
+        let our_entries = self.working.entries().clone();
+        let their_entries = theirs.working.entries().clone();
+        let mut conflicts = Vec::new();
+
+        // Collect all paths across all three trees.
+        let mut all_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for path in base_entries.keys() {
+            all_paths.insert(path.clone());
+        }
+        for path in our_entries.keys() {
+            all_paths.insert(path.clone());
+        }
+        for path in their_entries.keys() {
+            all_paths.insert(path.clone());
+        }
+
+        for path in &all_paths {
+            let base_hash: Option<&BlobHash> = base_entries.get(path);
+            let our_hash: Option<&BlobHash> = our_entries.get(path);
+            let their_hash: Option<&BlobHash> = their_entries.get(path);
+
+            let we_changed = our_hash != base_hash;
+            let they_changed = their_hash != base_hash;
+
+            if !they_changed {
+                // They didn't touch this file; keep ours as-is.
+                continue;
+            }
+
+            if they_changed && !we_changed {
+                // They changed, we didn't: take theirs.
+                match their_hash {
+                    Some(hash) => {
+                        // Copy blob content from their store into ours, then update tree.
+                        if let Some(content) = their_store.get(hash) {
+                            self.working.insert(store, path, &content);
+                        }
+                    }
+                    None => {
+                        // They deleted it.
+                        self.working.remove(path);
+                    }
+                }
+            } else {
+                // Both changed: take theirs, but record conflict.
+                conflicts.push(path.clone());
+                match their_hash {
+                    Some(hash) => {
+                        if let Some(content) = their_store.get(hash) {
+                            self.working.insert(store, path, &content);
+                        }
+                    }
+                    None => {
+                        // They deleted, we modified: conflict + delete.
+                        self.working.remove(path);
+                    }
+                }
+            }
+        }
+
+        conflicts
+    }
+}
+
 impl Default for VirtWorkspace {
     fn default() -> Self {
         Self::new()
@@ -263,5 +351,72 @@ mod tests {
 
         let diffs = ws.diff(&store);
         assert_eq!(diffs.len(), 2); // 1 deleted + 1 added
+    }
+
+    #[test]
+    fn test_fork_independence() {
+        let mut store = MemoryBlobStore::new();
+        let mut ws = VirtWorkspace::from_files(&mut store, &[
+            ("a.rs", "original"),
+        ]);
+
+        let (mut forked, mut forked_store) = ws.fork(&store);
+
+        // Write to the fork; original should not see the change.
+        forked.write_file(&mut forked_store, "a.rs", "forked change");
+        forked.write_file(&mut forked_store, "b.rs", "new in fork");
+
+        assert_eq!(ws.read_file(&store, "a.rs"), Some("original".into()));
+        assert!(!ws.file_exists("b.rs"));
+
+        // Write to original; fork should not see the change.
+        ws.write_file(&mut store, "a.rs", "original change");
+
+        assert_eq!(forked.read_file(&forked_store, "a.rs"), Some("forked change".into()));
+        assert_eq!(ws.read_file(&store, "a.rs"), Some("original change".into()));
+    }
+
+    #[test]
+    fn test_merge_clean() {
+        let mut store = MemoryBlobStore::new();
+        let mut ws = VirtWorkspace::from_files(&mut store, &[
+            ("a.rs", "base a"),
+            ("b.rs", "base b"),
+        ]);
+
+        let (mut forked, mut forked_store) = ws.fork(&store);
+
+        // We change a.rs, they change b.rs -- no overlap.
+        ws.write_file(&mut store, "a.rs", "our change to a");
+        forked.write_file(&mut forked_store, "b.rs", "their change to b");
+
+        let conflicts = ws.merge(&mut store, &forked, &forked_store);
+
+        assert!(conflicts.is_empty(), "expected no conflicts, got: {:?}", conflicts);
+        assert_eq!(ws.read_file(&store, "a.rs"), Some("our change to a".into()));
+        assert_eq!(ws.read_file(&store, "b.rs"), Some("their change to b".into()));
+    }
+
+    #[test]
+    fn test_merge_conflict() {
+        let mut store = MemoryBlobStore::new();
+        let mut ws = VirtWorkspace::from_files(&mut store, &[
+            ("shared.rs", "base content"),
+            ("only_ours.rs", "ours"),
+        ]);
+
+        let (mut forked, mut forked_store) = ws.fork(&store);
+
+        // Both modify the same file.
+        ws.write_file(&mut store, "shared.rs", "our version");
+        forked.write_file(&mut forked_store, "shared.rs", "their version");
+
+        let conflicts = ws.merge(&mut store, &forked, &forked_store);
+
+        assert_eq!(conflicts, vec!["shared.rs".to_string()]);
+        // Theirs wins on conflict.
+        assert_eq!(ws.read_file(&store, "shared.rs"), Some("their version".into()));
+        // Untouched file preserved.
+        assert_eq!(ws.read_file(&store, "only_ours.rs"), Some("ours".into()));
     }
 }

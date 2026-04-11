@@ -51,7 +51,8 @@ max_context_files = 50
 max_cpu_percent = 80.0
 max_ram_percent = 80.0
 check_interval_secs = 10
-max_concurrent_agents = 1
+max_concurrent_agents = 3
+max_sub_plan_depth = 3
 
 [[resources.hosts]]
 name = "local"
