@@ -153,31 +153,44 @@ async fn main() -> Result<()> {
         tokio::time::sleep(FALLBACK_POLL_INTERVAL).await;
         if !resources::can_schedule(&config.resources) { continue; }
 
-        // Check if execution lock is free (another goal may be running on this or another daemon)
-        if let Some(sched) = &scheduler {
-            if !sched.is_execution_lock_free().await { continue; }
-        }
+        let lock_free = match &scheduler {
+            Some(sched) => sched.is_execution_lock_free().await,
+            None => true,
+        };
 
-        if let Ok(pending) = store.list_pending().await {
-            if let Some(task) = pending.into_iter().next() {
-                let id = task.id.clone().unwrap_or_default();
-
-                // Try to acquire the global execution lock
-                if let Some(sched) = &scheduler {
-                    match sched.try_acquire_execution_lock(&id).await {
-                        Ok(true) => { info!(id = %id, "Acquired execution lock"); }
-                        Ok(false) => { info!(id = %id, "Execution lock held, skipping"); continue; }
-                        Err(e) => { warn!(id = %id, error = %e, "Execution lock error"); continue; }
+        if lock_free {
+            // Execute first approved/pending task
+            if let Ok(pending) = store.list_pending().await {
+                if let Some(task) = pending.into_iter().next() {
+                    let id = task.id.clone().unwrap_or_default();
+                    if let Some(sched) = &scheduler {
+                        match sched.try_acquire_execution_lock(&id).await {
+                            Ok(true) => { info!(id = %id, "Acquired execution lock"); }
+                            Ok(false) => { continue; }
+                            Err(_) => { continue; }
+                        }
+                        let _ = sched.try_claim(&id).await;
                     }
-                    // Also claim the task lease
-                    let _ = sched.try_claim(&id).await;
+                    let project = task.project.clone();
+                    let goal = task.task_description.clone();
+                    let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
+                    spawn_task(config.clone(), Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), scheduler.clone(), id, project, goal, status);
                 }
-
-                let project = task.project.clone();
-                let goal = task.task_description.clone();
-                let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
-
-                spawn_task(config.clone(), Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), scheduler.clone(), id, project, goal, status);
+            }
+        } else {
+            // Execution lock held — pre-plan queued tasks instead of waiting
+            if let Ok(all) = store.list_pending().await {
+                for task in all {
+                    let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
+                    if status != "planning" { continue; }
+                    let id = task.id.clone().unwrap_or_default();
+                    info!(id = %id, "Pre-planning queued task while execution lock is held");
+                    let project = task.project.clone();
+                    let goal = task.task_description.clone();
+                    // Run planning only (not execution)
+                    executor::handle_task(&config, Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), &id, &project, &goal, "planning").await;
+                    break; // One at a time
+                }
             }
         }
     }

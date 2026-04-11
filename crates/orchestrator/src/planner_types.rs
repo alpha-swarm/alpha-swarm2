@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use inference_client::Complexity;
 
+/// A direct edit that can be applied without LLM inference.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectEdit {
+    pub path: String,
+    pub old: String,
+    pub new: String,
+}
+
 /// A sub-task decomposed from a high-level goal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubTask {
@@ -13,6 +21,9 @@ pub struct SubTask {
     pub complexity: Complexity,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// If set, this task can be applied directly without an LLM agent.
+    #[serde(default)]
+    pub edit: Option<DirectEdit>,
 }
 
 /// System prompt for the planner LLM.
@@ -28,8 +39,13 @@ RULES:
 - Tasks that run in parallel MUST NOT modify the same file. Use depends_on if they share files.
 - Maximum 5 tasks. Most goals need 1-3.
 
+For TRIVIAL single-line changes (adding an import, renaming, inserting a line):
+- Set complexity to "simple"
+- Include an "edit" field with {"path":"file.rs","old":"existing line","new":"replacement line"}
+- Tasks with an edit field execute instantly without an LLM — be precise with old/new text.
+
 OUTPUT FORMAT (JSON array only, no other text):
-[{"id":"task-1","description":"what to do","files":["file.rs"],"complexity":"simple","depends_on":[]}]"#;
+[{"id":"task-1","description":"what to do","files":["file.rs"],"complexity":"simple","depends_on":[],"edit":null}]"#;
 
 /// Maximum number of sub-tasks the planner can create.
 pub const MAX_TASKS: usize = 5;
@@ -101,6 +117,7 @@ pub fn parse_plan(json_str: &str, repo_files: &[String]) -> Result<Vec<SubTask>,
             files,
             complexity: inference_client::Complexity::Medium,
             depends_on: Vec::new(),
+            edit: None,
         }]);
     }
 
@@ -338,6 +355,7 @@ mod tests {
                 files: vec!["a.rs".into()],
                 complexity: Complexity::Simple,
                 depends_on: vec!["task-2".into()],
+                edit: None,
             },
             SubTask {
                 id: "task-2".into(),
@@ -345,6 +363,7 @@ mod tests {
                 files: vec!["b.rs".into()],
                 complexity: Complexity::Simple,
                 depends_on: vec!["task-1".into()],
+                edit: None,
             },
         ];
         assert!(detect_cycle(&tasks));
@@ -359,6 +378,7 @@ mod tests {
                 files: vec!["a.rs".into()],
                 complexity: Complexity::Simple,
                 depends_on: vec![],
+                edit: None,
             },
             SubTask {
                 id: "task-2".into(),
@@ -366,6 +386,7 @@ mod tests {
                 files: vec!["b.rs".into()],
                 complexity: Complexity::Simple,
                 depends_on: vec!["task-1".into()],
+                edit: None,
             },
             SubTask {
                 id: "task-3".into(),
@@ -373,6 +394,7 @@ mod tests {
                 files: vec!["c.rs".into()],
                 complexity: Complexity::Simple,
                 depends_on: vec!["task-1".into(), "task-2".into()],
+                edit: None,
             },
         ];
         assert!(!detect_cycle(&tasks));

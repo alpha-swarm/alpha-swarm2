@@ -490,6 +490,42 @@ impl SwarmRunner {
                 let mut join_set = tokio::task::JoinSet::new();
 
                 for (task, wt_path, augmented_desc) in wave_paths {
+                    // Fast path: direct edit — no inference needed
+                    if let Some(ref edit) = task.edit {
+                        info!(task_id = %task.id, path = %edit.path, "Applying direct edit (no inference)");
+                        let full_path = wt_path.join(&edit.path);
+                        let applied = if let Ok(content) = std::fs::read_to_string(&full_path) {
+                            if content.contains(&edit.old) {
+                                let updated = content.replacen(&edit.old, &edit.new, 1);
+                                std::fs::write(&full_path, &updated).is_ok()
+                            } else {
+                                warn!(task_id = %task.id, "Direct edit OLD block not found, will use agent");
+                                false
+                            }
+                        } else { false };
+
+                        if applied {
+                            any_applied = true;
+                            let summary = format!("Direct edit: {} ({}→{})", edit.path, edit.old.chars().take(30).collect::<String>(), edit.new.chars().take(30).collect::<String>());
+                            completed_summaries.insert(task.id.clone(), summary);
+                            completed.insert(task.id.clone(), TaskRunResult {
+                                task, agent_result: Some(AgentResult {
+                                    edits: vec![],
+                                    inference_response: inference_client::InferenceResponse {
+                                        content: "Direct edit applied".into(),
+                                        model: "direct".into(),
+                                        backend: inference_client::BackendKind::Ollama,
+                                        tokens_input: 0, tokens_output: 0, duration_ms: 0,
+                                    },
+                                    applied: true, skipped: false, run_id: None, attempt: 1,
+                                    escalated_from: None, tool_calls: vec![],
+                                }),
+                                error: None,
+                            });
+                            continue;
+                        }
+                    }
+
                     let sem = Arc::clone(&semaphore);
                     let router = Arc::clone(&self.router);
                     let ollama = Arc::clone(&self.ollama);
