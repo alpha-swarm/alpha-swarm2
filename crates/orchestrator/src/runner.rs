@@ -800,7 +800,7 @@ async fn index_file_embeddings(
         // Embed the summary
         match ollama.embed(&embed_model, &summary_truncated).await {
             Ok(embedding) => {
-                let _ = store.store_file_embedding(project, file_path, &summary_truncated, &embedding).await;
+                let _ = store.store_file_embedding(project, file_path, &summary_truncated, &embedding, "").await;
                 indexed += 1;
             }
             Err(_) => continue,

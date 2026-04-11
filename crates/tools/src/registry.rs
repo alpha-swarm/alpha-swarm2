@@ -50,6 +50,7 @@ impl ToolRegistry {
         reg.register(Box::new(crate::web::FetchUrlTool));
         reg.register(Box::new(crate::web::SearchCratesTool));
         // Quality tools for edit → test → fix iteration
+        reg.register(Box::new(crate::quality_tools::RunCheckTool));
         reg.register(Box::new(crate::quality_tools::RunFmtTool));
         reg.register(Box::new(crate::quality_tools::RunLintTool));
         reg.register(Box::new(crate::quality_tools::RunBuildTool));

@@ -1,23 +1,21 @@
-//! Embedding lifecycle manager — lazy indexing with batch processing.
-//!
-//! - On agent start: check if project is indexed, batch-index if not
-//! - On agent done: update only modified files
-//! - Batching: queue embeddings, process N at a time to avoid overloading Ollama
+//! Embedding lifecycle manager — lazy indexing with content-hash caching.
 
 use std::path::Path;
 use std::sync::Arc;
-
+use sha2::{Sha256, Digest};
 use tracing::{info, warn, debug};
-
 use inference_client::OllamaBackend;
 use crate::KnowledgeStore;
 
-/// Max files to embed in a single batch call.
 const BATCH_SIZE: usize = 10;
-/// Max chars per summary for embedding.
 const SUMMARY_MAX_CHARS: usize = 500;
-/// Extensions to index.
 const INDEXABLE_EXTENSIONS: &[&str] = &["rs", "ts", "js", "go", "py", "md", "toml"];
+
+fn sha256_hex(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 pub struct EmbeddingManager {
     store: Arc<KnowledgeStore>,
@@ -30,122 +28,86 @@ impl EmbeddingManager {
         Self { store, ollama, embed_model }
     }
 
-    /// Lifecycle hook: call at agent start.
-    /// Checks if project has embeddings. If not, indexes the repo.
-    /// Returns the number of files indexed (0 if already indexed).
     pub async fn on_agent_start(&self, project: &str, repo_path: &Path) -> usize {
-        // Check if project already has embeddings
-        match self.store.find_relevant_files(project, &[0.0; 384], 1, 0.0).await {
-            Ok(files) if !files.is_empty() => {
-                debug!(project, existing = files.len(), "Project already indexed, skipping");
-                return 0;
-            }
-            _ => {}
-        }
-
-        info!(project, "Project not indexed, starting batch indexing");
+        info!(project, "Indexing project files (SHA cache — unchanged files skip)");
         self.index_project(project, repo_path).await
     }
 
-    /// Lifecycle hook: call after agent completes.
-    /// Updates embeddings only for files that were modified.
     pub async fn on_agent_done(&self, project: &str, repo_path: &Path, modified_files: &[String]) {
         if modified_files.is_empty() { return; }
-
         info!(project, files = modified_files.len(), "Updating embeddings for modified files");
-
-        let summaries: Vec<(String, String)> = modified_files.iter()
-            .filter_map(|f| {
-                let full_path = repo_path.join(f);
-                let content = std::fs::read_to_string(&full_path).ok()?;
-                let summary = build_file_summary(f, &content);
-                Some((f.clone(), summary))
-            })
+        let items: Vec<_> = modified_files.iter()
+            .filter_map(|f| read_file_for_embed(repo_path, f))
             .collect();
-
-        self.embed_batch(project, &summaries).await;
+        self.embed_batch(project, &items).await;
     }
 
-    /// Full project indexing — discovers all source files, embeds in batches.
     async fn index_project(&self, project: &str, repo_path: &Path) -> usize {
         let files = discover_indexable_files(repo_path);
-        info!(project, total_files = files.len(), "Indexing project files");
+        info!(project, total_files = files.len(), "Discovered files");
 
-        // Build summaries for all files
-        let summaries: Vec<(String, String)> = files.iter()
-            .filter_map(|f| {
-                let full_path = repo_path.join(f);
-                let content = std::fs::read_to_string(&full_path).ok()?;
-                let summary = build_file_summary(f, &content);
-                Some((f.clone(), summary))
-            })
-            .collect();
+        let mut items = Vec::new();
+        let mut skipped = 0;
+        for f in &files {
+            let Some((path, summary, hash)) = read_file_for_embed(repo_path, f) else { continue };
+            if let Ok(Some(existing)) = self.store.get_file_hash(project, &path).await {
+                if existing == hash { skipped += 1; continue; }
+            }
+            items.push((path, summary, hash));
+        }
 
-        let total = summaries.len();
-        self.embed_batch(project, &summaries).await;
-        info!(project, indexed = total, "Project indexing complete");
+        info!(project, to_embed = items.len(), skipped, "SHA cache check done");
+        if items.is_empty() { return 0; }
+
+        let total = items.len();
+        self.embed_batch(project, &items).await;
+        info!(project, indexed = total, "Indexing complete");
         total
     }
 
-    /// Embed a batch of (file_path, summary) pairs.
-    /// Processes BATCH_SIZE at a time to avoid overloading Ollama.
-    async fn embed_batch(&self, project: &str, items: &[(String, String)]) {
-        let mut indexed = 0;
-
+    async fn embed_batch(&self, project: &str, items: &[(String, String, String)]) {
         for chunk in items.chunks(BATCH_SIZE) {
-            for (file_path, summary) in chunk {
+            for (path, summary, hash) in chunk {
                 match self.ollama.embed(&self.embed_model, summary).await {
                     Ok(embedding) => {
-                        match self.store.store_file_embedding(project, file_path, summary, &embedding).await {
-                            Ok(_) => { indexed += 1; }
-                            Err(e) => { warn!(file = %file_path, error = %e, "Failed to store embedding"); }
-                        }
+                        let _ = self.store.store_file_embedding(project, path, summary, &embedding, hash).await;
                     }
-                    Err(e) => {
-                        warn!(file = %file_path, error = %e, "Failed to embed file");
-                    }
+                    Err(e) => warn!(file = %path, error = %e, "Embed failed"),
                 }
             }
-
-            // Small pause between batches to avoid Ollama overload
             if chunk.len() == BATCH_SIZE {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
-
-        debug!(indexed, total = items.len(), "Batch embedding complete");
     }
 }
 
-/// Build a summary string for embedding: filename + first lines + signatures.
+fn read_file_for_embed(repo: &Path, file_path: &str) -> Option<(String, String, String)> {
+    let content = std::fs::read_to_string(repo.join(file_path)).ok()?;
+    let hash = sha256_hex(&content);
+    let summary = build_file_summary(file_path, &content);
+    Some((file_path.to_string(), summary, hash))
+}
+
 fn build_file_summary(file_path: &str, content: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
-    let first_lines: String = lines.iter().take(3).cloned().collect::<Vec<_>>().join("\n");
-
-    let signatures: Vec<&str> = lines.iter()
+    let first: String = lines.iter().take(3).cloned().collect::<Vec<_>>().join("\n");
+    let sigs: Vec<&str> = lines.iter()
         .filter(|l| {
             let t = l.trim();
             t.starts_with("pub fn ") || t.starts_with("fn ") || t.starts_with("pub struct ")
                 || t.starts_with("struct ") || t.starts_with("impl ") || t.starts_with("pub trait ")
                 || t.starts_with("pub enum ") || t.starts_with("pub async fn ")
         })
-        .take(10)
-        .cloned()
-        .collect();
+        .take(10).cloned().collect();
 
-    let mut summary = format!("{file_path}\n{first_lines}");
-    if !signatures.is_empty() {
-        summary.push_str("\nSignatures: ");
-        summary.push_str(&signatures.join(", "));
-    }
-
-    summary.chars().take(SUMMARY_MAX_CHARS).collect()
+    let mut s = format!("{file_path}\n{first}");
+    if !sigs.is_empty() { s.push_str("\nSigs: "); s.push_str(&sigs.join(", ")); }
+    s.chars().take(SUMMARY_MAX_CHARS).collect()
 }
 
-/// Discover files eligible for embedding indexing.
-fn discover_indexable_files(repo_path: &Path) -> Vec<String> {
+fn discover_indexable_files(repo: &Path) -> Vec<String> {
     let mut files = Vec::new();
-
     fn walk(dir: &Path, base: &Path, ext: &[&str], out: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {
@@ -161,8 +123,7 @@ fn discover_indexable_files(repo_path: &Path) -> Vec<String> {
             }
         }
     }
-
-    walk(repo_path, repo_path, INDEXABLE_EXTENSIONS, &mut files);
+    walk(repo, repo, INDEXABLE_EXTENSIONS, &mut files);
     files.sort();
     files
 }

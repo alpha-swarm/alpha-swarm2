@@ -80,6 +80,46 @@ impl Tool for RunBuildTool {
     }
 }
 
+pub struct RunCheckTool;
+
+#[async_trait::async_trait]
+impl Tool for RunCheckTool {
+    fn name(&self) -> &str { "run_check" }
+    fn description(&self) -> &str { "Run all quality checks in parallel (fmt + build + clippy). Use INSTEAD of separate run_fmt/run_build/run_lint." }
+    fn parameters_schema(&self) -> Value {
+        json!({"type": "object", "properties": {"crate_name": {"type": "string", "description": "Optional: specific crate to check."}}})
+    }
+    async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
+        let crate_flag = params.get("crate_name").and_then(|v| v.as_str()).map(|n| format!(" -p {n}")).unwrap_or_default();
+        let cwd = ctx.repo_path.clone();
+        let start = std::time::Instant::now();
+
+        let cmds = vec![
+            ("fmt", "cargo fmt -- --check".to_string()),
+            ("build", format!("cargo check{crate_flag}")),
+            ("clippy", format!("cargo clippy{crate_flag}")),
+        ];
+
+        let handles: Vec<_> = cmds.into_iter().map(|(name, cmd)| {
+            let cwd = cwd.clone();
+            std::thread::spawn(move || (name.to_string(), run_cmd(&cmd, &cwd)))
+        }).collect();
+
+        let mut parts = Vec::new();
+        let mut any_err = false;
+        for h in handles {
+            if let Ok((name, result)) = h.join() {
+                if result.is_error { any_err = true; }
+                parts.push(format!("[{}] {}", name, result.content));
+            }
+        }
+
+        let duration = start.elapsed().as_millis() as u64;
+        let content = parts.join("\n\n");
+        if any_err { ToolResult::err(content, duration) } else { ToolResult::ok(content, duration) }
+    }
+}
+
 pub struct RunTestTool;
 
 #[async_trait::async_trait]
@@ -102,6 +142,14 @@ impl Tool for RunTestTool {
 /// Max output chars to avoid flooding context.
 const MAX_OUTPUT_CHARS: usize = 3000;
 
+/// Truncate from start, keeping the last N chars (errors are at the bottom).
+fn truncate_end(s: &str, max: usize) -> String {
+    if s.len() <= max { return s.to_string(); }
+    let skip = s.len() - max;
+    let boundary = s.ceil_char_boundary(skip);
+    format!("...[{skip} chars truncated]\n{}", &s[boundary..])
+}
+
 fn run_cmd(cmd: &str, cwd: &std::path::Path) -> ToolResult {
     let start = std::time::Instant::now();
     let parts: Vec<&str> = cmd.split_whitespace().collect();
@@ -120,8 +168,9 @@ fn run_cmd(cmd: &str, cwd: &std::path::Path) -> ToolResult {
                     format!("OK\n{}{}", stdout, stderr).chars().take(MAX_OUTPUT_CHARS).collect()
                 }
             } else {
-                format!("FAILED (exit {})\n{}{}", output.status.code().unwrap_or(-1), stderr, stdout)
-                    .chars().take(MAX_OUTPUT_CHARS).collect()
+                // Keep END of output — error messages are at the bottom
+                let combined = format!("FAILED (exit {})\n{}{}", output.status.code().unwrap_or(-1), stderr, stdout);
+                truncate_end(&combined, MAX_OUTPUT_CHARS)
             };
 
             if output.status.success() { ToolResult::ok(content, duration) } else { ToolResult::err(content, duration) }

@@ -256,22 +256,38 @@ impl KnowledgeStore {
     // --- RAG: File-level embeddings for context retrieval ---
 
     /// Store or update an embedding for a file in a project.
-    pub async fn store_file_embedding(&self, project: &str, file_path: &str, summary: &str, embedding: &[f32]) -> Result<()> {
+    pub async fn store_file_embedding(&self, project: &str, file_path: &str, summary: &str, embedding: &[f32], content_hash: &str) -> Result<()> {
         let project = project.to_string();
         let file_path = file_path.to_string();
         let summary = summary.to_string();
         let embedding = serde_json::to_value(embedding)?;
+        let content_hash = content_hash.to_string();
 
         self.db.query(
-            "UPSERT file_embedding SET project = $project, file_path = $file_path, summary = $summary, embedding = $embedding, updated_at = time::now() WHERE project = $project AND file_path = $file_path"
+            "UPSERT file_embedding SET project = $project, file_path = $file_path, summary = $summary, embedding = $embedding, content_hash = $content_hash, updated_at = time::now() WHERE project = $project AND file_path = $file_path"
         )
         .bind(("project", project))
         .bind(("file_path", file_path))
         .bind(("summary", summary))
         .bind(("embedding", embedding))
+        .bind(("content_hash", content_hash))
         .await
         .context("Failed to store file embedding")?;
         Ok(())
+    }
+
+    /// Get the content hash for a file embedding (for cache invalidation).
+    pub async fn get_file_hash(&self, project: &str, file_path: &str) -> Result<Option<String>> {
+        let mut result = self.db.query(
+            "SELECT content_hash FROM file_embedding WHERE project = $project AND file_path = $file_path LIMIT 1"
+        )
+        .bind(("project", project.to_string()))
+        .bind(("file_path", file_path.to_string()))
+        .await
+        .context("Failed to query file hash")?;
+
+        let row: Option<serde_json::Value> = result.take(0)?;
+        Ok(row.and_then(|v| v.get("content_hash").and_then(|h| h.as_str().map(String::from))))
     }
 
     /// Find the most relevant files for a task using vector similarity.
