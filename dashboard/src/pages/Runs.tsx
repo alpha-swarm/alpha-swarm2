@@ -1,11 +1,16 @@
-import { useParams, Link } from "react-router";
+import { useParams, Link, useNavigate } from "react-router";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/StatusBadge";
 import { useRuns } from "@/hooks/useRuns";
+import { useProjectMetrics } from "@/hooks/useProjectMetrics";
 
 export function RunsPage() {
   const { project } = useParams<{ project: string }>();
   const { runs, loading, error } = useRuns(project ?? "");
+  const { metrics } = useProjectMetrics(project ?? "");
+  const navigate = useNavigate();
 
   if (!project) return <p className="text-muted-foreground">No project selected</p>;
   if (loading) return <p className="text-muted-foreground">Loading...</p>;
@@ -13,8 +18,35 @@ export function RunsPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-1">{project}</h1>
-      <p className="text-sm text-muted-foreground mb-6">{runs.length} runs</p>
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold">{project}</h1>
+          <p className="text-sm text-muted-foreground">{runs.length} runs</p>
+        </div>
+        <Button onClick={() => navigate("/submit")}>New Task</Button>
+      </div>
+
+      {metrics && (
+        <div className="grid grid-cols-5 gap-3 mb-6">
+          {[
+            { label: "Total", value: metrics.total_runs, className: "" },
+            { label: "Active", value: metrics.active, className: "text-yellow-500" },
+            { label: "Passed", value: metrics.passed, className: "text-green-500" },
+            { label: "Failed", value: metrics.failed, className: "text-destructive" },
+            { label: "Pending", value: metrics.pending, className: "text-muted-foreground" },
+          ].map((c) => (
+            <Card key={c.label}>
+              <CardHeader className="pb-1 pt-3 px-3">
+                <CardTitle className="text-[10px] text-muted-foreground font-normal">{c.label}</CardTitle>
+              </CardHeader>
+              <CardContent className="px-3 pb-3">
+                <span className={`text-xl font-bold ${c.className}`}>{c.value ?? 0}</span>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+
       <Table>
         <TableHeader>
           <TableRow>

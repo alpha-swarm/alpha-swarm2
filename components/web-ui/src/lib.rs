@@ -96,6 +96,16 @@ impl Guest for WebUi {
             (Method::Delete, "/api/clear") => {
                 api_clear_all(response_out);
             }
+            // MCP endpoint — forward to MCP handler
+            (Method::Post, "/mcp") => {
+                let body = read_body(&request);
+                let body_str = String::from_utf8(body).unwrap_or_default();
+                let response = mcp_handle(&body_str);
+                respond_json(response_out, 200, &response);
+            }
+            (Method::Get, "/mcp") => {
+                respond_json(response_out, 200, r#"{"info":"MCP Streamable HTTP. Use POST for JSON-RPC."}"#);
+            }
             _ => {
                 respond_json(response_out, 404, r#"{"error":"not found"}"#);
             }
@@ -901,6 +911,125 @@ fn respond_json(response_out: ResponseOutparam, status: u16, body: &str) {
     stream.subscribe().block();
     drop(stream);
     OutgoingBody::finish(out_body, None).unwrap();
+}
+
+// --- Minimal MCP JSON-RPC handler ---
+
+fn mcp_handle(body: &str) -> String {
+    let req: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return format!(r#"{{"jsonrpc":"2.0","id":null,"error":{{"code":-32700,"message":"Parse error: {e}"}}}}"#),
+    };
+
+    let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+
+    let result = match method {
+        "initialize" => Ok(serde_json::json!({
+            "protocolVersion": "2025-11-25",
+            "serverInfo": { "name": "alpha-swarm", "version": "0.1.0" },
+            "capabilities": { "tools": { "listChanged": false }, "resources": { "subscribe": false } }
+        })),
+        "notifications/initialized" | "ping" => Ok(serde_json::json!({})),
+        "tools/list" => Ok(serde_json::json!({ "tools": [] })),
+        "resources/list" => Ok(serde_json::json!({
+            "resources": [
+                { "uri": "swarm://projects", "name": "Projects", "mimeType": "application/json" },
+                { "uri": "swarm://health", "name": "Health", "mimeType": "application/json" },
+                { "uri": "swarm://dashboard", "name": "Dashboard", "mimeType": "application/json" },
+                { "uri": "swarm://live", "name": "Live Agents", "mimeType": "application/json" }
+            ]
+        })),
+        "resources/read" => {
+            let uri = req.get("params").and_then(|p| p.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+            mcp_read_resource(uri)
+        }
+        "tools/call" => {
+            let name = req.get("params").and_then(|p| p.get("name")).and_then(|n| n.as_str()).unwrap_or("");
+            let args = req.get("params").and_then(|p| p.get("arguments")).cloned().unwrap_or(serde_json::json!({}));
+            mcp_call_tool(name, &args)
+        }
+        _ => Err(format!("Method not found: {method}")),
+    };
+
+    match result {
+        Ok(r) => format!(r#"{{"jsonrpc":"2.0","id":{},"result":{}}}"#, id, r),
+        Err(e) => format!(r#"{{"jsonrpc":"2.0","id":{},"error":{{"code":-32601,"message":"{}"}}}}"#, id, e.replace('"', "'")),
+    }
+}
+
+fn mcp_read_resource(uri: &str) -> Result<serde_json::Value, String> {
+    let path = uri.strip_prefix("swarm://").unwrap_or(uri);
+    let query = match path {
+        "projects" => "SELECT * FROM project ORDER BY name".to_string(),
+        "health" => return Ok(serde_json::json!({ "contents": [{ "uri": uri, "mimeType": "application/json", "text": r#"{"status":"ok"}"# }] })),
+        "dashboard" => "SELECT count() as total_runs, count(status = 'running' OR NULL) as active, count(status = 'passed' OR NULL) as passed, count(status = 'failed' OR NULL) as failed, count(status = 'pending' OR NULL) as pending FROM agent_run".to_string(),
+        "live" => "SELECT id, project, task_description, status, progress_message, last_activity_at FROM agent_run WHERE status = 'running' OR status = 'planning'".to_string(),
+        _ if path.starts_with("projects/") && path.ends_with("/runs") => {
+            let project = path.strip_prefix("projects/").unwrap().strip_suffix("/runs").unwrap().replace('\'', "");
+            format!("SELECT id, task_description, status, model_used, duration_ms, quality_gate_passed, progress_message, phase_timings, created_at FROM agent_run WHERE project = '{}' ORDER BY created_at DESC LIMIT 20", project)
+        }
+        _ if path.starts_with("projects/") && path.ends_with("/metrics") => {
+            let project = path.strip_prefix("projects/").unwrap().strip_suffix("/metrics").unwrap().replace('\'', "");
+            format!("SELECT count() as total_runs, count(status = 'running' OR NULL) as active, count(status = 'passed' OR NULL) as passed, count(status = 'failed' OR NULL) as failed, count(status = 'pending' OR NULL) as pending FROM agent_run WHERE project = '{}'", project)
+        }
+        _ if path.starts_with("runs/") && path.ends_with("/sub-runs") => {
+            let run_id = path.strip_prefix("runs/").unwrap().strip_suffix("/sub-runs").unwrap().replace('\'', "");
+            format!("SELECT id, task_description, status, model_used, duration_ms, progress_message FROM agent_run WHERE parent_run_id = '{}'", run_id)
+        }
+        _ if path.starts_with("runs/") && path.ends_with("/plans") => {
+            let run_id = path.strip_prefix("runs/").unwrap().strip_suffix("/plans").unwrap().replace('\'', "");
+            format!("SELECT * FROM goal_plan WHERE run_id = '{}' ORDER BY version DESC", run_id)
+        }
+        _ if path.starts_with("runs/") && path.ends_with("/timeline") => {
+            let run_id = path.strip_prefix("runs/").unwrap().strip_suffix("/timeline").unwrap().replace('\'', "");
+            format!("SELECT tool_calls, attempts, phase_timings, progress_message, status FROM {}", run_id)
+        }
+        _ if path.starts_with("runs/") => {
+            let run_id = path.strip_prefix("runs/").unwrap().replace('\'', "");
+            format!("SELECT * FROM {}", run_id)
+        }
+        _ => return Err(format!("Unknown resource: {uri}")),
+    };
+
+    let result = surreal_query_ns(&query);
+    match result {
+        Ok(text) => Ok(serde_json::json!({ "contents": [{ "uri": uri, "mimeType": "application/json", "text": text }] })),
+        Err(e) => Err(e),
+    }
+}
+
+fn mcp_call_tool(name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let text = match name {
+        "submit_task" => {
+            let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("");
+            let goal = args.get("goal").and_then(|v| v.as_str()).unwrap_or("");
+            let q = format!("CREATE agent_run SET project = '{}', task_description = '{}', status = 'pending', agent_id = 'mcp', model_used = 'auto', created_at = time::now(), files_modified = [], tokens_input = 0, tokens_output = 0, duration_ms = 0",
+                project.replace('\'', ""), goal.replace('\'', ""));
+            surreal_query_ns(&q).map_err(|e| format!("DB error: {e}"))?;
+            format!("Task submitted for project '{project}'.")
+        }
+        "get_run_status" => {
+            let run_id = args.get("run_id").and_then(|v| v.as_str()).unwrap_or("");
+            let q = if run_id.contains(':') {
+                format!("SELECT status, progress_message, error_message, phase_timings FROM {run_id}")
+            } else {
+                format!("SELECT status, progress_message, error_message, phase_timings FROM type::thing('agent_run', '{}')", run_id.replace('\'', ""))
+            };
+            surreal_query_ns(&q).unwrap_or_else(|e| format!("Error: {e}"))
+        }
+        _ => return Err(format!("Unknown tool: {name}")),
+    };
+    Ok(serde_json::json!({ "content": [{ "type": "text", "text": text }] }))
+}
+
+fn surreal_query_ns(query: &str) -> Result<String, String> {
+    surreal_raw_query_full(query, "alpha_swarm", "swarm")
+}
+
+fn surreal_raw_query_full(query: &str, ns: &str, db: &str) -> Result<String, String> {
+    let full = format!("USE NS {} DB {}; {}", ns, db, query);
+    surreal_raw_query_no_headers(&full)
 }
 
 export!(WebUi);

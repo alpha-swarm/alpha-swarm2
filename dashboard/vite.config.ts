@@ -12,13 +12,15 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    host: "0.0.0.0",
+    allowedHosts: true,
     proxy: {
       "/mcp": {
-        target: "http://localhost:8090",
+        target: "http://localhost:8000",
         changeOrigin: true,
       },
       "/api": {
-        target: "http://localhost:8080",
+        target: "http://localhost:8000",
         changeOrigin: true,
       },
     },

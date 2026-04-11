@@ -14,7 +14,6 @@ export function DashboardPage() {
     { label: "Failed", value: stats.failed, className: "text-destructive" },
     { label: "Pending", value: stats.pending, className: "text-muted-foreground" },
     { label: "Total Runs", value: stats.total_runs, className: "" },
-    { label: "Tokens Out", value: `${(stats.total_tokens_out / 1000).toFixed(0)}k`, className: "" },
   ];
 
   return (

@@ -5,7 +5,7 @@
  * Transport: HTTP POST to /mcp endpoint (MCP Streamable HTTP).
  */
 
-const DEFAULT_MCP_URL = "http://localhost:8090/mcp";
+const DEFAULT_MCP_URL = "/mcp";
 
 // --- JSON-RPC types ---
 
@@ -184,9 +184,17 @@ interface SurrealResponse<T> {
 function parseResourceJson<T>(result: McpResourceResult): T[] {
   const text = result.contents[0]?.text ?? "[]";
   const parsed = JSON.parse(text);
-  // Unwrap SurrealDB response format
+  // Unwrap SurrealDB response format: [{result:{db/ns info}}, {result:[actual data]}]
+  // The first entry is always the USE NS/DB response, skip it. Take the last result array.
   if (Array.isArray(parsed) && parsed.length > 0 && "result" in parsed[0]) {
-    return (parsed as SurrealResponse<T>[]).flatMap((r) => r.result);
+    const responses = parsed as SurrealResponse<T>[];
+    // Find the last response with an array result (skip USE NS/DB which returns an object)
+    for (let i = responses.length - 1; i >= 0; i--) {
+      if (Array.isArray(responses[i].result)) {
+        return responses[i].result;
+      }
+    }
+    return [];
   }
   if (Array.isArray(parsed)) return parsed as T[];
   return [parsed as T];
