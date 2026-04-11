@@ -1,99 +1,82 @@
-import { useParams } from "react-router";
-import { Card, CardContent } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
+import { useParams, Link } from "react-router";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Waterfall } from "@/components/Waterfall";
-import { ToolCallList } from "@/components/ToolCallList";
-import { AgentCard } from "@/components/AgentCard";
-import { AttemptRow } from "@/components/AttemptRow";
+import { PlanView } from "@/components/PlanView";
+import { LiveToolStream } from "@/components/LiveToolStream";
 import { useRunDetail } from "@/hooks/useRunDetail";
 import type { AgentRun } from "@/types/swarm";
 
 function RunHeader({ run }: { run: AgentRun }) {
-  const duration = run.duration_ms > 0 ? `${(run.duration_ms / 1000).toFixed(0)}s` : "running...";
+  const dur = run.duration_ms > 0 ? `${(run.duration_ms / 1000).toFixed(0)}s` : "...";
   return (
     <div>
-      <StatusBadge status={run.status} />
-      <h1 className="text-xl font-bold mt-2">{run.task_description}</h1>
-      <p className="text-xs text-muted-foreground mt-1 font-mono">{run.id} | {run.model_used} | {duration}</p>
+      <Link to="/" className="text-xs text-muted-foreground/50 hover:text-muted-foreground">&larr; back</Link>
+      <div className="flex items-center gap-3 mt-3">
+        <StatusBadge status={run.status} />
+        <span className="text-xs font-mono text-muted-foreground/50">{dur}</span>
+      </div>
+      <h1 className="text-lg font-medium mt-2">{run.task_description}</h1>
+      <p className="text-xs font-mono text-muted-foreground/40 mt-1">{run.id} &middot; {run.model_used}</p>
     </div>
   );
 }
 
-function ProgressCard({ message }: { message: string }) {
-  return <Card><CardContent className="pt-4"><code className="text-xs whitespace-pre-wrap">{message}</code></CardContent></Card>;
-}
-
-function ErrorCard({ message }: { message: string }) {
-  return <Card className="border-destructive"><CardContent className="pt-4 text-destructive text-sm">{message}</CardContent></Card>;
-}
-
-function PhaseTimingsSection({ run }: { run: AgentRun }) {
-  if (!run.phase_timings) return null;
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div>
-      <h3 className="text-sm font-semibold mb-3">Phase Timings</h3>
-      <Waterfall timings={run.phase_timings} totalMs={run.duration_ms || undefined} />
+      <h2 className="text-xs font-semibold text-muted-foreground/60 uppercase tracking-wide mb-2">{title}</h2>
+      {children}
     </div>
   );
 }
 
-function SubAgents({ runs }: { runs: AgentRun[] }) {
-  if (runs.length === 0) return null;
+function SubAgentDetail({ run }: { run: AgentRun }) {
+  const tools = run.tool_calls ?? [];
   return (
-    <div>
-      <Separator className="mb-4" />
-      <h3 className="text-sm font-semibold mb-3">Sub-agents ({runs.length})</h3>
-      <div className="space-y-2">{runs.map((s) => <AgentCard key={s.id} run={s} />)}</div>
-    </div>
-  );
-}
-
-function ToolCalls({ calls }: { calls: AgentRun["tool_calls"] }) {
-  if (!calls || calls.length === 0) return null;
-  return (
-    <div>
-      <Separator className="mb-4" />
-      <h3 className="text-sm font-semibold mb-3">Tool Calls ({calls.length})</h3>
-      <ToolCallList calls={calls} />
-    </div>
-  );
-}
-
-function Attempts({ attempts }: { attempts: AgentRun["attempts"] }) {
-  if (!attempts || attempts.length === 0) return null;
-  return (
-    <div>
-      <Separator className="mb-4" />
-      <h3 className="text-sm font-semibold mb-3">Attempts ({attempts.length})</h3>
-      {attempts.map((a, i) => <AttemptRow key={i} attempt={a} />)}
+    <div className="border rounded p-3 space-y-2">
+      <div className="flex items-center gap-2">
+        <StatusBadge status={run.status} />
+        <span className="text-sm">{run.task_description}</span>
+      </div>
+      {run.progress_message && <pre className="text-[11px] font-mono bg-muted/30 rounded p-2">{run.progress_message}</pre>}
+      {tools.length > 0 && <LiveToolStream calls={tools} />}
     </div>
   );
 }
 
 function DiffBlock({ diff }: { diff: string }) {
-  return (
-    <div>
-      <Separator className="mb-4" />
-      <h3 className="text-sm font-semibold mb-3">Diff</h3>
-      <pre className="bg-muted/50 rounded p-3 text-xs font-mono whitespace-pre-wrap max-h-96 overflow-auto">{diff}</pre>
-    </div>
-  );
+  return <pre className="text-xs font-mono bg-muted/20 rounded p-4 max-h-[60vh] overflow-auto whitespace-pre-wrap">{diff}</pre>;
 }
 
-function RunDetailContent({ run, subRuns }: { run: AgentRun; subRuns: AgentRun[] }) {
-  return (
-    <div className="space-y-6">
-      <RunHeader run={run} />
-      {run.progress_message && <ProgressCard message={run.progress_message} />}
-      {run.error_message && <ErrorCard message={run.error_message} />}
-      <PhaseTimingsSection run={run} />
-      <SubAgents runs={subRuns} />
-      <ToolCalls calls={run.tool_calls} />
-      <Attempts attempts={run.attempts} />
-      {run.diff && <DiffBlock diff={run.diff} />}
-    </div>
-  );
+function ErrorSection({ msg }: { msg?: string | null }) {
+  if (!msg) return null;
+  return <div className="text-sm text-red-400 bg-red-400/10 rounded p-3">{msg}</div>;
+}
+
+function TimingsSection({ run }: { run: AgentRun }) {
+  if (!run.phase_timings) return null;
+  return <Section title="Phase Timings"><Waterfall timings={run.phase_timings} totalMs={run.duration_ms || undefined} /></Section>;
+}
+
+function PlanSection({ id }: { id: string | null }) {
+  if (!id) return null;
+  return <Section title="Plan"><PlanView runId={id} /></Section>;
+}
+
+function ToolsSection({ run }: { run: AgentRun }) {
+  const tools = run.tool_calls ?? [];
+  if (tools.length === 0) return null;
+  return <Section title="Tool Calls"><LiveToolStream calls={tools} /></Section>;
+}
+
+function SubsSection({ subs }: { subs: AgentRun[] }) {
+  if (subs.length === 0) return null;
+  return <Section title="Sub-Agents">{subs.map((s) => <SubAgentDetail key={s.id} run={s} />)}</Section>;
+}
+
+function DiffSection({ diff }: { diff?: string | null }) {
+  if (!diff) return null;
+  return <Section title="Diff"><DiffBlock diff={diff} /></Section>;
 }
 
 export function RunDetailPage() {
@@ -101,9 +84,19 @@ export function RunDetailPage() {
   const { run, subRuns, loading, error } = useRunDetail(id ?? "");
 
   if (!id) return <p className="text-muted-foreground">No run ID</p>;
-  if (loading) return <p className="text-muted-foreground">Loading...</p>;
-  if (error) return <p className="text-destructive">Error: {error}</p>;
-  if (!run) return <p className="text-muted-foreground">Run not found</p>;
+  if (loading) return <p className="text-muted-foreground/50 text-sm">Loading...</p>;
+  if (error) return <p className="text-destructive text-sm">Error: {error}</p>;
+  if (!run) return <p className="text-muted-foreground/50 text-sm">Run not found</p>;
 
-  return <RunDetailContent run={run} subRuns={subRuns} />;
+  return (
+    <div className="space-y-8 max-w-3xl mx-auto py-4">
+      <RunHeader run={run} />
+      <ErrorSection msg={run.error_message} />
+      <TimingsSection run={run} />
+      <PlanSection id={run.id} />
+      <ToolsSection run={run} />
+      <SubsSection subs={subRuns} />
+      <DiffSection diff={run.diff} />
+    </div>
+  );
 }

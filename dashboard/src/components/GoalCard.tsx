@@ -36,6 +36,10 @@ function needsReview(s: RunStatus) {
   return s === "planned";
 }
 
+function isDone(s: RunStatus) {
+  return s === "passed" || s === "failed" || s === "skipped";
+}
+
 function Header({ run, open }: { run: AgentRun; open: boolean }) {
   return (
     <div className="flex items-center gap-2.5">
@@ -118,7 +122,7 @@ function Body({ run, subs }: { run: AgentRun; subs: AgentRun[] }) {
       <Messages run={run} />
       <Tools run={run} subs={subs} />
       {run.diff && <Diff diff={run.diff} />}
-      {run.id && <Link to={`/run/${encodeURIComponent(run.id)}`} className="text-[10px] text-muted-foreground/40 hover:text-muted-foreground">full detail &rarr;</Link>}
+      {run.id && isDone(run.status) && <Link to={`/run/${encodeURIComponent(run.id)}`} className="text-[10px] text-muted-foreground/40 hover:text-muted-foreground">full detail &rarr;</Link>}
     </div>
   );
 }

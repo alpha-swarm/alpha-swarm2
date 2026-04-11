@@ -1025,6 +1025,16 @@ fn mcp_call_tool(name: &str, args: &serde_json::Value) -> Result<serde_json::Val
             surreal_query_ns(&format!("DELETE {}", ref_)).map_err(|e| format!("DB error: {e}"))?;
             format!("Task deleted.")
         }
+        "plan_feedback" => {
+            let run_id = args.get("run_id").and_then(|v| v.as_str()).unwrap_or("");
+            let feedback = args.get("feedback").and_then(|v| v.as_str()).unwrap_or("");
+            let safe_fb = feedback.replace('\'', "").replace('\\', "");
+            let safe_id = run_id.replace('\'', "");
+            let ref_ = if run_id.contains(':') { run_id.to_string() } else { format!("type::thing('agent_run', '{}')", safe_id.clone()) };
+            surreal_query_ns(&format!("UPDATE goal_plan SET user_feedback = '{}', status = 'draft' WHERE run_id = '{}'", safe_fb, safe_id)).map_err(|e| format!("DB error: {e}"))?;
+            surreal_query_ns(&format!("UPDATE {} SET status = 'planning', progress_message = 'Re-planning with feedback...'", ref_)).map_err(|e| format!("DB error: {e}"))?;
+            format!("Feedback sent. Re-planning...")
+        }
         "get_run_status" => {
             let run_id = args.get("run_id").and_then(|v| v.as_str()).unwrap_or("");
             let q = if run_id.contains(':') {
