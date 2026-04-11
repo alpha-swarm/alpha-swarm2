@@ -27,7 +27,7 @@ project = "default"
 # Orchestrator + Agent: same model to avoid swap overhead
 # Orchestrator: fast planner
 [tiers.orchestrator]
-model = "qwen2.5-coder:14b"
+model = "qwen3:32b"
 context_window = 16384
 time_limit_secs = 14400         # 4 hours
 token_limit = 1000000           # 1M tokens
@@ -36,7 +36,7 @@ max_backoff_secs = 60
 max_context_files = 100
 
 [tiers.agent]
-model = "qwen2.5-coder:32b"
+model = "qwen3:32b"
 context_window = 16384
 time_limit_secs = 1800          # 30 min
 token_limit = 300000            # 300K tokens
