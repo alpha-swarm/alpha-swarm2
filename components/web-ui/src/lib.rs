@@ -1008,10 +1008,22 @@ fn mcp_call_tool(name: &str, args: &serde_json::Value) -> Result<serde_json::Val
         "submit_task" => {
             let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("");
             let goal = args.get("goal").and_then(|v| v.as_str()).unwrap_or("");
-            let q = format!("CREATE agent_run SET project = '{}', task_description = '{}', status = 'pending', agent_id = 'mcp', model_used = 'auto', created_at = time::now(), files_modified = [], tokens_input = 0, tokens_output = 0, duration_ms = 0",
+            let q = format!("CREATE agent_run SET project = '{}', task_description = '{}', status = 'planning', agent_id = 'mcp', model_used = 'auto', created_at = time::now(), files_modified = [], tokens_input = 0, tokens_output = 0, duration_ms = 0",
                 project.replace('\'', ""), goal.replace('\'', ""));
             surreal_query_ns(&q).map_err(|e| format!("DB error: {e}"))?;
-            format!("Task submitted for project '{project}'.")
+            format!("Task submitted for planning in project '{project}'.")
+        }
+        "approve_task" => {
+            let run_id = args.get("run_id").and_then(|v| v.as_str()).unwrap_or("");
+            let ref_ = if run_id.contains(':') { run_id.to_string() } else { format!("type::thing('agent_run', '{}')", run_id.replace('\'', "")) };
+            surreal_query_ns(&format!("UPDATE {} SET status = 'approved'", ref_)).map_err(|e| format!("DB error: {e}"))?;
+            format!("Task approved for execution.")
+        }
+        "delete_task" => {
+            let run_id = args.get("run_id").and_then(|v| v.as_str()).unwrap_or("");
+            let ref_ = if run_id.contains(':') { run_id.to_string() } else { format!("type::thing('agent_run', '{}')", run_id.replace('\'', "")) };
+            surreal_query_ns(&format!("DELETE {}", ref_)).map_err(|e| format!("DB error: {e}"))?;
+            format!("Task deleted.")
         }
         "get_run_status" => {
             let run_id = args.get("run_id").and_then(|v| v.as_str()).unwrap_or("");

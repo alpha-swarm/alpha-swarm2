@@ -1,5 +1,4 @@
-import { useNavigate } from "react-router";
-import { Button } from "@/components/ui/button";
+import { Link } from "react-router";
 
 function ConnectionDot({ connected }: { connected: boolean }) {
   const color = connected ? "bg-emerald-400" : "bg-red-400";
@@ -7,14 +6,10 @@ function ConnectionDot({ connected }: { connected: boolean }) {
 }
 
 export function TopBar({ connected }: { connected: boolean }) {
-  const navigate = useNavigate();
   return (
     <header className="flex items-center justify-between px-4 py-2.5 border-b bg-card/50">
-      <span className="text-sm font-bold tracking-tight">alpha-swarm</span>
-      <div className="flex items-center gap-3">
-        <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => navigate("/submit")}>+ New Task</Button>
-        <ConnectionDot connected={connected} />
-      </div>
+      <Link to="/" className="text-sm font-bold tracking-tight hover:opacity-80">alpha-swarm</Link>
+      <ConnectionDot connected={connected} />
     </header>
   );
 }

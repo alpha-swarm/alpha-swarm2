@@ -108,6 +108,22 @@ export async function createPlan(project: string, goal: string): Promise<string>
   return extractText(result);
 }
 
+export async function approveTask(runId: string): Promise<string> {
+  const result = await rpc<McpToolResult>("tools/call", {
+    name: "approve_task",
+    arguments: { run_id: runId },
+  });
+  return extractText(result);
+}
+
+export async function deleteTask(runId: string): Promise<string> {
+  const result = await rpc<McpToolResult>("tools/call", {
+    name: "delete_task",
+    arguments: { run_id: runId },
+  });
+  return extractText(result);
+}
+
 export async function approvePlan(runId: string): Promise<string> {
   const result = await rpc<McpToolResult>("tools/call", {
     name: "approve_plan",
