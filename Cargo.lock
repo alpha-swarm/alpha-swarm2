@@ -146,6 +146,7 @@ dependencies = [
  "crossterm",
  "futures",
  "ratatui",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "swarm-events",
