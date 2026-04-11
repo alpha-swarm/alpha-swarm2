@@ -10,83 +10,89 @@ import { useRunDetail } from "@/hooks/useRunDetail";
 import type { AgentRun } from "@/types/swarm";
 
 function RunHeader({ run }: { run: AgentRun }) {
-  const duration = run.duration_ms > 0
-    ? `${(run.duration_ms / 1000).toFixed(0)}s`
-    : "running...";
-
+  const duration = run.duration_ms > 0 ? `${(run.duration_ms / 1000).toFixed(0)}s` : "running...";
   return (
     <div>
       <StatusBadge status={run.status} />
       <h1 className="text-xl font-bold mt-2">{run.task_description}</h1>
-      <p className="text-xs text-muted-foreground mt-1 font-mono">
-        {run.id} | {run.model_used} | {duration}
-      </p>
+      <p className="text-xs text-muted-foreground mt-1 font-mono">{run.id} | {run.model_used} | {duration}</p>
     </div>
   );
 }
 
-function RunSections({ run, subRuns }: { run: AgentRun; subRuns: AgentRun[] }) {
+function ProgressCard({ message }: { message: string }) {
+  return <Card><CardContent className="pt-4"><code className="text-xs whitespace-pre-wrap">{message}</code></CardContent></Card>;
+}
+
+function ErrorCard({ message }: { message: string }) {
+  return <Card className="border-destructive"><CardContent className="pt-4 text-destructive text-sm">{message}</CardContent></Card>;
+}
+
+function PhaseTimingsSection({ run }: { run: AgentRun }) {
+  if (!run.phase_timings) return null;
   return (
-    <>
-      {run.progress_message && (
-        <Card>
-          <CardContent className="pt-4">
-            <code className="text-xs whitespace-pre-wrap">{run.progress_message}</code>
-          </CardContent>
-        </Card>
-      )}
+    <div>
+      <h3 className="text-sm font-semibold mb-3">Phase Timings</h3>
+      <Waterfall timings={run.phase_timings} totalMs={run.duration_ms || undefined} />
+    </div>
+  );
+}
 
-      {run.error_message && (
-        <Card className="border-destructive">
-          <CardContent className="pt-4 text-destructive text-sm">{run.error_message}</CardContent>
-        </Card>
-      )}
+function SubAgents({ runs }: { runs: AgentRun[] }) {
+  if (runs.length === 0) return null;
+  return (
+    <div>
+      <Separator className="mb-4" />
+      <h3 className="text-sm font-semibold mb-3">Sub-agents ({runs.length})</h3>
+      <div className="space-y-2">{runs.map((s) => <AgentCard key={s.id} run={s} />)}</div>
+    </div>
+  );
+}
 
-      {run.phase_timings && (
-        <div>
-          <h3 className="text-sm font-semibold mb-3">Phase Timings</h3>
-          <Waterfall timings={run.phase_timings} totalMs={run.duration_ms || undefined} />
-        </div>
-      )}
+function ToolCalls({ calls }: { calls: AgentRun["tool_calls"] }) {
+  if (!calls || calls.length === 0) return null;
+  return (
+    <div>
+      <Separator className="mb-4" />
+      <h3 className="text-sm font-semibold mb-3">Tool Calls ({calls.length})</h3>
+      <ToolCallList calls={calls} />
+    </div>
+  );
+}
 
-      {subRuns.length > 0 && (
-        <div>
-          <Separator className="mb-4" />
-          <h3 className="text-sm font-semibold mb-3">Sub-agents ({subRuns.length})</h3>
-          <div className="space-y-2">
-            {subRuns.map((sub) => (
-              <AgentCard key={sub.id} run={sub} />
-            ))}
-          </div>
-        </div>
-      )}
+function Attempts({ attempts }: { attempts: AgentRun["attempts"] }) {
+  if (!attempts || attempts.length === 0) return null;
+  return (
+    <div>
+      <Separator className="mb-4" />
+      <h3 className="text-sm font-semibold mb-3">Attempts ({attempts.length})</h3>
+      {attempts.map((a, i) => <AttemptRow key={i} attempt={a} />)}
+    </div>
+  );
+}
 
-      {(run.tool_calls?.length ?? 0) > 0 && (
-        <div>
-          <Separator className="mb-4" />
-          <h3 className="text-sm font-semibold mb-3">Tool Calls ({run.tool_calls?.length ?? 0})</h3>
-          <ToolCallList calls={run.tool_calls ?? []} />
-        </div>
-      )}
+function DiffBlock({ diff }: { diff: string }) {
+  return (
+    <div>
+      <Separator className="mb-4" />
+      <h3 className="text-sm font-semibold mb-3">Diff</h3>
+      <pre className="bg-muted/50 rounded p-3 text-xs font-mono whitespace-pre-wrap max-h-96 overflow-auto">{diff}</pre>
+    </div>
+  );
+}
 
-      {(run.attempts?.length ?? 0) > 0 && (
-        <div>
-          <Separator className="mb-4" />
-          <h3 className="text-sm font-semibold mb-3">Attempts ({run.attempts?.length ?? 0})</h3>
-          {(run.attempts ?? []).map((a, i) => <AttemptRow key={i} attempt={a} />)}
-        </div>
-      )}
-
-      {run.diff && (
-        <div>
-          <Separator className="mb-4" />
-          <h3 className="text-sm font-semibold mb-3">Diff</h3>
-          <pre className="bg-muted/50 rounded p-3 text-xs font-mono whitespace-pre-wrap max-h-96 overflow-auto">
-            {run.diff}
-          </pre>
-        </div>
-      )}
-    </>
+function RunDetailContent({ run, subRuns }: { run: AgentRun; subRuns: AgentRun[] }) {
+  return (
+    <div className="space-y-6">
+      <RunHeader run={run} />
+      {run.progress_message && <ProgressCard message={run.progress_message} />}
+      {run.error_message && <ErrorCard message={run.error_message} />}
+      <PhaseTimingsSection run={run} />
+      <SubAgents runs={subRuns} />
+      <ToolCalls calls={run.tool_calls} />
+      <Attempts attempts={run.attempts} />
+      {run.diff && <DiffBlock diff={run.diff} />}
+    </div>
   );
 }
 
@@ -99,10 +105,5 @@ export function RunDetailPage() {
   if (error) return <p className="text-destructive">Error: {error}</p>;
   if (!run) return <p className="text-muted-foreground">Run not found</p>;
 
-  return (
-    <div className="space-y-6">
-      <RunHeader run={run} />
-      <RunSections run={run} subRuns={subRuns} />
-    </div>
-  );
+  return <RunDetailContent run={run} subRuns={subRuns} />;
 }

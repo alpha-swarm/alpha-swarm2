@@ -41,44 +41,30 @@ function buildPhases(timings: PhaseTimingRecord): WaterfallPhase[] {
   return phases;
 }
 
-function WaterfallBar({ phase, total, isHovered, onHover, onLeave }: {
-  phase: WaterfallPhase;
-  total: number;
-  isHovered: boolean;
-  onHover: () => void;
-  onLeave: () => void;
-}) {
+function barStyle(phase: WaterfallPhase, total: number, hovered: boolean) {
   const leftPct = (phase.offset_ms / total) * 100;
   const widthPct = Math.max((phase.duration_ms / total) * 100, MIN_BAR_WIDTH_PCT);
+  return { leftPct, widthPct, opacity: hovered ? 1 : 0.8 };
+}
 
+function BarLabel({ phase, leftPct, widthPct }: { phase: WaterfallPhase; leftPct: number; widthPct: number }) {
+  const bright = widthPct > LABEL_THRESHOLD_PCT;
   return (
-    <div
-      className="relative h-7 group"
-      onMouseEnter={onHover}
-      onMouseLeave={onLeave}
-    >
+    <div className="absolute inset-0 flex items-center px-2 text-[11px] font-medium pointer-events-none">
+      <span className="truncate" style={{ marginLeft: `${leftPct}%`, color: bright ? "#fff" : "var(--foreground)", textShadow: bright ? "0 1px 2px rgba(0,0,0,0.3)" : "none" }}>
+        {phase.label}
+      </span>
+    </div>
+  );
+}
+
+function WaterfallBar({ phase, total, isHovered, onHover, onLeave }: { phase: WaterfallPhase; total: number; isHovered: boolean; onHover: () => void; onLeave: () => void }) {
+  const { leftPct, widthPct, opacity } = barStyle(phase, total, isHovered);
+  return (
+    <div className="relative h-7 group" onMouseEnter={onHover} onMouseLeave={onLeave}>
       <div className="absolute inset-0 rounded bg-muted/30" />
-      <div
-        className="absolute top-0 h-full rounded transition-opacity"
-        style={{
-          left: `${leftPct}%`,
-          width: `${widthPct}%`,
-          backgroundColor: phase.color,
-          opacity: isHovered ? 1 : 0.8,
-        }}
-      />
-      <div className="absolute inset-0 flex items-center px-2 text-[11px] font-medium pointer-events-none">
-        <span
-          className="truncate"
-          style={{
-            marginLeft: `${leftPct}%`,
-            color: widthPct > LABEL_THRESHOLD_PCT ? "#fff" : "var(--foreground)",
-            textShadow: widthPct > LABEL_THRESHOLD_PCT ? "0 1px 2px rgba(0,0,0,0.3)" : "none",
-          }}
-        >
-          {phase.label}
-        </span>
-      </div>
+      <div className="absolute top-0 h-full rounded transition-opacity" style={{ left: `${leftPct}%`, width: `${widthPct}%`, backgroundColor: phase.color, opacity }} />
+      <BarLabel phase={phase} leftPct={leftPct} widthPct={widthPct} />
     </div>
   );
 }

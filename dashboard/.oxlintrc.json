@@ -4,7 +4,8 @@
     "no-unused-vars": "warn",
     "no-console": "off",
     "react/no-direct-mutation-state": "error",
-    "complexity": ["warn", { "max": 10 }],
-    "max-lines-per-function": ["warn", { "max": 60 }]
-  }
+    "complexity": ["error", { "max": 6 }],
+    "max-lines-per-function": ["error", { "max": 40 }]
+  },
+  "ignorePatterns": ["src/components/ui/**"]
 }

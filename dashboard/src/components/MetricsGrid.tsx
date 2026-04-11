@@ -6,29 +6,33 @@ interface MetricItem {
   className?: string;
 }
 
-interface MetricsGridProps {
+interface Props {
   items: MetricItem[];
   columns?: string;
   compact?: boolean;
 }
 
-export function MetricsGrid({ items, columns = "grid-cols-5", compact }: MetricsGridProps) {
+const COMPACT = { hdr: "pb-1 pt-3 px-3", lbl: "text-[10px]", val: "text-xl", cnt: "px-3 pb-3" };
+const NORMAL = { hdr: "pb-2", lbl: "text-xs", val: "text-2xl", cnt: "" };
+
+function MetricCard({ item, compact }: { item: MetricItem; compact: boolean }) {
+  const s = compact ? COMPACT : NORMAL;
+  return (
+    <Card>
+      <CardHeader className={s.hdr}>
+        <CardTitle className={`${s.lbl} text-muted-foreground font-normal`}>{item.label}</CardTitle>
+      </CardHeader>
+      <CardContent className={s.cnt}>
+        <span className={`${s.val} font-bold ${item.className ?? ""}`}>{item.value ?? 0}</span>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function MetricsGrid({ items, columns = "grid-cols-5", compact }: Props) {
   return (
     <div className={`grid ${columns} gap-3`}>
-      {items.map((item) => (
-        <Card key={item.label}>
-          <CardHeader className={compact ? "pb-1 pt-3 px-3" : "pb-2"}>
-            <CardTitle className={`${compact ? "text-[10px]" : "text-xs"} text-muted-foreground font-normal`}>
-              {item.label}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className={compact ? "px-3 pb-3" : ""}>
-            <span className={`${compact ? "text-xl" : "text-2xl"} font-bold ${item.className ?? ""}`}>
-              {item.value ?? 0}
-            </span>
-          </CardContent>
-        </Card>
-      ))}
+      {items.map((i) => <MetricCard key={i.label} item={i} compact={!!compact} />)}
     </div>
   );
 }

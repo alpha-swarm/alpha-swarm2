@@ -67,8 +67,7 @@ function ProjectRow({ project, onDelete }: { project: Project; onDelete: (name: 
   );
 }
 
-export function ProjectsPage() {
-  const { projects, loading, error, refetch } = useProjects();
+function useProjectActions(refetch: () => void) {
   const [showForm, setShowForm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -88,6 +87,33 @@ export function ProjectsPage() {
     refetch();
   };
 
+  return { showForm, setShowForm, submitting, handleCreate, handleDelete };
+}
+
+function ProjectTable({ projects, onDelete }: { projects: Project[]; onDelete: (name: string) => void }) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Name</TableHead>
+          <TableHead>Repository</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead className="w-32">Actions</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {projects.map((p) => (
+          <ProjectRow key={p.name} project={p} onDelete={onDelete} />
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+export function ProjectsPage() {
+  const { projects, loading, error, refetch } = useProjects();
+  const { showForm, setShowForm, submitting, handleCreate, handleDelete } = useProjectActions(refetch);
+
   if (loading) return <p className="text-muted-foreground">Loading...</p>;
   if (error) return <p className="text-destructive">Error: {error}</p>;
 
@@ -100,25 +126,9 @@ export function ProjectsPage() {
         </Button>
       </div>
       {showForm && <CreateProjectForm submitting={submitting} onCreate={handleCreate} />}
-      {projects.length === 0 ? (
-        <p className="text-muted-foreground">No projects yet.</p>
-      ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Repository</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="w-32">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {projects.map((p) => (
-              <ProjectRow key={p.name} project={p} onDelete={handleDelete} />
-            ))}
-          </TableBody>
-        </Table>
-      )}
+      {projects.length === 0
+        ? <p className="text-muted-foreground">No projects yet.</p>
+        : <ProjectTable projects={projects} onDelete={handleDelete} />}
     </div>
   );
 }

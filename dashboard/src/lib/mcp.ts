@@ -181,20 +181,24 @@ interface SurrealResponse<T> {
   status: string;
 }
 
+function findLastArrayResult<T>(responses: SurrealResponse<T>[]): T[] {
+  for (let i = responses.length - 1; i >= 0; i--) {
+    if (Array.isArray(responses[i].result)) {
+      return responses[i].result;
+    }
+  }
+  return [];
+}
+
+function isSurrealFormat(parsed: unknown): boolean {
+  return Array.isArray(parsed) && parsed.length > 0 && "result" in (parsed as Record<string, unknown>[])[0];
+}
+
 function parseResourceJson<T>(result: McpResourceResult): T[] {
   const text = result.contents[0]?.text ?? "[]";
   const parsed = JSON.parse(text);
-  // Unwrap SurrealDB response format: [{result:{db/ns info}}, {result:[actual data]}]
-  // The first entry is always the USE NS/DB response, skip it. Take the last result array.
-  if (Array.isArray(parsed) && parsed.length > 0 && "result" in parsed[0]) {
-    const responses = parsed as SurrealResponse<T>[];
-    // Find the last response with an array result (skip USE NS/DB which returns an object)
-    for (let i = responses.length - 1; i >= 0; i--) {
-      if (Array.isArray(responses[i].result)) {
-        return responses[i].result;
-      }
-    }
-    return [];
+  if (isSurrealFormat(parsed)) {
+    return findLastArrayResult<T>(parsed as SurrealResponse<T>[]);
   }
   if (Array.isArray(parsed)) return parsed as T[];
   return [parsed as T];

@@ -19,7 +19,7 @@ beforeEach(() => {
   mockFetch.mockReset();
 });
 
-describe("MCP Client", () => {
+describe("MCP Client — initialize", () => {
   it("sends initialize request", async () => {
     mockFetch.mockResolvedValueOnce(mockJsonRpcResponse({
       protocolVersion: "2025-11-25",
@@ -36,6 +36,21 @@ describe("MCP Client", () => {
     expect(body.method).toBe("initialize");
   });
 
+  it("throws on MCP error response", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers(),
+      json: () => Promise.resolve({
+        jsonrpc: "2.0", id: 1,
+        error: { code: -32601, message: "Method not found" },
+      }),
+    });
+
+    await expect(initialize()).rejects.toThrow("Method not found");
+  });
+});
+
+describe("MCP Client — submitTask", () => {
   it("sends tools/call for submitTask", async () => {
     mockFetch.mockResolvedValueOnce(mockJsonRpcResponse({
       content: [{ type: "text", text: "Task submitted. Run ID: agent_run:abc123" }],
@@ -51,18 +66,5 @@ describe("MCP Client", () => {
     expect(body.params.name).toBe("submit_task");
     expect(body.params.arguments.project).toBe("my-project");
     expect(body.params.arguments.goal).toBe("Add tests");
-  });
-
-  it("throws on MCP error response", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      headers: new Headers(),
-      json: () => Promise.resolve({
-        jsonrpc: "2.0", id: 1,
-        error: { code: -32601, message: "Method not found" },
-      }),
-    });
-
-    await expect(initialize()).rejects.toThrow("Method not found");
   });
 });
