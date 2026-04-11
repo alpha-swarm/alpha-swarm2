@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { StatPills } from "@/components/StatPills";
 import { GoalCard } from "@/components/GoalCard";
+import { ActivityFeed } from "@/components/ActivityFeed";
 import { Button } from "@/components/ui/button";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useLiveAgents } from "@/hooks/useLiveAgents";
 import { useRuns } from "@/hooks/useRuns";
 import { useProjects } from "@/hooks/useProjects";
+import { useNatsEvents } from "@/hooks/useNatsEvents";
 import { createProject, deleteProject, submitTask } from "@/lib/mcp";
 import type { AgentRun, Project } from "@/types/swarm";
 
@@ -92,31 +94,35 @@ function ProjectAccordion({ p, onDelete }: { p: Project; onDelete: () => void })
   );
 }
 
+function AddProjectButton({ showAdd, onToggle }: { showAdd: boolean; onToggle: () => void }) {
+  return (
+    <Button size="sm" variant="ghost" className="h-6 text-[10px]" onClick={onToggle}>
+      {showAdd ? "cancel" : "+ project"}
+    </Button>
+  );
+}
+
 export function DashboardPage() {
   const { stats, loading } = useDashboard();
   const { projects, refetch } = useProjects();
+  const { events } = useNatsEvents();
   const [showAdd, setShowAdd] = useState(false);
 
   if (loading) return <p className="text-sm text-muted-foreground/50">Loading...</p>;
 
-  const handleDelete = async (name: string) => {
-    await deleteProject(name);
-    refetch();
-  };
+  const handleDelete = async (name: string) => { await deleteProject(name); refetch(); };
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         {stats && <StatPills stats={stats} />}
-        <Button size="sm" variant="ghost" className="h-6 text-[10px]" onClick={() => setShowAdd(!showAdd)}>
-          {showAdd ? "cancel" : "+ project"}
-        </Button>
+        <AddProjectButton showAdd={showAdd} onToggle={() => setShowAdd(!showAdd)} />
       </div>
       {showAdd && <CreateProjectForm onCreated={() => { refetch(); setShowAdd(false); }} />}
+      {events.length > 0 && <ActivityFeed events={events} />}
       <div className="space-y-2">
         {projects.map((p) => <ProjectAccordion key={p.name} p={p} onDelete={() => handleDelete(p.name)} />)}
       </div>
-      {projects.length === 0 && <p className="text-sm text-muted-foreground/50 py-4 text-center">Add a project to get started.</p>}
     </div>
   );
 }

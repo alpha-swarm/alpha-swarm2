@@ -1,43 +1,36 @@
 import { Badge } from "@/components/ui/badge";
-import type { StreamEvent } from "@/hooks/useEventStream";
+import type { NatsEvent } from "@/hooks/useNatsEvents";
 
-const EVENT_COLORS: Record<string, string> = {
-  agent_started: "bg-blue-500",
-  agent_finished: "bg-green-500",
-  agent_failed: "bg-red-500",
-  status: "bg-gray-500",
-};
-
-function EventDot({ type }: { type: string }) {
-  return <div className={`w-2 h-2 rounded-full ${EVENT_COLORS[type] ?? "bg-gray-400"}`} />;
+function eventType(subject: string) {
+  const parts = subject.split(".");
+  return parts.slice(2).join(".");
 }
 
-function EventRow({ event }: { event: StreamEvent }) {
+function EventDot({ subject }: { subject: string }) {
+  const type = eventType(subject);
+  const color = type.includes("started") ? "bg-blue-400" : type.includes("finished") ? "bg-emerald-400" : type.includes("failed") ? "bg-red-400" : type.includes("progress") ? "bg-amber-400" : "bg-gray-400";
+  return <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${color}`} />;
+}
+
+function EventRow({ event }: { event: NatsEvent }) {
   const age = Math.round((Date.now() - event.timestamp) / 1000);
-  const label = String(event.data.task ?? event.data.message ?? event.type).slice(0, 80);
+  const type = eventType(event.subject);
+  const label = String(event.data.task ?? event.data.action ?? event.data.goal ?? type).slice(0, 60);
   return (
-    <div className="flex items-center gap-2 py-1.5 text-xs">
-      <EventDot type={event.type} />
-      <Badge variant="outline" className="text-[9px] shrink-0">{event.type}</Badge>
-      <span className="truncate flex-1 text-muted-foreground">{label}</span>
-      <span className="text-[10px] text-muted-foreground shrink-0">{age}s ago</span>
+    <div className="flex items-center gap-1.5 py-0.5 text-[10px]">
+      <EventDot subject={event.subject} />
+      <Badge variant="outline" className="text-[8px] px-1 py-0 h-3.5 shrink-0">{type}</Badge>
+      <span className="truncate flex-1 text-muted-foreground/60">{label}</span>
+      <span className="text-muted-foreground/30 shrink-0 tabular-nums">{age}s</span>
     </div>
   );
 }
 
-export function ActivityFeed({ events, connected }: { events: StreamEvent[]; connected: boolean }) {
-  if (events.length === 0) {
-    return <p className="text-xs text-muted-foreground">No events yet. {connected ? "Connected." : "Connecting..."}</p>;
-  }
+export function ActivityFeed({ events }: { events: NatsEvent[] }) {
+  if (events.length === 0) return null;
   return (
-    <div>
-      <div className="flex items-center gap-2 mb-2">
-        <h3 className="text-sm font-semibold">Live Activity</h3>
-        <div className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`} />
-      </div>
-      <div className="max-h-48 overflow-auto space-y-0.5">
-        {events.slice(0, 20).map((e, i) => <EventRow key={i} event={e} />)}
-      </div>
+    <div className="max-h-32 overflow-auto space-y-0">
+      {events.slice(0, 30).map((e, i) => <EventRow key={i} event={e} />)}
     </div>
   );
 }

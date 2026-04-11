@@ -1,9 +1,9 @@
 import { Outlet } from "react-router";
 import { TopBar } from "@/components/TopBar";
-import { useEventStream } from "@/hooks/useEventStream";
+import { useNatsEvents } from "@/hooks/useNatsEvents";
 
 export function Layout() {
-  const { connected } = useEventStream();
+  const { connected } = useNatsEvents();
   return (
     <div className="min-h-screen bg-background">
       <TopBar connected={connected} />
