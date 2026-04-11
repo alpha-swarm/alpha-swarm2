@@ -496,6 +496,7 @@ impl SwarmRunner {
                     let store = self.store.clone();
                     let project = self.project.clone();
                     let parent_id = self.parent_run_id.clone();
+                    let nats_client_clone = self.nats_client.clone();
                     let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
                         .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
 
@@ -504,6 +505,7 @@ impl SwarmRunner {
                         let task_id_for_progress = parent_id.clone().unwrap_or_default();
                         let store_for_progress = store.clone();
 
+                        let project_for_progress = project.clone();
                         let agent = Agent::new(Arc::clone(&router), &wt_path);
                         let mut agent = if let Some(kb) = store {
                             agent.with_knowledge(KnowledgeConfig {
@@ -514,6 +516,7 @@ impl SwarmRunner {
 
                         if let Some(progress_store) = store_for_progress {
                             let tid = task_id_for_progress.clone();
+                            let nats_for_progress = nats_client_clone.clone();
                             agent = agent.with_progress(move |p: agent_core::AgentProgress| {
                                 let msg = format!("Step {}/{}: {} → {}", p.step, p.max_steps, p.action, p.result.chars().take(80).collect::<String>());
                                 let tokens_msg = format!("{}in/{}out, {} edits", p.tokens_in, p.tokens_out, p.edits_count);
@@ -526,9 +529,23 @@ impl SwarmRunner {
                                     format!("UPDATE type::thing('agent_run', '{}') SET progress_message = '{}', last_activity_at = '{}'", tid, safe, now)
                                 } else { return; };
                                 let store = progress_store.clone();
+                                let nats = nats_for_progress.clone();
+                                let proj = project_for_progress.clone();
+                                let run_id = tid.clone();
                                 tokio::task::block_in_place(|| {
                                     tokio::runtime::Handle::current().block_on(async {
                                         let _ = store.db_query_raw(&query).await;
+                                        // Publish real-time progress event via NATS
+                                        if let Some(ref nc) = nats {
+                                            let event = serde_json::to_vec(&swarm_events::SwarmEvent::AgentProgress {
+                                                project: proj, run_id, agent_id: "agent".into(),
+                                                step: p.step, max_steps: p.max_steps,
+                                                action: p.action.clone(), result_preview: p.result.chars().take(200).collect(),
+                                                tokens_in: p.tokens_in, tokens_out: p.tokens_out, edits_count: p.edits_count as u32,
+                                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                            }).unwrap_or_default();
+                                            let _ = nc.publish(format!("alpha-swarm.{}.agent.progress", "alpha-swarm2"), event.into()).await;
+                                        }
                                     });
                                 });
                             });

@@ -4662,6 +4662,7 @@ dependencies = [
  "serde",
  "serde_json",
  "swarm-config",
+ "swarm-events",
  "swarm-tools",
  "tokio",
  "tracing",

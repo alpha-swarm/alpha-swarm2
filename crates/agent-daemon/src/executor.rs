@@ -546,6 +546,12 @@ async fn handle_execute(
                 .into_iter()
                 .collect();
 
+            // Collect tool calls from all sub-agents
+            final_run.tool_calls = result.results.iter()
+                .filter_map(|r| r.agent_result.as_ref())
+                .flat_map(|a| a.tool_calls.iter().cloned())
+                .collect();
+
             // Collect errors
             let agent_errors: Vec<String> = result.results.iter()
                 .filter_map(|r| r.error.as_ref())

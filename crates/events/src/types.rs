@@ -68,6 +68,33 @@ pub enum SwarmEvent {
         goal: String,
         timestamp: String,
     },
+    /// Real-time tool call event — published as each tool executes.
+    ToolCallExecuted {
+        project: String,
+        run_id: String,
+        agent_id: String,
+        step: u32,
+        tool: String,
+        params_preview: String,
+        result_preview: String,
+        is_error: bool,
+        duration_ms: u64,
+        timestamp: String,
+    },
+    /// Real-time progress update — published on each agent step.
+    AgentProgress {
+        project: String,
+        run_id: String,
+        agent_id: String,
+        step: u32,
+        max_steps: u32,
+        action: String,
+        result_preview: String,
+        tokens_in: u32,
+        tokens_out: u32,
+        edits_count: u32,
+        timestamp: String,
+    },
 }
 
 impl SwarmEvent {
@@ -80,6 +107,8 @@ impl SwarmEvent {
             Self::SwarmCompleted { project, .. } => format!("alpha-swarm.{project}.swarm.completed"),
             Self::TaskSubmitted { project, .. } => format!("alpha-swarm.{project}.task.submitted"),
             Self::QualityChecked { project, .. } => format!("alpha-swarm.{project}.quality.checked"),
+            Self::ToolCallExecuted { project, .. } => format!("alpha-swarm.{project}.tool.executed"),
+            Self::AgentProgress { project, .. } => format!("alpha-swarm.{project}.agent.progress"),
         }
     }
 
@@ -91,7 +120,9 @@ impl SwarmEvent {
             | Self::SwarmPlanned { project, .. }
             | Self::SwarmCompleted { project, .. }
             | Self::QualityChecked { project, .. }
-            | Self::TaskSubmitted { project, .. } => project,
+            | Self::TaskSubmitted { project, .. }
+            | Self::ToolCallExecuted { project, .. }
+            | Self::AgentProgress { project, .. } => project,
         }
     }
 
