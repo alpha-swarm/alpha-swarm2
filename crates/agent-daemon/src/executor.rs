@@ -358,7 +358,8 @@ async fn handle_execute(
             .with_store(Arc::clone(&store))
             .with_parent_run_id(task_id)
             .with_max_concurrent(config.resources.max_concurrent_agents)
-            .with_planner_tier(config.tiers.orchestrator.clone());
+            .with_planner_tier(config.tiers.orchestrator.clone())
+            .with_depth(config.resources.max_sub_plan_depth);
 
         // Zero-disk mode: opt-in via ZERO_DISK=1 (not just GITHUB_TOKEN)
         // GITHUB_TOKEN is used for PR creation regardless

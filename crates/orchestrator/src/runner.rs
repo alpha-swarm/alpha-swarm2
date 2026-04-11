@@ -79,6 +79,8 @@ pub struct SwarmRunner {
     planner_tier: swarm_config::TierConfig,
     /// When set, use GitHub API + VirtWorkspace instead of disk clone.
     github: Option<GitHubRepo>,
+    /// Remaining depth for recursive sub-planning (0 = no sub-plans).
+    depth: u32,
 }
 
 /// Default concurrency when not configured
@@ -102,6 +104,7 @@ impl SwarmRunner {
             nats_client: None,
             planner_tier: swarm_config::TierConfig::orchestrator(),
             github: None,
+            depth: 0,
         }
     }
 
@@ -127,6 +130,12 @@ impl SwarmRunner {
 
     pub fn with_planner_tier(mut self, tier: swarm_config::TierConfig) -> Self {
         self.planner_tier = tier;
+        self
+    }
+
+    /// Set recursion depth for sub-planning (0 = flat, no sub-plans).
+    pub fn with_depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
         self
     }
 
@@ -417,86 +426,153 @@ impl SwarmRunner {
                 }
             }
         } else {
-            // Disk mode: use MemTreeManager (existing behavior)
+            // Disk mode: wave-based execution with dependency ordering
             let mut mem_manager = MemTreeManager::new(&self.repo_path);
-            let mut agent_paths = Vec::new();
+            let mut completed: std::collections::HashMap<String, TaskRunResult> = std::collections::HashMap::new();
+            let mut completed_summaries: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            let task_map: std::collections::HashMap<String, SubTask> = tasks.iter().map(|t| (t.id.clone(), t.clone())).collect();
 
-            for task in &tasks {
-                let ws_path = mem_manager.create(&task.id, &task.files)
-                    .with_context(|| format!("Failed to create workspace for {}", task.id))?;
-                agent_paths.push((task.clone(), ws_path));
-            }
+            while completed.len() < tasks.len() {
+                // Find ready tasks: all depends_on satisfied
+                let ready: Vec<String> = tasks.iter()
+                    .filter(|t| !completed.contains_key(&t.id))
+                    .filter(|t| t.depends_on.iter().all(|d| completed.contains_key(d)))
+                    .map(|t| t.id.clone())
+                    .collect();
 
-            let semaphore = Arc::new(tokio::sync::Semaphore::new(self.max_concurrent));
-            let mut join_set = tokio::task::JoinSet::new();
+                if ready.is_empty() {
+                    warn!("No ready tasks but {} incomplete — possible cycle", tasks.len() - completed.len());
+                    break;
+                }
 
-            for (task, wt_path) in agent_paths {
-                let sem = Arc::clone(&semaphore);
-                let router = Arc::clone(&self.router);
-                let ollama = Arc::clone(&self.ollama);
-                let store = self.store.clone();
-                let project = self.project.clone();
-                let parent_id = self.parent_run_id.clone();
-                let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
-                    .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
+                let wave_size = ready.len().min(self.max_concurrent);
+                let wave_tasks: Vec<String> = ready.into_iter().take(wave_size).collect();
+                info!(wave = wave_tasks.len(), remaining = tasks.len() - completed.len(), "Starting wave");
 
-                join_set.spawn(async move {
-                    let _permit = sem.acquire().await.expect("semaphore closed");
-                    let task_id_for_progress = parent_id.clone().unwrap_or_default();
-                    let store_for_progress = store.clone();
+                // Create workspaces for this wave
+                let mut wave_paths = Vec::new();
+                for task_id in &wave_tasks {
+                    let task = &task_map[task_id];
+                    let ws_path = mem_manager.create(&task.id, &task.files)
+                        .with_context(|| format!("Failed to create workspace for {}", task.id))?;
 
-                    let agent = Agent::new(Arc::clone(&router), &wt_path);
-                    let mut agent = if let Some(kb) = store {
-                        agent.with_knowledge(KnowledgeConfig {
-                            store: kb, embedder: ollama, embed_model, project,
-                            skip_threshold: 0.9, parent_run_id: parent_id,
-                        })
-                    } else { agent };
+                    // Copy modified files from dependency workspaces
+                    for dep_id in &task.depends_on {
+                        if let Some(dep_ws) = mem_manager.workspace_path(dep_id) {
+                            if let Some(dep_result) = completed.get(dep_id) {
+                                for file_path in &dep_result.task.files {
+                                    let src = dep_ws.join(file_path);
+                                    if src.exists() {
+                                        let dst = ws_path.join(file_path);
+                                        if let Some(parent) = dst.parent() {
+                                            let _ = std::fs::create_dir_all(parent);
+                                        }
+                                        let _ = std::fs::copy(&src, &dst);
+                                    }
+                                }
+                            }
+                        }
+                    }
 
-                    // Wire progress callback — writes to SurrealDB in real time
-                    if let Some(progress_store) = store_for_progress {
-                        let tid = task_id_for_progress.clone();
-                        agent = agent.with_progress(move |p: agent_core::AgentProgress| {
-                            let msg = format!("Step {}/{}: {} → {}", p.step, p.max_steps, p.action, p.result.chars().take(80).collect::<String>());
-                            let tokens_msg = format!("{}in/{}out, {} edits", p.tokens_in, p.tokens_out, p.edits_count);
-                            let full_msg = format!("{} [{}]", msg, tokens_msg);
-                            let safe = full_msg.replace('\'', "").replace('\\', "").replace('\n', " ").replace('\r', "");
-                            let now = chrono::Utc::now().to_rfc3339();
-                            let query = if tid.contains(':') {
-                                format!("UPDATE {} SET progress_message = '{}', last_activity_at = '{}'", tid, safe, now)
-                            } else if !tid.is_empty() {
-                                format!("UPDATE type::thing('agent_run', '{}') SET progress_message = '{}', last_activity_at = '{}'", tid, safe, now)
-                            } else { return; };
-                            let store = progress_store.clone();
-                            tokio::task::block_in_place(|| {
-                                tokio::runtime::Handle::current().block_on(async {
-                                    let _ = store.db_query_raw(&query).await;
+                    // Build augmented description with predecessor summaries
+                    let mut desc = task.description.clone();
+                    for dep_id in &task.depends_on {
+                        if let Some(summary) = completed_summaries.get(dep_id) {
+                            desc.push_str(&format!("\n\nPREVIOUS TASK {} OUTPUT:\n{}", dep_id, summary));
+                        }
+                    }
+
+                    wave_paths.push((task.clone(), ws_path, desc));
+                }
+
+                // Spawn wave agents
+                let semaphore = Arc::new(tokio::sync::Semaphore::new(self.max_concurrent));
+                let mut join_set = tokio::task::JoinSet::new();
+
+                for (task, wt_path, augmented_desc) in wave_paths {
+                    let sem = Arc::clone(&semaphore);
+                    let router = Arc::clone(&self.router);
+                    let ollama = Arc::clone(&self.ollama);
+                    let store = self.store.clone();
+                    let project = self.project.clone();
+                    let parent_id = self.parent_run_id.clone();
+                    let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
+                        .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
+
+                    join_set.spawn(async move {
+                        let _permit = sem.acquire().await.expect("semaphore closed");
+                        let task_id_for_progress = parent_id.clone().unwrap_or_default();
+                        let store_for_progress = store.clone();
+
+                        let agent = Agent::new(Arc::clone(&router), &wt_path);
+                        let mut agent = if let Some(kb) = store {
+                            agent.with_knowledge(KnowledgeConfig {
+                                store: kb, embedder: ollama, embed_model, project,
+                                skip_threshold: 0.9, parent_run_id: parent_id,
+                            })
+                        } else { agent };
+
+                        if let Some(progress_store) = store_for_progress {
+                            let tid = task_id_for_progress.clone();
+                            agent = agent.with_progress(move |p: agent_core::AgentProgress| {
+                                let msg = format!("Step {}/{}: {} → {}", p.step, p.max_steps, p.action, p.result.chars().take(80).collect::<String>());
+                                let tokens_msg = format!("{}in/{}out, {} edits", p.tokens_in, p.tokens_out, p.edits_count);
+                                let full_msg = format!("{} [{}]", msg, tokens_msg);
+                                let safe = full_msg.replace('\'', "").replace('\\', "").replace('\n', " ").replace('\r', "");
+                                let now = chrono::Utc::now().to_rfc3339();
+                                let query = if tid.contains(':') {
+                                    format!("UPDATE {} SET progress_message = '{}', last_activity_at = '{}'", tid, safe, now)
+                                } else if !tid.is_empty() {
+                                    format!("UPDATE type::thing('agent_run', '{}') SET progress_message = '{}', last_activity_at = '{}'", tid, safe, now)
+                                } else { return; };
+                                let store = progress_store.clone();
+                                tokio::task::block_in_place(|| {
+                                    tokio::runtime::Handle::current().block_on(async {
+                                        let _ = store.db_query_raw(&query).await;
+                                    });
                                 });
                             });
-                        });
-                    }
+                        }
 
-                    let tools = swarm_tools::ToolRegistry::with_defaults();
-                    const MAX_TOOL_STEPS: u32 = 20;
-                    let result = agent.run_with_tools(&task.description, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
-                    (task, result)
-                });
-            }
+                        let tools = swarm_tools::ToolRegistry::with_defaults();
+                        const MAX_TOOL_STEPS: u32 = 20;
+                        let result = agent.run_with_tools(&augmented_desc, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
+                        (task, result)
+                    });
+                }
 
-            while let Some(join_result) = join_set.join_next().await {
-                match join_result {
-                    Ok((task, Ok(agent_result))) => {
-                        if agent_result.applied { any_applied = true; }
-                        results.push(TaskRunResult { task, agent_result: Some(agent_result), error: None });
+                // Collect wave results
+                while let Some(join_result) = join_set.join_next().await {
+                    match join_result {
+                        Ok((task, Ok(agent_result))) => {
+                            if agent_result.applied { any_applied = true; }
+                            // Build summary for dependent tasks
+                            let summary = format!(
+                                "Modified files: {:?}. Edits: {}. Response: {}",
+                                task.files,
+                                agent_result.edits.len(),
+                                agent_result.inference_response.content.chars().take(200).collect::<String>(),
+                            );
+                            completed_summaries.insert(task.id.clone(), summary);
+                            completed.insert(task.id.clone(), TaskRunResult { task, agent_result: Some(agent_result), error: None });
+                        }
+                        Ok((task, Err(e))) => {
+                            completed_summaries.insert(task.id.clone(), format!("FAILED: {e}"));
+                            completed.insert(task.id.clone(), TaskRunResult { task, agent_result: None, error: Some(e.to_string()) });
+                        }
+                        Err(e) => { warn!("Agent panicked: {e}"); }
                     }
-                    Ok((task, Err(e))) => {
-                        results.push(TaskRunResult { task, agent_result: None, error: Some(e.to_string()) });
-                    }
-                    Err(e) => { warn!("Agent panicked: {e}"); }
                 }
             }
 
-            // Capture modified files from disk workspace into virt-git
+            // Move completed results into the results vec
+            for task in &tasks {
+                if let Some(result) = completed.remove(&task.id) {
+                    results.push(result);
+                }
+            }
+
+            // Capture modified files from disk workspaces into virt-git
             if any_applied {
                 let mut blob_store = virt_git::MemoryBlobStore::new();
                 let mut virt_ws = virt_git::VirtWorkspace::new();
