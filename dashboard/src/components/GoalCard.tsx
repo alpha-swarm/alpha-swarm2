@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Link } from "react-router";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LiveToolStream } from "@/components/LiveToolStream";
+import { PlanView } from "@/components/PlanView";
 import { Waterfall } from "@/components/Waterfall";
 import { resources } from "@/lib/mcp";
 import type { AgentRun, RunStatus } from "@/types/swarm";
@@ -74,6 +75,7 @@ function GoalBody({ run, subs }: { run: AgentRun; subs: AgentRun[] }) {
   return (
     <div className="space-y-1.5">
       {run.phase_timings && <Waterfall timings={run.phase_timings} totalMs={run.duration_ms || undefined} />}
+      {run.id && <PlanView runId={run.id} />}
       <AgentBody run={run} />
       {subs.map((s) => <SubAgentAccordion key={s.id} run={s} />)}
       {run.diff && <DiffDetails diff={run.diff} />}
