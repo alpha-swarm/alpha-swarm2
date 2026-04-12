@@ -486,12 +486,15 @@ async fn handle_execute(
                 .filter_map(|r| r.agent_result.as_ref())
                 .fold((0u32, 0u32), |(i, o), a| (i + a.inference_response.tokens_input, o + a.inference_response.tokens_output));
 
+            // Store the diff regardless of PR outcome
+            let captured_diff = result.merged_diff.clone();
+
             // Build run record with full tracking data
             let mut final_run = AgentRun::new(project, goal, "daemon", &model_str);
             final_run.status = status;
             final_run.duration_ms = duration;
             final_run.quality_gate_passed = Some(result.quality_passed && any_work_done);
-            final_run.diff = result.merged_diff;
+            final_run.diff = captured_diff;
             final_run.tokens_input = total_in;
             final_run.tokens_output = total_out;
             final_run.started_at = Some(start_time_rfc3339);
@@ -568,7 +571,18 @@ async fn handle_execute(
                 final_run.error_message = Some(agent_errors.join("\n"));
             }
 
-            // 5. Create PR if there are actual changes
+            // 5. Apply captured files to main repo for git CLI PR
+            if any_work_done {
+                for (path, content) in &result.modified_files {
+                    let full_path = repo_path.join(path);
+                    if let Some(parent) = full_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(&full_path, content);
+                }
+            }
+
+            // 6. Create PR if there are actual changes
             if any_work_done {
                 let _sub_tasks_info: Vec<(String, String, String)> = result.results.iter()
                     .map(|r| {

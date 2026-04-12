@@ -625,22 +625,37 @@ impl SwarmRunner {
                 }
             }
 
-            // Capture modified files from disk workspaces into virt-git
+            // Capture modified files from disk workspaces using git diff
             if any_applied {
                 let mut blob_store = virt_git::MemoryBlobStore::new();
                 let mut virt_ws = virt_git::VirtWorkspace::new();
                 for result in &results {
                     if result.agent_result.as_ref().is_some_and(|r| r.applied) {
-                        let ws_path = mem_manager.workspace_path(&result.task.id);
-                        for file_path in &result.task.files {
+                        let Some(ws) = mem_manager.workspace_path(&result.task.id) else { continue };
+                        // Use git diff to find ALL changed files (not just task.files)
+                        let diff_output = std::process::Command::new("git")
+                            .args(["diff", "--name-only", "HEAD"])
+                            .current_dir(ws)
+                            .output();
+                        let changed: Vec<String> = diff_output.ok()
+                            .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(String::from).collect())
+                            .unwrap_or_default();
+                        // Also check for untracked (new) files
+                        let untracked = std::process::Command::new("git")
+                            .args(["ls-files", "--others", "--exclude-standard"])
+                            .current_dir(ws)
+                            .output();
+                        let new_files: Vec<String> = untracked.ok()
+                            .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(String::from).collect())
+                            .unwrap_or_default();
+
+                        for file_path in changed.iter().chain(new_files.iter()) {
                             let orig = std::fs::read_to_string(self.repo_path.join(file_path)).unwrap_or_default();
                             virt_ws.load_file(&mut blob_store, file_path, &orig);
-                            if let Some(ws) = ws_path {
-                                if let Ok(modified) = std::fs::read_to_string(ws.join(file_path)) {
-                                    if modified != orig {
-                                        virt_ws.write_file(&mut blob_store, file_path, &modified);
-                                        captured_files.push((file_path.clone(), modified.into_bytes()));
-                                    }
+                            if let Ok(modified) = std::fs::read_to_string(ws.join(file_path)) {
+                                if modified != orig {
+                                    virt_ws.write_file(&mut blob_store, file_path, &modified);
+                                    captured_files.push((file_path.clone(), modified.into_bytes()));
                                 }
                             }
                         }
