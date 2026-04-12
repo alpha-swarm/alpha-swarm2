@@ -73,13 +73,9 @@ max_backoff_secs = 10
 max_context_files = 20
 
 # --- Inference Providers ---
-# csatapaci first (96GB, has all models), picur fallback (24GB, small models)
+# csatapaci ONLY for inference (planning + agent). No picur fallback —
+# 14b produces garbage on complex tasks. picur only does embeddings via [ollama].
 [[providers]]
 type = "ollama"
 url = "http://100.81.10.8:11434"   # csatapaci M2 Max 96GB
 priority = 1
-
-[[providers]]
-type = "ollama"
-url = "http://127.0.0.1:11434"    # picur M4 24GB — fallback
-priority = 2
