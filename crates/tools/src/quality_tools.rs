@@ -90,7 +90,12 @@ impl Tool for RunCheckTool {
         json!({"type": "object", "properties": {"crate_name": {"type": "string", "description": "Optional: specific crate to check."}}})
     }
     async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
-        let crate_flag = params.get("crate_name").and_then(|v| v.as_str()).map(|n| format!(" -p {n}")).unwrap_or_default();
+        let crate_flag = if let Some(name) = params.get("crate_name").and_then(|v| v.as_str()) {
+            format!(" -p {name}")
+        } else {
+            // Auto-detect crate from project context
+            scoped_check_cmd(ctx).replace("cargo check", "").to_string()
+        };
         let cwd = ctx.repo_path.clone();
         let start = std::time::Instant::now();
 
@@ -107,10 +112,14 @@ impl Tool for RunCheckTool {
 
         let mut parts = Vec::new();
         let mut any_err = false;
+        let per_check_limit = MAX_OUTPUT_CHARS / 3;
         for h in handles {
             if let Ok((name, result)) = h.join() {
                 if result.is_error { any_err = true; }
-                parts.push(format!("[{}] {}", name, result.content));
+                let content: String = if result.content.len() > per_check_limit {
+                    truncate_end(&result.content, per_check_limit)
+                } else { result.content };
+                parts.push(format!("[{}] {}", name, content));
             }
         }
 
