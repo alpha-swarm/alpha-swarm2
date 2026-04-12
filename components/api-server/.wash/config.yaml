@@ -1,4 +1,4 @@
 version: 2.0.1
 
 build:
-  command: "cargo build --target wasm32-wasip2 --release && cp ../../target/wasm32-wasip2/release/web_ui.wasm web-ui.wasm"
+  command: "cargo build --target wasm32-wasip2 --release && cp ../../target/wasm32-wasip2/release/api_server.wasm api-server.wasm"

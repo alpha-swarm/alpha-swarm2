@@ -1,6 +1,6 @@
-package alpha-swarm:web-ui@0.1.0;
+package alpha-swarm:api-server@0.1.0;
 
-world web-ui {
+world api-server {
     import wasi:http/outgoing-handler@0.2.0;
     import wasi:http/types@0.2.0;
     import wasi:clocks/wall-clock@0.2.0;

@@ -1,6 +1,6 @@
 wit_bindgen::generate!({
     path: "wit",
-    world: "web-ui",
+    world: "api-server",
     pub_export_macro: true,
     generate_all,
 });
@@ -9,9 +9,9 @@ use exports::wasi::http::incoming_handler::Guest;
 use wasi::http::outgoing_handler;
 use wasi::http::types::*;
 
-struct WebUi;
+struct ApiServer;
 
-impl Guest for WebUi {
+impl Guest for ApiServer {
     fn handle(request: IncomingRequest, response_out: ResponseOutparam) {
         let method = request.method();
         let path = request.path_with_query().unwrap_or_default();
@@ -1058,4 +1058,4 @@ fn surreal_raw_query_full(query: &str, ns: &str, db: &str) -> Result<String, Str
     surreal_raw_query_no_headers(&full)
 }
 
-export!(WebUi);
+export!(ApiServer);
