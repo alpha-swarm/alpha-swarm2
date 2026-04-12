@@ -226,15 +226,22 @@ impl GraphExecutor {
         let messages = vec![ChatMessage::user(prompt)];
         let options = InferenceOptions::default();
 
-        // Try streaming if Ollama backend available — enables early block detection
+        // Try streaming if Ollama backend available
         if let Some(ref ollama) = self.ollama {
             let model = options.preferred_model.clone().unwrap_or_else(|| "qwen3:32b".into());
             let blocks_found = std::sync::atomic::AtomicU32::new(0);
-            let response = ollama.chat_streaming(&model, &messages, &options, |chunk| {
+            match ollama.chat_streaming(&model, &messages, &options, |chunk| {
                 if chunk.contains(">>>") { blocks_found.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
-            }).await.context("Graph streaming LLM call failed")?;
-            debug!(blocks = blocks_found.load(std::sync::atomic::Ordering::Relaxed), tokens = response.tokens_output, "Graph streaming complete");
-            return Ok(response);
+            }).await {
+                Ok(response) => {
+                    debug!(blocks = blocks_found.load(std::sync::atomic::Ordering::Relaxed), tokens = response.tokens_output, "Graph streaming complete");
+                    return Ok(response);
+                }
+                Err(e) => {
+                    warn!(error = %e, "Graph streaming failed, falling back to router");
+                    // Fall through to router below
+                }
+            }
         }
 
         // Fallback: non-streaming via router

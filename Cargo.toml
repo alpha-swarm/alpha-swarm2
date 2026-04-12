@@ -15,7 +15,7 @@ members = [
     "crates/event-consumer",
     "crates/alpha-swarm-cli",
     "components/agent-worker",
-    "components/web-ui",
+    "components/api-server",
     "components/tool-search",
     "components/tool-web",
     "components/orchestrator-worker",

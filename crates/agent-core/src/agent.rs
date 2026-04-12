@@ -684,8 +684,14 @@ impl Agent {
 
                     // Step 1 with no structured output → fall back to simpler EDIT_FORMAT
                     if step == 1 {
-                        info!(step, content_len = content.len(), "No structured actions on step 1, falling back to standard run");
+                        warn!(step, content_len = content.len(), "No structured actions on step 1, falling back to standard run");
                         return self.run(task, file_paths, complexity).await;
+                    }
+
+                    // Step 2+ with no output → bail, don't waste more inference
+                    if step >= 2 && all_edits.is_empty() {
+                        warn!(step, "No edits after {} steps, bailing early", step);
+                        break;
                     }
 
                     info!(step, content_len = content.len(), "No parseable actions, treating as final response");

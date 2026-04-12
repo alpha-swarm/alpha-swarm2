@@ -232,6 +232,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "api-server"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6026,15 +6035,6 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "web-ui"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "wit-bindgen 0.41.0",
 ]
 
 [[package]]

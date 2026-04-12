@@ -9,11 +9,11 @@ spec:
   components:
     # === WASI Components ===
 
-    # Web UI — serves dashboard + API
-    - name: web-ui
+    # API Server — serves REST API + MCP JSON-RPC
+    - name: api-server
       type: component
       properties:
-        image: file://target/wasm32-wasip2/release/web_ui.wasm
+        image: file://target/wasm32-wasip2/release/api_server.wasm
       traits:
         - type: spreadscaler
           properties:

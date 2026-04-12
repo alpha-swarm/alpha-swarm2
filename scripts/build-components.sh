@@ -10,7 +10,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 echo "=== Building WASI components ==="
 
 COMPONENTS=(
-    "web-ui"
+    "api-server"
     "agent-worker"
     "tool-search"
     "tool-web"

@@ -41,6 +41,8 @@ RULES:
 - If task-2 needs output from task-1, set depends_on: ["task-1"]. Tasks without depends_on run in parallel.
 - Tasks that run in parallel MUST NOT modify the same file. Use depends_on if they share files.
 - Maximum 5 tasks. Most goals need 1-3.
+- If the goal lists multiple distinct changes (e.g. "X and Y and Z"), create at least one task per change.
+- The React frontend is in the dashboard/ directory, NOT in components/. components/ contains WASI backend code.
 
 For TRIVIAL single-line changes (adding an import, renaming, inserting a line):
 - Set complexity to "simple"
