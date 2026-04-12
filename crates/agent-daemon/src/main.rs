@@ -51,9 +51,18 @@ async fn main() -> Result<()> {
         let mut sorted = config.providers.clone();
         sorted.sort_by_key(|p| p.priority);
         for provider in &sorted {
-            if provider.provider_type == "ollama" {
-                info!(url = %provider.url, priority = provider.priority, "Adding Ollama provider");
-                router = router.add_backend(OllamaBackend::new(&provider.url));
+            match provider.provider_type.as_str() {
+                "ollama" => {
+                    info!(url = %provider.url, priority = provider.priority, "Adding Ollama provider");
+                    router = router.add_backend(OllamaBackend::new(&provider.url));
+                }
+                "openai" => {
+                    info!(url = %provider.url, model = %provider.model, "Adding OpenAI-compatible cloud provider");
+                    router = router.add_backend(inference_client::OpenAICompatBackend::new(
+                        &provider.url, &provider.api_key, &provider.model,
+                    ));
+                }
+                other => { warn!(provider_type = other, "Unknown provider type, skipping"); }
             }
         }
     } else {

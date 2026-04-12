@@ -232,6 +232,73 @@ impl InferenceBackend for OllamaBackend {
 }
 
 impl OllamaBackend {
+    /// Streaming chat — yields partial content chunks via a callback.
+    /// Returns the full InferenceResponse when done.
+    pub async fn chat_streaming(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        options: &InferenceOptions,
+        on_chunk: impl Fn(&str) + Send,
+    ) -> Result<InferenceResponse> {
+        use futures::StreamExt;
+
+        let ollama_messages: Vec<OllamaMessage> = messages.iter()
+            .map(|m| OllamaMessage { role: m.role.clone(), content: m.content.clone(), tool_calls: None })
+            .collect();
+
+        let request = ChatRequest {
+            model: model.to_string(),
+            messages: ollama_messages,
+            stream: true,
+            options: Some(OllamaOptions {
+                temperature: options.temperature,
+                num_ctx: options.max_tokens.map(|t| t.max(4096)),
+                stop: options.stop.clone(),
+            }),
+            tools: None,
+        };
+
+        let start = Instant::now();
+        let response = self.client.post(format!("{}/api/chat", self.base_url))
+            .json(&request).send().await.context("Failed to send streaming request")?;
+
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("Ollama streaming error: {body}");
+        }
+
+        let mut full_content = String::new();
+        let mut model_name = String::new();
+        let mut tokens_in = 0u32;
+        let mut tokens_out = 0u32;
+
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.context("Stream read error")?;
+            let text = String::from_utf8_lossy(&bytes);
+            for line in text.lines() {
+                if let Ok(resp) = serde_json::from_str::<ChatResponse>(line) {
+                    if let Some(ref msg) = resp.message {
+                        if !msg.content.is_empty() {
+                            full_content.push_str(&msg.content);
+                            on_chunk(&msg.content);
+                        }
+                    }
+                    model_name = resp.model;
+                    if resp.prompt_eval_count > 0 { tokens_in = resp.prompt_eval_count; }
+                    if resp.eval_count > 0 { tokens_out = resp.eval_count; }
+                }
+            }
+        }
+
+        Ok(InferenceResponse {
+            content: full_content, model: model_name, backend: BackendKind::Ollama,
+            tokens_input: tokens_in, tokens_output: tokens_out,
+            duration_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+
     /// Chat with native tool support. Returns the assistant message (may contain tool_calls),
     /// plus token counts and duration.
     pub async fn chat_with_tools(

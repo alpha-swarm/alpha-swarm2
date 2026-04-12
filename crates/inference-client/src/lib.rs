@@ -9,6 +9,8 @@ mod ollama;
 #[cfg(feature = "native")]
 mod router;
 #[cfg(feature = "native")]
+mod openai_compat;
+#[cfg(feature = "native")]
 pub mod mock;
 
 pub use types::*;
@@ -20,3 +22,5 @@ pub use claude::ClaudeBackend;
 pub use ollama::{OllamaBackend, OllamaTool, OllamaToolFunction, OllamaToolCall, OllamaToolCallFunction, OllamaMessage};
 #[cfg(feature = "native")]
 pub use router::InferenceRouter;
+#[cfg(feature = "native")]
+pub use openai_compat::OpenAICompatBackend;

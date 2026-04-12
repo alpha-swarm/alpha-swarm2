@@ -26,7 +26,7 @@ pub struct SwarmConfig {
 /// An inference provider configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
-    /// Provider type: "ollama" or "llamacpp"
+    /// Provider type: "ollama", "openai", or "llamacpp"
     #[serde(rename = "type")]
     pub provider_type: String,
     /// Base URL for the provider
@@ -34,6 +34,12 @@ pub struct ProviderConfig {
     /// Priority (lower = preferred)
     #[serde(default = "default_priority")]
     pub priority: u32,
+    /// API key (for cloud providers like openai/together/deepinfra)
+    #[serde(default)]
+    pub api_key: String,
+    /// Default model for this provider
+    #[serde(default)]
+    pub model: String,
     /// Specific models available on this host (optional, auto-discovered if empty)
     #[serde(default)]
     pub models: Vec<String>,

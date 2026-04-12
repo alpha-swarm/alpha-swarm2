@@ -14,7 +14,8 @@ async-trait.workspace = true
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
+futures = { version = "0.3", optional = true }
 
 [features]
 default = ["native"]
-native = ["tokio", "tracing", "reqwest"]
+native = ["tokio", "tracing", "reqwest", "futures"]
