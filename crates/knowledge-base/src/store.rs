@@ -44,7 +44,9 @@ impl KnowledgeStore {
              DEFINE TABLE IF NOT EXISTS goal_plan SCHEMALESS;
              DEFINE INDEX IF NOT EXISTS idx_plan_run ON TABLE goal_plan FIELDS run_id;
              DEFINE TABLE IF NOT EXISTS file_embedding SCHEMALESS;
-             DEFINE INDEX IF NOT EXISTS idx_file_project ON TABLE file_embedding FIELDS project, file_path;"
+             DEFINE INDEX IF NOT EXISTS idx_file_project ON TABLE file_embedding FIELDS project, file_path;
+             DEFINE TABLE IF NOT EXISTS project_index SCHEMALESS;
+             DEFINE INDEX IF NOT EXISTS idx_project_index ON TABLE project_index FIELDS project;"
         )
         .await
         .context("Failed to initialize schema")?;
@@ -288,6 +290,28 @@ impl KnowledgeStore {
 
         let row: Option<serde_json::Value> = result.take(0)?;
         Ok(row.and_then(|v| v.get("content_hash").and_then(|h| h.as_str().map(String::from))))
+    }
+
+    /// Get the last indexed git commit SHA for a project.
+    pub async fn get_last_indexed_commit(&self, project: &str) -> Result<Option<String>> {
+        let mut result = self.db.query(
+            "SELECT commit_sha FROM project_index WHERE project = $project LIMIT 1"
+        )
+        .bind(("project", project.to_string()))
+        .await.context("Failed to query last indexed commit")?;
+        let row: Option<serde_json::Value> = result.take(0)?;
+        Ok(row.and_then(|v| v.get("commit_sha").and_then(|h| h.as_str().map(String::from))))
+    }
+
+    /// Store the last indexed git commit SHA for a project.
+    pub async fn set_last_indexed_commit(&self, project: &str, commit_sha: &str) -> Result<()> {
+        self.db.query(
+            "UPSERT project_index SET project = $project, commit_sha = $sha, updated_at = time::now() WHERE project = $project"
+        )
+        .bind(("project", project.to_string()))
+        .bind(("sha", commit_sha.to_string()))
+        .await.context("Failed to store last indexed commit")?;
+        Ok(())
     }
 
     /// Find the most relevant files for a task using vector similarity.
