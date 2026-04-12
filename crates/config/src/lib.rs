@@ -60,6 +60,9 @@ pub struct ResourceConfig {
     /// Maximum depth for recursive sub-plan decomposition.
     #[serde(default = "default_max_sub_plan_depth")]
     pub max_sub_plan_depth: u32,
+    /// Max retries in graph executor fix loop before escalating to full agent.
+    #[serde(default = "default_max_graph_retries")]
+    pub max_graph_retries: u32,
     /// Monitored hosts.
     #[serde(default = "default_hosts")]
     pub hosts: Vec<HostConfig>,
@@ -67,6 +70,7 @@ pub struct ResourceConfig {
 
 fn default_max_concurrent_agents() -> usize { 2 }
 fn default_max_sub_plan_depth() -> u32 { 3 }
+fn default_max_graph_retries() -> u32 { 3 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HostConfig {
@@ -213,6 +217,7 @@ impl Default for ResourceConfig {
             check_interval_secs: 10,
             max_concurrent_agents: default_max_concurrent_agents(),
             max_sub_plan_depth: default_max_sub_plan_depth(),
+            max_graph_retries: default_max_graph_retries(),
             hosts: default_hosts(),
         }
     }

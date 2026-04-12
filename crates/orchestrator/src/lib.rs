@@ -9,6 +9,8 @@ mod planner;
 mod memtree;
 #[cfg(feature = "native")]
 mod runner;
+#[cfg(feature = "native")]
+pub mod graph;
 
 #[cfg(feature = "native")]
 pub use planner::plan_goal;

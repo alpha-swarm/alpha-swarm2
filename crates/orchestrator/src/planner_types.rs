@@ -24,6 +24,9 @@ pub struct SubTask {
     /// If set, this task can be applied directly without an LLM agent.
     #[serde(default)]
     pub edit: Option<DirectEdit>,
+    /// Graph template: "edit", "create", "refactor", "doc". If set, uses graph executor instead of chat loop.
+    #[serde(default)]
+    pub template: Option<String>,
 }
 
 /// System prompt for the planner LLM.
@@ -118,6 +121,7 @@ pub fn parse_plan(json_str: &str, repo_files: &[String]) -> Result<Vec<SubTask>,
             complexity: inference_client::Complexity::Medium,
             depends_on: Vec::new(),
             edit: None,
+            template: None,
         }]);
     }
 
@@ -356,6 +360,7 @@ mod tests {
                 complexity: Complexity::Simple,
                 depends_on: vec!["task-2".into()],
                 edit: None,
+                template: None,
             },
             SubTask {
                 id: "task-2".into(),
@@ -364,6 +369,7 @@ mod tests {
                 complexity: Complexity::Simple,
                 depends_on: vec!["task-1".into()],
                 edit: None,
+                template: None,
             },
         ];
         assert!(detect_cycle(&tasks));
@@ -379,6 +385,7 @@ mod tests {
                 complexity: Complexity::Simple,
                 depends_on: vec![],
                 edit: None,
+                template: None,
             },
             SubTask {
                 id: "task-2".into(),
@@ -387,6 +394,7 @@ mod tests {
                 complexity: Complexity::Simple,
                 depends_on: vec!["task-1".into()],
                 edit: None,
+                template: None,
             },
             SubTask {
                 id: "task-3".into(),
@@ -395,6 +403,7 @@ mod tests {
                 complexity: Complexity::Simple,
                 depends_on: vec!["task-1".into(), "task-2".into()],
                 edit: None,
+                template: None,
             },
         ];
         assert!(!detect_cycle(&tasks));
