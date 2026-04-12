@@ -226,9 +226,13 @@ impl GraphExecutor {
         let messages = vec![ChatMessage::user(prompt)];
         let options = InferenceOptions::default();
 
-        // Try streaming if Ollama backend available
+        // Try streaming if Ollama backend available AND model is known
         if let Some(ref ollama) = self.ollama {
-            let model = options.preferred_model.clone().unwrap_or_else(|| "qwen3:32b".into());
+            let Some(model) = options.preferred_model.clone() else {
+                // No preferred model — let router decide (skip streaming)
+                return self.router.chat(&messages, Complexity::Simple, &options).await
+                    .context("Graph LLM call failed");
+            };
             let blocks_found = std::sync::atomic::AtomicU32::new(0);
             match ollama.chat_streaming(&model, &messages, &options, |chunk| {
                 if chunk.contains(">>>") { blocks_found.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
