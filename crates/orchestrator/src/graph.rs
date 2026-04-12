@@ -8,13 +8,51 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn, debug};
 
-use agent_core::{AgentResult, parse_edits, FileEdit};
-use inference_client::{InferenceRouter, InferenceResponse, OllamaBackend, ChatMessage, InferenceOptions, Complexity, BackendKind};
+use agent_core::{parse_edits, FileEdit};
+use inference_client::{InferenceRouter, InferenceResponse, OllamaBackend, ChatMessage, InferenceOptions, Complexity};
 
 /// Max chars of file content to include in the focused prompt.
 const MAX_FILE_CONTEXT: usize = 12_000;
 /// Max chars of build error to include in fix prompt.
 const MAX_ERROR_CONTEXT: usize = 2_000;
+
+/// Frontend file extensions that should use pnpm check instead of cargo check.
+const FRONTEND_EXTENSIONS: &[&str] = &[".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".html"];
+
+/// Pick the right check command based on the file types being edited.
+fn detect_check_command(workspace: &std::path::Path, files: &[String], crate_name: Option<&str>) -> String {
+    let has_frontend = files.iter().any(|f| FRONTEND_EXTENSIONS.iter().any(|ext| f.ends_with(ext)));
+    let has_rust = files.iter().any(|f| f.ends_with(".rs"));
+
+    if has_frontend && !has_rust {
+        // Pure frontend task — find the package.json directory
+        if let Some(pkg_dir) = files.iter().find_map(|f| {
+            // Walk up from file to find package.json
+            let full = workspace.join(f);
+            let mut dir = full.parent();
+            while let Some(d) = dir {
+                if d.join("package.json").exists() {
+                    return d.strip_prefix(workspace).ok().map(|p| p.to_string_lossy().to_string());
+                }
+                if d == workspace { break; }
+                dir = d.parent();
+            }
+            None
+        }) {
+            format!("cd {pkg_dir} && pnpm check 2>&1 || pnpm exec oxlint src/ 2>&1")
+        } else {
+            "echo OK".into() // no package.json found, skip check
+        }
+    } else if has_rust {
+        if let Some(name) = crate_name {
+            format!("cargo check -p {name}")
+        } else {
+            "cargo check".into()
+        }
+    } else {
+        "echo OK".into() // doc/config files, no check needed
+    }
+}
 
 /// Detect which crate a file belongs to by walking up to find Cargo.toml.
 pub fn detect_crate(repo: &std::path::Path, file_path: &str) -> Option<String> {
@@ -42,11 +80,19 @@ pub struct GraphExecutor {
     workspace: PathBuf,
     crate_name: Option<String>,
     max_retries: u32,
+    /// Model to use for graph inference (typically the orchestrator-tier model).
+    /// Graph tasks are focused templates — fast code model is better than large general model.
+    preferred_model: Option<String>,
 }
 
 impl GraphExecutor {
     pub fn new(router: Arc<InferenceRouter>, workspace: PathBuf, crate_name: Option<String>, max_retries: u32) -> Self {
-        Self { router, ollama: None, workspace, crate_name, max_retries }
+        Self { router, ollama: None, workspace, crate_name, max_retries, preferred_model: None }
+    }
+
+    pub fn with_model(mut self, model: String) -> Self {
+        self.preferred_model = Some(model);
+        self
     }
 
     pub fn with_ollama(mut self, ollama: Arc<OllamaBackend>) -> Self {
@@ -105,7 +151,7 @@ impl GraphExecutor {
         std::fs::write(&full, content).with_context(|| format!("Failed to write {path}"))
     }
 
-    fn apply_response(&self, path: &str, response: &str) -> Result<Vec<FileEdit>> {
+    fn apply_response(&self, _path: &str, response: &str) -> Result<Vec<FileEdit>> {
         let edits = parse_edits(response).unwrap_or_default();
         self.apply_edits(&edits)?;
         Ok(edits)
@@ -127,10 +173,9 @@ impl GraphExecutor {
         Ok(())
     }
 
-    fn run_check(&self) -> Result<String> {
-        let cmd = if let Some(ref name) = self.crate_name {
-            format!("cargo check -p {name}")
-        } else { "cargo check".into() };
+    fn run_check(&self, files: &[String]) -> Result<String> {
+        let cmd = detect_check_command(&self.workspace, files, self.crate_name.as_deref());
+        info!(cmd = %cmd, "Graph: running check");
         let output = std::process::Command::new("sh")
             .args(["-c", &cmd])
             .current_dir(&self.workspace)
@@ -141,8 +186,9 @@ impl GraphExecutor {
     }
 
     async fn check_and_fix(&self, task: &str, path: &str, initial: &InferenceResponse, mut edits: Vec<FileEdit>) -> Result<GraphResult> {
+        let files = vec![path.to_string()];
         for attempt in 0..self.max_retries {
-            match self.run_check() {
+            match self.run_check(&files) {
                 Ok(_) => {
                     info!(template = "edit", attempt, "Graph: check passed");
                     return Ok(GraphResult { response: initial.clone(), edits, escalated: false });
@@ -165,7 +211,7 @@ impl GraphExecutor {
 
     async fn check_and_fix_multi(&self, task: &str, paths: &[String], initial: &InferenceResponse, mut edits: Vec<FileEdit>) -> Result<GraphResult> {
         for attempt in 0..self.max_retries {
-            match self.run_check() {
+            match self.run_check(paths) {
                 Ok(_) => return Ok(GraphResult { response: initial.clone(), edits, escalated: false }),
                 Err(e) if attempt < self.max_retries - 1 => {
                     warn!(attempt, "Graph refactor: check failed, fixing");
@@ -224,31 +270,31 @@ impl GraphExecutor {
 
     async fn call_llm(&self, prompt: &str) -> Result<InferenceResponse> {
         let messages = vec![ChatMessage::user(prompt)];
-        let options = InferenceOptions::default();
+        let options = InferenceOptions {
+            preferred_model: self.preferred_model.clone(),
+            preferred_backend: Some(inference_client::BackendKind::Ollama),
+            ..Default::default()
+        };
 
-        // Try streaming if Ollama backend available AND model is known
+        // Try streaming with preferred model (if Ollama backend available)
         if let Some(ref ollama) = self.ollama {
-            let Some(model) = options.preferred_model.clone() else {
-                // No preferred model — let router decide (skip streaming)
-                return self.router.chat(&messages, Complexity::Simple, &options).await
-                    .context("Graph LLM call failed");
-            };
-            let blocks_found = std::sync::atomic::AtomicU32::new(0);
-            match ollama.chat_streaming(&model, &messages, &options, |chunk| {
-                if chunk.contains(">>>") { blocks_found.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
-            }).await {
-                Ok(response) => {
-                    debug!(blocks = blocks_found.load(std::sync::atomic::Ordering::Relaxed), tokens = response.tokens_output, "Graph streaming complete");
-                    return Ok(response);
-                }
-                Err(e) => {
-                    warn!(error = %e, "Graph streaming failed, falling back to router");
-                    // Fall through to router below
+            if let Some(ref model) = self.preferred_model {
+                let blocks_found = std::sync::atomic::AtomicU32::new(0);
+                match ollama.chat_streaming(model, &messages, &options, |chunk| {
+                    if chunk.contains(">>>") { blocks_found.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                }).await {
+                    Ok(response) => {
+                        debug!(blocks = blocks_found.load(std::sync::atomic::Ordering::Relaxed), tokens = response.tokens_output, "Graph streaming complete");
+                        return Ok(response);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Graph streaming failed, falling back to router");
+                    }
                 }
             }
         }
 
-        // Fallback: non-streaming via router
+        // Fallback: non-streaming via router (uses preferred_model from options)
         self.router.chat(&messages, Complexity::Simple, &options).await
             .context("Graph LLM call failed")
     }

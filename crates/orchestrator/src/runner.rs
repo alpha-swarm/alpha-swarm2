@@ -187,6 +187,31 @@ impl SwarmRunner {
             relevant_files.as_deref(),
         ).await.context("Goal planning failed")?;
 
+        // Post-plan fixup: tasks with empty files (e.g. glob patterns were rejected)
+        // get populated with relevant repo files matching their description keywords
+        let mut tasks = tasks;
+        for task in &mut tasks {
+            if task.files.is_empty() {
+                let desc_lower = task.description.to_lowercase();
+                let matching: Vec<String> = repo_files.iter()
+                    .filter(|f| {
+                        let fl = f.to_lowercase();
+                        // Match files in directories mentioned in description
+                        (desc_lower.contains("dashboard") && fl.starts_with("dashboard/src/"))
+                            || (desc_lower.contains("frontend") && fl.starts_with("dashboard/src/"))
+                            || (desc_lower.contains("component") && fl.contains("/components/"))
+                    })
+                    .take(10)
+                    .cloned()
+                    .collect();
+                if !matching.is_empty() {
+                    warn!(task_id = %task.id, files = matching.len(), "Populated empty task with matching repo files");
+                    task.files = matching;
+                }
+            }
+        }
+        tasks.retain(|t| !t.files.is_empty());
+
         let planning_ms = plan_start.elapsed().as_millis() as u64;
         info!(task_count = tasks.len(), planning_ms, "Phase 2b: Planning complete");
 
@@ -532,7 +557,7 @@ impl SwarmRunner {
                         let crate_name = crate::graph::detect_crate(&wt_path, task.files.first().map(|s| s.as_str()).unwrap_or(""));
                         let executor = crate::graph::GraphExecutor::new(
                             Arc::clone(&self.router), wt_path.clone(), crate_name, 3,
-                        ).with_ollama(Arc::clone(&self.ollama));
+                        ).with_model(self.planner_tier.model.clone()).with_ollama(Arc::clone(&self.ollama));
                         let graph_result = match tmpl.as_str() {
                             "edit" => executor.execute_edit(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
                             "create" => executor.execute_create(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
@@ -555,7 +580,7 @@ impl SwarmRunner {
                                 });
                                 continue;
                             }
-                            Ok(gr) => {
+                            Ok(_gr) => {
                                 info!(task_id = %task.id, "Graph escalated to full agent");
                                 // Fall through to full agent below
                             }

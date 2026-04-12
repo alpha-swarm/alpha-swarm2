@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use tracing::warn;
 use inference_client::Complexity;
 
 /// A direct edit that can be applied without LLM inference.
@@ -34,15 +35,16 @@ pub const PLANNER_SYSTEM: &str = r#"You decompose a goal into the MINIMUM number
 
 RULES:
 - Create as FEW tasks as possible. If the goal can be done in 1 task, output 1 task.
-- For EDITING existing files: list files from the repository file list below.
-- For CREATING new files: you MAY list file paths that don't exist yet. The agent will use <<<CREATE>>> to make them.
+- ONLY use file paths that appear in the REPOSITORY FILE LIST below. Do NOT invent file names.
+- For CREATING new files: you MAY list paths that don't exist. The agent will use <<<CREATE>>>.
+- NEVER use glob patterns (*, **, *.tsx). Always use exact paths like "dashboard/src/App.tsx".
 - Each task lists the specific files it will read, modify, or create.
 - Classify complexity: simple (1-2 files, small change), medium (2-4 files), complex (4+ files).
 - If task-2 needs output from task-1, set depends_on: ["task-1"]. Tasks without depends_on run in parallel.
 - Tasks that run in parallel MUST NOT modify the same file. Use depends_on if they share files.
 - Maximum 5 tasks. Most goals need 1-3.
 - If the goal lists multiple distinct changes (e.g. "X and Y and Z"), create at least one task per change.
-- The React frontend is in the dashboard/ directory, NOT in components/. components/ contains WASI backend code.
+- The React frontend is in dashboard/src/ (.tsx/.ts files). components/ is WASI Rust backend — not frontend.
 
 For TRIVIAL single-line changes (adding an import, renaming, inserting a line):
 - Set complexity to "simple"
@@ -140,15 +142,45 @@ pub fn parse_plan(json_str: &str, repo_files: &[String]) -> Result<Vec<SubTask>,
 
     // Validate files: existing files must match repo, new files are allowed (agent will CREATE them)
     for task in &mut tasks {
-        let (existing, new): (Vec<_>, Vec<_>) = task.files.iter()
-            .partition(|f| repo_files.iter().any(|rf| rf == *f));
+        // Reject glob patterns — planner must output exact file paths
+        task.files.retain(|f| !f.contains('*'));
 
-        // Keep all files — existing ones for EDIT, new ones for CREATE
-        // But if a task has ONLY non-existent files and none look like valid paths, flag it
-        if existing.is_empty() && !new.is_empty() {
-            // Ensure new file paths look reasonable (have an extension, no spaces)
-            task.files.retain(|f| f.contains('.') && !f.contains(' '));
-        }
+        // Try to resolve near-miss paths against repo (e.g. wrong extension)
+        task.files = task.files.iter().map(|f| {
+            if repo_files.iter().any(|rf| rf == f) {
+                return f.clone(); // exact match
+            }
+            // Try matching by stem (e.g. "App.jsx" → "App.tsx")
+            if let Some(stem) = f.rsplit('/').next().and_then(|n| n.rsplit('.').last()) {
+                if let Some(dir) = f.rsplit_once('/').map(|(d, _)| d) {
+                    let prefix = format!("{dir}/{stem}.");
+                    if let Some(match_file) = repo_files.iter().find(|rf| rf.starts_with(&prefix)) {
+                        return match_file.clone();
+                    }
+                }
+            }
+            f.clone() // keep as-is (might be a CREATE path)
+        }).collect();
+
+        // Drop hallucinated files: if a task mixes existing and non-existent files
+        // in the SAME directory, the non-existent ones are likely hallucinations.
+        // But if ALL files are new, it's probably an intentional CREATE task.
+        let has_existing = task.files.iter().any(|f| repo_files.iter().any(|rf| rf == f));
+        task.files.retain(|f| {
+            if repo_files.iter().any(|rf| rf == f) { return true; } // exists
+            if !f.contains('.') || f.contains(' ') { return false; } // invalid
+            if !has_existing { return true; } // all-new task, keep for CREATE
+            // Mixed task: drop non-existent files whose parent dir has known files
+            if let Some((dir, _)) = f.rsplit_once('/') {
+                let dir_prefix = format!("{dir}/");
+                let dir_has_files = repo_files.iter().any(|rf| rf.starts_with(&dir_prefix));
+                if dir_has_files {
+                    warn!(path = %f, "Dropping hallucinated file (dir exists but file doesn't)");
+                    return false;
+                }
+            }
+            true
+        });
     }
 
     // Remove tasks with no files left
@@ -343,6 +375,38 @@ mod tests {
         let tasks = parse_plan(json, &repo_files).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].files, vec!["new/file.ts"]);
+    }
+
+    #[test]
+    fn parse_plan_rejects_glob_patterns() {
+        let repo_files = vec!["dashboard/src/App.tsx".into()];
+        let json = r#"[{"id":"task-1","description":"Fix","files":["dashboard/**/*.tsx","dashboard/**/*.css"],"complexity":"medium"}]"#;
+        // Globs get stripped; task should be removed (no valid files remain)
+        // unless the description matches repo files in the post-plan fixup (runner level)
+        let result = parse_plan(json, &repo_files);
+        assert!(result.is_err() || result.unwrap().iter().all(|t| t.files.iter().all(|f| !f.contains('*'))));
+    }
+
+    #[test]
+    fn parse_plan_drops_hallucinated_files() {
+        // dashboard/src/components/ exists in repo, but Link.tsx and Modal.tsx don't
+        let repo_files = vec![
+            "dashboard/src/components/GoalCard.tsx".into(),
+            "dashboard/src/components/StatusBadge.tsx".into(),
+            "dashboard/src/App.tsx".into(),
+        ];
+        let json = r#"[{"id":"task-1","description":"Add ARIA","files":["dashboard/src/components/GoalCard.tsx","dashboard/src/components/Link.tsx","dashboard/src/components/Modal.tsx"],"complexity":"medium"}]"#;
+        let tasks = parse_plan(json, &repo_files).unwrap();
+        // Link.tsx and Modal.tsx should be dropped (dir exists, files don't)
+        assert_eq!(tasks[0].files, vec!["dashboard/src/components/GoalCard.tsx"]);
+    }
+
+    #[test]
+    fn parse_plan_fixes_wrong_extension() {
+        let repo_files = vec!["dashboard/src/App.tsx".into(), "dashboard/src/main.tsx".into()];
+        let json = r#"[{"id":"task-1","description":"Fix","files":["dashboard/src/App.jsx"],"complexity":"simple"}]"#;
+        let tasks = parse_plan(json, &repo_files).unwrap();
+        assert_eq!(tasks[0].files[0], "dashboard/src/App.tsx");
     }
 
     #[test]

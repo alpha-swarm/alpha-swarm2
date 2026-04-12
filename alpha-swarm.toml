@@ -1,8 +1,9 @@
 # alpha-swarm configuration
 # Override with environment variables: ALPHA_SWARM_OLLAMA_URL, etc.
 
+# All Ollama runs on csatapaci (M2 Max 96GB) — embeddings, planning, agent
 [ollama]
-url = "http://127.0.0.1:11434"   # picur — embeddings run local
+url = "http://100.81.10.8:11434"   # csatapaci
 
 [surrealdb]
 url = "127.0.0.1:8001"
@@ -24,8 +25,7 @@ simple_model = "qwen2.5-coder:7b"
 project = "default"
 
 # --- Agent Tiers ---
-# Orchestrator: fast planner on picur (local)
-# Agent: smart model on csatapaci (remote)
+# All inference on csatapaci. Orchestrator uses 14b (fast), agent uses 32b (quality).
 [tiers.orchestrator]
 model = "qwen2.5-coder:14b"
 context_window = 16384
@@ -44,9 +44,16 @@ max_iterations = 10
 max_backoff_secs = 30
 max_context_files = 50
 
-# Worker: small focused tasks, fast model
+[tiers.worker]
+model = "qwen2.5-coder:7b"
+context_window = 8192
+time_limit_secs = 300           # 5 min
+token_limit = 100000            # 100K tokens
+max_iterations = 5
+max_backoff_secs = 10
+max_context_files = 20
+
 # --- Resource Limits ---
-# Daemon won't start new tasks if resource usage exceeds these thresholds
 [resources]
 max_cpu_percent = 80.0
 max_ram_percent = 80.0
@@ -63,18 +70,8 @@ name = "csatapaci"
 type = "ollama"
 ollama_url = "http://100.81.10.8:11434"
 
-[tiers.worker]
-model = "qwen2.5-coder:7b"
-context_window = 8192
-time_limit_secs = 300           # 5 min
-token_limit = 100000            # 100K tokens
-max_iterations = 5
-max_backoff_secs = 10
-max_context_files = 20
-
-# --- Inference Providers ---
-# csatapaci ONLY for inference (planning + agent). No picur fallback —
-# 14b produces garbage on complex tasks. picur only does embeddings via [ollama].
+# --- Inference Provider ---
+# Single Ollama on csatapaci for everything (embeddings + planning + agent)
 [[providers]]
 type = "ollama"
 url = "http://100.81.10.8:11434"   # csatapaci M2 Max 96GB

@@ -138,30 +138,28 @@ impl InferenceRouter {
         // Auto-select via routing
         let recommended = self.recommend_model(complexity).await?;
 
-        let backend = self.backends.iter()
-            .find(|b| b.kind() == recommended.backend)
-            .ok_or_else(|| anyhow::anyhow!("Backend {:?} not configured", recommended.backend))?;
-
-        match backend.chat(&recommended.name, messages, options).await {
-            Ok(resp) => return Ok(resp),
-            Err(e) => warn!(
-                backend = ?recommended.backend,
-                model = %recommended.name,
-                "Recommended backend failed: {e}, trying fallbacks"
-            ),
+        // Try the recommended model on ALL backends that have it (not just the first)
+        for backend in self.backends.iter().filter(|b| b.kind() == recommended.backend) {
+            match backend.chat(&recommended.name, messages, options).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => warn!(
+                    backend = ?recommended.backend,
+                    model = %recommended.name,
+                    "Backend failed for recommended model: {e}, trying next"
+                ),
+            }
         }
 
-        // Fallback: try every backend with the best available model
+        // Fallback: try every backend with its best available model
         for backend in &self.backends {
             let models = match backend.list_models().await {
                 Ok(m) if !m.is_empty() => m,
                 _ => continue,
             };
-            // Pick best model: prefer deepseek-coder/qwen, then largest
             let model = largest_ollama(&models)
                 .or_else(|| models.into_iter().next());
             if let Some(model) = model {
-                if model.name == recommended.name { continue; } // Already tried
+                if model.name == recommended.name { continue; } // Already tried above
                 match backend.chat(&model.name, messages, options).await {
                     Ok(resp) => {
                         info!(backend = ?backend.kind(), model = %model.name, "Fallback succeeded");
@@ -225,19 +223,24 @@ fn best_ollama_by_size(models: &[ModelInfo], size_ok: impl Fn(u32) -> bool) -> O
 const PREFERRED_CODE_MODELS: &[&str] = &["deepseek-coder", "qwen2.5-coder", "qwen"];
 
 /// Find the best Ollama model: prefer known-good code models, then largest by params.
+/// Among preferred models, picks the largest across ALL prefixes (not first match).
 fn largest_ollama(models: &[ModelInfo]) -> Option<ModelInfo> {
     let ollama_ready: Vec<&ModelInfo> = models.iter()
         .filter(|m| m.backend == BackendKind::Ollama && m.ready)
         .collect();
 
-    // First: try preferred code models (largest among them)
-    for prefix in PREFERRED_CODE_MODELS {
-        if let Some(m) = ollama_ready.iter()
-            .filter(|m| m.name.starts_with(prefix))
-            .max_by_key(|m| parse_param_size_b(&m.parameter_size))
-        {
-            return Some((*m).clone());
-        }
+    // Collect the largest model from each preferred prefix, then pick the overall biggest
+    let best_preferred = PREFERRED_CODE_MODELS.iter()
+        .filter_map(|prefix| {
+            ollama_ready.iter()
+                .filter(|m| m.name.starts_with(prefix))
+                .max_by_key(|m| parse_param_size_b(&m.parameter_size))
+                .copied()
+        })
+        .max_by_key(|m| parse_param_size_b(&m.parameter_size));
+
+    if let Some(m) = best_preferred {
+        return Some(m.clone());
     }
 
     // Fallback: largest available
@@ -391,6 +394,21 @@ mod tests {
         assert_eq!(parse_param_size_b("33B"), 33);
         assert_eq!(parse_param_size_b("unknown"), 0);
         assert_eq!(parse_param_size_b(""), 0);
+    }
+
+    #[tokio::test]
+    async fn larger_preferred_model_wins_across_prefixes() {
+        // qwen3:32b should beat qwen2.5-coder:14b — both match PREFERRED_CODE_MODELS
+        // ("qwen2.5-coder" and "qwen" prefixes), but 32B > 14B
+        let router = InferenceRouter::new()
+            .add_backend(
+                MockBackend::new(BackendKind::Ollama)
+                    .with_model("qwen2.5-coder:14b", "14.8B")
+                    .with_model("qwen3:32b", "32B")
+            );
+
+        let model = router.recommend_model(Complexity::Simple).await.unwrap();
+        assert_eq!(model.name, "qwen3:32b");
     }
 
     #[test]
