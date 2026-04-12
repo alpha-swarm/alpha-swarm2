@@ -100,14 +100,6 @@ export async function submitTask(project: string, goal: string): Promise<string>
   return extractText(result);
 }
 
-export async function createPlan(project: string, goal: string): Promise<string> {
-  const result = await rpc<McpToolResult>("tools/call", {
-    name: "create_plan",
-    arguments: { project, goal },
-  });
-  return extractText(result);
-}
-
 export async function approveTask(runId: string): Promise<string> {
   const result = await rpc<McpToolResult>("tools/call", {
     name: "approve_task",
@@ -124,42 +116,10 @@ export async function deleteTask(runId: string): Promise<string> {
   return extractText(result);
 }
 
-export async function approvePlan(runId: string): Promise<string> {
-  const result = await rpc<McpToolResult>("tools/call", {
-    name: "approve_plan",
-    arguments: { run_id: runId },
-  });
-  return extractText(result);
-}
-
 export async function planFeedback(runId: string, feedback: string): Promise<string> {
   const result = await rpc<McpToolResult>("tools/call", {
     name: "plan_feedback",
     arguments: { run_id: runId, feedback },
-  });
-  return extractText(result);
-}
-
-export async function getRunStatus(runId: string): Promise<string> {
-  const result = await rpc<McpToolResult>("tools/call", {
-    name: "get_run_status",
-    arguments: { run_id: runId },
-  });
-  return extractText(result);
-}
-
-export async function getPlans(runId: string): Promise<string> {
-  const result = await rpc<McpToolResult>("tools/call", {
-    name: "get_plans",
-    arguments: { run_id: runId },
-  });
-  return extractText(result);
-}
-
-export async function editPlan(runId: string, subTasks: string): Promise<string> {
-  const result = await rpc<McpToolResult>("tools/call", {
-    name: "edit_plan",
-    arguments: { run_id: runId, sub_tasks: subTasks },
   });
   return extractText(result);
 }
@@ -176,14 +136,6 @@ export async function deleteProject(name: string): Promise<string> {
   const result = await rpc<McpToolResult>("tools/call", {
     name: "delete_project",
     arguments: { name },
-  });
-  return extractText(result);
-}
-
-export async function findSimilarRuns(project: string, query: string, limit?: number): Promise<string> {
-  const result = await rpc<McpToolResult>("tools/call", {
-    name: "find_similar_runs",
-    arguments: { project, query, ...(limit ? { limit } : {}) },
   });
   return extractText(result);
 }
@@ -225,10 +177,7 @@ export async function readResource<T = unknown>(uri: string): Promise<T[]> {
   return parseResourceJson<T>(result);
 }
 
-import type { Project, AgentRun, DashboardStats, GoalPlan } from "./types";
-
-// Re-export types path for hooks
-export type { Project, AgentRun, DashboardStats, GoalPlan };
+import type { Project, AgentRun, DashboardStats, GoalPlan } from "@/types/swarm";
 
 // Typed resource helpers — all return unwrapped arrays
 export const resources = {
