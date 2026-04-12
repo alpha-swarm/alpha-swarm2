@@ -47,8 +47,14 @@ For TRIVIAL single-line changes (adding an import, renaming, inserting a line):
 - Include an "edit" field with {"path":"file.rs","old":"existing line","new":"replacement line"}
 - Tasks with an edit field execute instantly without an LLM — be precise with old/new text.
 
+Set a "template" for each task to optimize execution:
+- "edit": modifying 1 existing code file
+- "create": creating a new file
+- "refactor": modifying 2+ files together
+- "doc": editing .md/.toml/.yaml (no build check needed)
+
 OUTPUT FORMAT (JSON array only, no other text):
-[{"id":"task-1","description":"what to do","files":["file.rs"],"complexity":"simple","depends_on":[],"edit":null}]"#;
+[{"id":"task-1","description":"what to do","files":["file.rs"],"complexity":"simple","depends_on":[],"edit":null,"template":"edit"}]"#;
 
 /// Maximum number of sub-tasks the planner can create.
 pub const MAX_TASKS: usize = 5;

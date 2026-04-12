@@ -526,6 +526,45 @@ impl SwarmRunner {
                         }
                     }
 
+                    // Graph executor path: known template → fewer LLM calls
+                    if let Some(ref tmpl) = task.template {
+                        info!(task_id = %task.id, template = %tmpl, "Using graph executor");
+                        let crate_name = crate::graph::detect_crate(&wt_path, task.files.first().map(|s| s.as_str()).unwrap_or(""));
+                        let executor = crate::graph::GraphExecutor::new(
+                            Arc::clone(&self.router), wt_path.clone(), crate_name, 3,
+                        );
+                        let graph_result = match tmpl.as_str() {
+                            "edit" => executor.execute_edit(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
+                            "create" => executor.execute_create(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
+                            "refactor" => executor.execute_refactor(&augmented_desc, &task.files).await,
+                            "doc" => executor.execute_doc(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
+                            _ => Err(anyhow::anyhow!("Unknown template: {tmpl}")),
+                        };
+
+                        match graph_result {
+                            Ok(gr) if !gr.escalated => {
+                                any_applied = true;
+                                let summary = format!("Graph:{tmpl} edits:{}", gr.edits.len());
+                                completed_summaries.insert(task.id.clone(), summary);
+                                completed.insert(task.id.clone(), TaskRunResult {
+                                    task, agent_result: Some(AgentResult {
+                                        edits: gr.edits, inference_response: gr.response,
+                                        applied: true, skipped: false, run_id: None, attempt: 1,
+                                        escalated_from: None, tool_calls: vec![],
+                                    }), error: None,
+                                });
+                                continue;
+                            }
+                            Ok(gr) => {
+                                info!(task_id = %task.id, "Graph escalated to full agent");
+                                // Fall through to full agent below
+                            }
+                            Err(e) => {
+                                warn!(task_id = %task.id, error = %e, "Graph executor failed, falling back to agent");
+                            }
+                        }
+                    }
+
                     let sem = Arc::clone(&semaphore);
                     let router = Arc::clone(&self.router);
                     let ollama = Arc::clone(&self.ollama);

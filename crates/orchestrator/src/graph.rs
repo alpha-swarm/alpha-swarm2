@@ -3,7 +3,7 @@
 //! Templates: edit, create, refactor, doc.
 //! LLM is called ONLY for content generation, not for sequencing.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
@@ -15,6 +15,26 @@ use inference_client::{InferenceRouter, InferenceResponse, ChatMessage, Inferenc
 const MAX_FILE_CONTEXT: usize = 12_000;
 /// Max chars of build error to include in fix prompt.
 const MAX_ERROR_CONTEXT: usize = 2_000;
+
+/// Detect which crate a file belongs to by walking up to find Cargo.toml.
+pub fn detect_crate(repo: &std::path::Path, file_path: &str) -> Option<String> {
+    let full = repo.join(file_path);
+    let mut dir = full.parent()?;
+    loop {
+        let cargo = dir.join("Cargo.toml");
+        if cargo.exists() {
+            let content = std::fs::read_to_string(&cargo).ok()?;
+            for line in content.lines() {
+                if let Some(name) = line.strip_prefix("name = ") {
+                    return Some(name.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+        if dir == repo { break; }
+        dir = dir.parent()?;
+    }
+    None
+}
 
 pub struct GraphExecutor {
     router: Arc<InferenceRouter>,
