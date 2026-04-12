@@ -532,7 +532,7 @@ impl SwarmRunner {
                         let crate_name = crate::graph::detect_crate(&wt_path, task.files.first().map(|s| s.as_str()).unwrap_or(""));
                         let executor = crate::graph::GraphExecutor::new(
                             Arc::clone(&self.router), wt_path.clone(), crate_name, 3,
-                        );
+                        ).with_ollama(Arc::clone(&self.ollama));
                         let graph_result = match tmpl.as_str() {
                             "edit" => executor.execute_edit(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
                             "create" => executor.execute_create(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,

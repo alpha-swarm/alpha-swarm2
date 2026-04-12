@@ -6,10 +6,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use anyhow::{Context, Result, bail};
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 
 use agent_core::{AgentResult, parse_edits, FileEdit};
-use inference_client::{InferenceRouter, InferenceResponse, ChatMessage, InferenceOptions, Complexity, BackendKind};
+use inference_client::{InferenceRouter, InferenceResponse, OllamaBackend, ChatMessage, InferenceOptions, Complexity, BackendKind};
 
 /// Max chars of file content to include in the focused prompt.
 const MAX_FILE_CONTEXT: usize = 12_000;
@@ -38,6 +38,7 @@ pub fn detect_crate(repo: &std::path::Path, file_path: &str) -> Option<String> {
 
 pub struct GraphExecutor {
     router: Arc<InferenceRouter>,
+    ollama: Option<Arc<OllamaBackend>>,
     workspace: PathBuf,
     crate_name: Option<String>,
     max_retries: u32,
@@ -45,7 +46,12 @@ pub struct GraphExecutor {
 
 impl GraphExecutor {
     pub fn new(router: Arc<InferenceRouter>, workspace: PathBuf, crate_name: Option<String>, max_retries: u32) -> Self {
-        Self { router, workspace, crate_name, max_retries }
+        Self { router, ollama: None, workspace, crate_name, max_retries }
+    }
+
+    pub fn with_ollama(mut self, ollama: Arc<OllamaBackend>) -> Self {
+        self.ollama = Some(ollama);
+        self
     }
 
     /// Edit an existing file.
@@ -219,6 +225,19 @@ impl GraphExecutor {
     async fn call_llm(&self, prompt: &str) -> Result<InferenceResponse> {
         let messages = vec![ChatMessage::user(prompt)];
         let options = InferenceOptions::default();
+
+        // Try streaming if Ollama backend available — enables early block detection
+        if let Some(ref ollama) = self.ollama {
+            let model = options.preferred_model.clone().unwrap_or_else(|| "qwen3:32b".into());
+            let blocks_found = std::sync::atomic::AtomicU32::new(0);
+            let response = ollama.chat_streaming(&model, &messages, &options, |chunk| {
+                if chunk.contains(">>>") { blocks_found.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+            }).await.context("Graph streaming LLM call failed")?;
+            debug!(blocks = blocks_found.load(std::sync::atomic::Ordering::Relaxed), tokens = response.tokens_output, "Graph streaming complete");
+            return Ok(response);
+        }
+
+        // Fallback: non-streaming via router
         self.router.chat(&messages, Complexity::Simple, &options).await
             .context("Graph LLM call failed")
     }

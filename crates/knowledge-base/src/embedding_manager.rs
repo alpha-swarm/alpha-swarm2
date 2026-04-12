@@ -126,23 +126,41 @@ impl EmbeddingManager {
 fn read_file_for_embed(repo: &Path, file_path: &str) -> Option<(String, String, String)> {
     let content = std::fs::read_to_string(repo.join(file_path)).ok()?;
     let hash = sha256_hex(&content);
-    let summary = build_file_summary(file_path, &content);
+    let summary = build_symbol_summary(file_path, &content);
     Some((file_path.to_string(), summary, hash))
 }
 
-fn build_file_summary(file_path: &str, content: &str) -> String {
+/// Symbol-level summary: extracts function/struct/impl signatures with line ranges.
+/// Produces a denser, more searchable embedding than raw file content.
+fn build_symbol_summary(file_path: &str, content: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
-    let first: String = lines.iter().take(3).cloned().collect::<Vec<_>>().join("\n");
-    let sigs: Vec<&str> = lines.iter()
-        .filter(|l| {
-            let t = l.trim();
-            t.starts_with("pub fn ") || t.starts_with("fn ") || t.starts_with("pub struct ")
-                || t.starts_with("struct ") || t.starts_with("impl ") || t.starts_with("pub trait ")
-                || t.starts_with("pub enum ") || t.starts_with("pub async fn ")
-        })
-        .take(10).cloned().collect();
-    let mut s = format!("{file_path}\n{first}");
-    if !sigs.is_empty() { s.push_str("\nSigs: "); s.push_str(&sigs.join(", ")); }
+    let mut symbols = Vec::new();
+
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        let kind = if t.starts_with("pub async fn ") || t.starts_with("async fn ") { "fn" }
+            else if t.starts_with("pub fn ") || t.starts_with("fn ") { "fn" }
+            else if t.starts_with("pub struct ") || t.starts_with("struct ") { "struct" }
+            else if t.starts_with("pub enum ") || t.starts_with("enum ") { "enum" }
+            else if t.starts_with("pub trait ") || t.starts_with("trait ") { "trait" }
+            else if t.starts_with("impl ") { "impl" }
+            else if t.starts_with("export function ") || t.starts_with("export async function ") { "fn" }
+            else if t.starts_with("export interface ") { "interface" }
+            else if t.starts_with("export type ") { "type" }
+            else if t.starts_with("export class ") { "class" }
+            else { continue };
+
+        // Capture the signature + next few lines for context
+        let end = (i + 3).min(lines.len());
+        let snippet: String = lines[i..end].join("\n");
+        symbols.push(format!("L{}:{} {}", i + 1, kind, snippet.chars().take(120).collect::<String>()));
+    }
+
+    let mut s = format!("{file_path} ({} lines, {} symbols)\n", lines.len(), symbols.len());
+    for sym in symbols.iter().take(20) {
+        s.push_str(sym);
+        s.push('\n');
+    }
     s.chars().take(SUMMARY_MAX_CHARS).collect()
 }
 
