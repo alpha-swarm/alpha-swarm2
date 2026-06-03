@@ -919,7 +919,7 @@ async fn run_workflow(
             let wf = WorkflowRun::from_tasks(
                 project, goal, task_id, tasks,
                 chrono::Utc::now().to_rfc3339(),
-            );
+            ).with_trailing_quality_gate();
             engine.repo().create_run(&wf).await?;
             wf
         }

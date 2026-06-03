@@ -4,6 +4,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// :8001 is now the agent-daemon HTTP /sql shim (the external SurrealDB server
+// is gone — embedded). The shim speaks the same /sql contract, so this offline
+// tool reads through the daemon (the sole DB owner) with no NATS client.
 const SURREAL_URL: &str = "http://127.0.0.1:8001";
 
 #[derive(Deserialize, Debug)]

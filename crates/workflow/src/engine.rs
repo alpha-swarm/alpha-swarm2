@@ -25,9 +25,42 @@ use swarm_events::{EventPublisher, SwarmEvent};
 use swarm_orchestrator::{replan_goal, ControlState, RunControl, SwarmResult, SwarmRunner};
 
 use crate::model::{
-    Condition, StepState, WorkflowRun, WorkflowState, MAX_REPLAN_ATTEMPTS,
+    Condition, StepKind, StepState, WorkflowRun, WorkflowState, MAX_REPLAN_ATTEMPTS,
 };
 use crate::repo::WorkflowRepo;
+
+/// Code file extensions whose change warrants a build/test check.
+const QG_CODE_EXTENSIONS: &[&str] = &["rs", "ts", "js", "go", "py"];
+
+/// Run a build/test check in `repo_path` for a QualityGate step. Returns
+/// Ok(()) on a clean check, Err(msg) on failure (→ replan). Self-contained:
+/// `cargo check` for Rust repos, `pnpm check` when a package.json is present.
+/// Skips entirely when only non-code files (docs/config) changed — matches the
+/// graph executor's doc path, and avoids a full repo build on a README edit.
+fn run_quality_check(repo_path: &std::path::Path, changed: &[String]) -> Result<(), String> {
+    use std::process::Command;
+    let has_code = changed.iter().any(|f| {
+        QG_CODE_EXTENSIONS.iter().any(|e| f.ends_with(&format!(".{e}")))
+    });
+    if !has_code {
+        return Ok(());
+    }
+    let (program, args): (&str, &[&str]) = if repo_path.join("Cargo.toml").exists() {
+        ("cargo", &["check", "--quiet"])
+    } else if repo_path.join("package.json").exists() {
+        ("pnpm", &["check"])
+    } else {
+        return Ok(());
+    };
+    match Command::new(program).args(args).current_dir(repo_path).output() {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            Err(format!("{program} check failed: {}", stderr.lines().rev().take(5).collect::<Vec<_>>().join(" | ")))
+        }
+        Err(e) => Err(format!("{program} check could not run: {e}")),
+    }
+}
 
 /// Per-call execution context (everything the engine borrows from the daemon).
 pub struct EngineContext<'a> {
@@ -67,6 +100,74 @@ impl WorkflowEngine {
 
     pub fn repo(&self) -> &WorkflowRepo {
         &self.repo
+    }
+
+    /// Instantiate a seeded template into a runnable goal — creates the
+    /// agent_run (approved, so the scheduler executes it), the goal_plan (so
+    /// the executor takes the workflow path), and the concrete workflow_run.
+    /// Returns the new agent_run id. Skips LLM planning entirely.
+    pub async fn create_from_def(
+        &self,
+        store: &dyn knowledge_base::KnowledgeBackend,
+        project: &str,
+        goal: &str,
+        def_name: &str,
+        files: Vec<String>,
+    ) -> anyhow::Result<String> {
+        let def = self.repo.get_def(def_name, None).await?
+            .ok_or_else(|| anyhow::anyhow!("workflow def '{def_name}' not found"))?;
+
+        let mut run = knowledge_base::AgentRun::new(project, goal, "template", "template");
+        run.status = knowledge_base::RunStatus::Pending;
+        let run_id = store.store_run(&run).await?;
+
+        // Mark approved so the daemon executes (not re-plans).
+        let approve = if run_id.contains(':') {
+            format!("UPDATE {run_id} SET status = 'approved'")
+        } else {
+            format!("UPDATE type::thing('agent_run', '{run_id}') SET status = 'approved'")
+        };
+        store.db_query_raw(&approve).await?;
+
+        let wf = def.instantiate(project, goal, &run_id, files.clone(), Self::now())
+            .with_trailing_quality_gate();
+
+        // goal_plan: non-empty sub_tasks make the executor take the workflow path.
+        let sub_tasks: Vec<knowledge_base::PlannedTask> = wf.steps.iter()
+            .filter(|s| !s.kind.is_control())
+            .map(|s| knowledge_base::PlannedTask {
+                id: s.task.id.clone(),
+                description: s.task.description.clone(),
+                files: s.task.files.clone(),
+                complexity: format!("{:?}", s.task.complexity),
+                rationale: format!("from template {def_name}"),
+                depends_on: s.task.depends_on.clone(),
+                template: s.task.template.clone(),
+                edit: None,
+            })
+            .collect();
+        let plan = knowledge_base::GoalPlan {
+            id: None,
+            run_id: run_id.clone(),
+            project: project.into(),
+            goal: goal.into(),
+            version: 1,
+            sub_tasks,
+            model_used: "template".into(),
+            tokens_input: 0,
+            tokens_output: 0,
+            duration_ms: 0,
+            user_feedback: None,
+            status: "approved".into(),
+            context_files: vec![],
+            web_searches: vec![],
+            reasoning: format!("Instantiated from template '{def_name}'"),
+            created_at: Self::now(),
+            retrieved_pattern_ids: vec![],
+        };
+        store.store_plan(&plan).await?;
+        self.repo.create_run(&wf).await?;
+        Ok(run_id)
     }
 
     /// Control handle for a run (created on demand). The bridge uses this to
@@ -353,8 +454,7 @@ impl WorkflowEngine {
             }
 
             // Nothing pending and nothing failed → done.
-            let remaining = wf.pending_tasks();
-            if remaining.is_empty() {
+            if !wf.has_pending() {
                 wf.transition(WorkflowState::Completed, Self::now());
                 self.repo.update_run(wf).await?;
                 self.publish_state(wf).await;
@@ -373,7 +473,48 @@ impl WorkflowEngine {
                 break EngineOutcome::Completed(result);
             }
 
-            // Execute one round of the remaining DAG.
+            // Control steps (driven by the engine, not the agent runner).
+            if let Some((step_id, kind)) = wf.ready_control_step() {
+                match kind {
+                    StepKind::HumanApproval => {
+                        info!(run_id = %wf.run_id, step = %step_id, "HumanApproval gate — pausing");
+                        wf.transition(WorkflowState::Paused, Self::now());
+                        self.repo.update_run(wf).await?;
+                        self.publish_state(wf).await;
+                        break EngineOutcome::Paused;
+                    }
+                    StepKind::QualityGate => {
+                        info!(run_id = %wf.run_id, step = %step_id, "QualityGate check");
+                        let changed: Vec<String> = wf.captured_files.iter().map(|f| f.path.clone()).collect();
+                        match run_quality_check(&ctx.repo_path, &changed) {
+                            Ok(()) => {
+                                wf.mark_step(&step_id, StepState::Passed, None);
+                                self.publish_step(wf, &step_id, true).await;
+                            }
+                            Err(e) => {
+                                warn!(run_id = %wf.run_id, step = %step_id, error = %e, "QualityGate failed → replan");
+                                wf.mark_step(&step_id, StepState::Failed, Some(e));
+                                self.publish_step(wf, &step_id, false).await;
+                            }
+                        }
+                        self.repo.update_run(wf).await?;
+                        continue;
+                    }
+                    StepKind::AgentTask => unreachable!("is_control filters this"),
+                }
+            }
+
+            // Execute one round of the ready AgentTask steps.
+            let remaining = wf.ready_agent_tasks();
+            if remaining.is_empty() {
+                // Steps pending but none ready, no failure, no control → cycle.
+                let err = format!("Workflow stuck: {} pending steps, none ready (dependency cycle?)",
+                    wf.steps.iter().filter(|s| s.state == StepState::Pending).count());
+                wf.transition(WorkflowState::Failed, Self::now());
+                self.repo.update_run(wf).await?;
+                self.publish_state(wf).await;
+                break EngineOutcome::Failed { result: aggregate.take(), error: err };
+            }
             info!(run_id = %wf.run_id, remaining = remaining.len(), "Workflow round dispatch");
             let round = ctx.runner.run_planned(&wf.goal, remaining).await?;
             Self::absorb_round(wf, &round);

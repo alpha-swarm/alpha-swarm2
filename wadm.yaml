@@ -1,3 +1,11 @@
+# DEPLOYMENT NOTE (2026-06): this manifest targets a wadm + washlet control
+# plane. wash 2.x `wash host` does NOT accept wadm placements (status stays
+# "undeployed"), and wadm 0.21 cannot drive it. The CURRENT deploy path is
+# per-component `wash dev` from each component dir (see infra notes), with the
+# agent-daemon owning the embedded DB + NATS bridge. Keep this manifest for a
+# future washlet/wadm host; the wasmcloud:messaging link below activates only
+# under a host that provides a real NATS messaging provider (wash dev's is
+# in-memory only — components fall back to the daemon HTTP shim).
 apiVersion: core.oam.dev/v1beta1
 kind: Application
 metadata:

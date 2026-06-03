@@ -4,6 +4,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
+// Ephemeral scratch: clones re-fetch on demand, so /tmp (wiped on reboot) is
+// the correct home. Only the database needs durable storage (see SurrealConfig).
 const REPOS_BASE: &str = "/tmp/alpha-swarm/repos";
 
 /// Ensure a project's repo is cloned and up-to-date.

@@ -77,6 +77,17 @@ pub enum StepKind {
     /// Pause the workflow until a human approves (maps to the existing
     /// planned→approved gate). The paused run holds NO execution lock.
     HumanApproval,
+    /// Run a build/test check over the repo (no agent, no LLM). Failure routes
+    /// into adaptive replanning — fail-fast for long DAGs.
+    QualityGate,
+}
+
+impl StepKind {
+    /// Control steps are driven by the engine itself, never dispatched to the
+    /// agent runner.
+    pub fn is_control(&self) -> bool {
+        matches!(self, StepKind::HumanApproval | StepKind::QualityGate)
+    }
 }
 
 /// GOAP-flavored, locally-checkable condition. No LLM-evaluated conditions —
@@ -157,6 +168,56 @@ pub struct CapturedFile {
 
 fn default_checkpoint_complete() -> bool {
     true
+}
+
+impl WorkflowDef {
+    /// Instantiate this template into a concrete run for `goal`, filling each
+    /// step's target `files` and applying deterministic GOAP conditions:
+    /// edit/refactor steps require their targets to exist (FileExists
+    /// precondition) and must change them (FilesChanged effect); create/doc
+    /// steps only assert the change effect.
+    pub fn instantiate(
+        &self,
+        project: impl Into<String>,
+        goal: impl Into<String>,
+        run_id: impl Into<String>,
+        files: Vec<String>,
+        now_rfc3339: impl Into<String>,
+    ) -> WorkflowRun {
+        let now = now_rfc3339.into();
+        let steps = self.steps.iter().cloned().map(|mut step| {
+            step.task.files = files.clone();
+            step.state = StepState::Pending;
+            step.attempts = 0;
+            step.error = None;
+            step.agent_run_id = None;
+            let tmpl = step.task.template.as_deref().unwrap_or("");
+            if matches!(tmpl, "edit" | "refactor") {
+                step.preconditions = files.iter().map(|f| Condition::FileExists { path: f.clone() }).collect();
+            }
+            if !files.is_empty() {
+                step.effects = vec![Condition::FilesChanged { paths: files.clone() }];
+            }
+            step
+        }).collect();
+
+        WorkflowRun {
+            id: None,
+            def_name: Some(self.name.clone()),
+            def_version: Some(self.version),
+            project: project.into(),
+            goal: goal.into(),
+            run_id: run_id.into(),
+            state: WorkflowState::Created,
+            steps,
+            replan_attempts: 0,
+            schema_version: WORKFLOW_SCHEMA_VERSION,
+            created_at: now.clone(),
+            updated_at: now,
+            captured_files: Vec::new(),
+            checkpoint_complete: true,
+        }
+    }
 }
 
 /// A concrete, persisted workflow execution.
@@ -261,6 +322,38 @@ impl WorkflowRun {
         reset
     }
 
+    /// Append a trailing QualityGate step depending on every existing step,
+    /// so the build/test check runs once all agent work completes and a
+    /// failure routes into replanning. No-op if a QualityGate already exists.
+    pub fn with_trailing_quality_gate(mut self) -> Self {
+        if self.steps.iter().any(|s| s.kind == StepKind::QualityGate) || self.steps.is_empty() {
+            return self;
+        }
+        let deps: Vec<String> = self.steps.iter().map(|s| s.id.clone()).collect();
+        let id = "quality-gate".to_string();
+        self.steps.push(WorkflowStep {
+            id: id.clone(),
+            kind: StepKind::QualityGate,
+            task: SubTask {
+                id,
+                description: "Run build/test quality gate".into(),
+                files: Vec::new(),
+                complexity: inference_client::Complexity::Simple,
+                depends_on: deps,
+                edit: None,
+                template: None,
+            },
+            state: StepState::Pending,
+            attempts: 0,
+            max_attempts: DEFAULT_STEP_MAX_ATTEMPTS,
+            preconditions: Vec::new(),
+            effects: Vec::new(),
+            error: None,
+            agent_run_id: None,
+        });
+        self
+    }
+
     /// Ids of steps in `Passed` state.
     pub fn completed_ids(&self) -> HashSet<String> {
         self.steps.iter()
@@ -275,12 +368,35 @@ impl WorkflowRun {
         self.steps.iter().filter(|s| s.is_ready(&done)).collect()
     }
 
-    /// Remaining (pending) tasks, cloned for execution.
-    pub fn pending_tasks(&self) -> Vec<SubTask> {
+    /// Any step still pending (controls included).
+    pub fn has_pending(&self) -> bool {
+        self.steps.iter().any(|s| s.state == StepState::Pending)
+    }
+
+    /// Id of the first ready control step (HumanApproval/QualityGate), if any.
+    pub fn ready_control_step(&self) -> Option<(String, StepKind)> {
+        let done = self.completed_ids();
         self.steps.iter()
-            .filter(|s| s.state == StepState::Pending)
+            .find(|s| s.is_ready(&done) && s.kind.is_control())
+            .map(|s| (s.id.clone(), s.kind.clone()))
+    }
+
+    /// Ready AgentTask steps, cloned for dispatch (control steps excluded).
+    pub fn ready_agent_tasks(&self) -> Vec<SubTask> {
+        let done = self.completed_ids();
+        self.steps.iter()
+            .filter(|s| s.is_ready(&done) && !s.kind.is_control())
             .map(|s| s.task.clone())
             .collect()
+    }
+
+    /// Set a step's state (and optional error) by id.
+    pub fn mark_step(&mut self, id: &str, state: StepState, error: Option<String>) {
+        if let Some(step) = self.steps.iter_mut().find(|s| s.id == id) {
+            step.state = state;
+            step.attempts += 1;
+            step.error = error;
+        }
     }
 
     /// First failed step, if any.
@@ -476,6 +592,32 @@ mod tests {
         assert_eq!(wf.steps[0].state, StepState::Pending);
         assert!(wf.captured_files.is_empty());
         assert!(wf.checkpoint_complete);
+    }
+
+    #[test]
+    fn trailing_quality_gate_depends_on_all_and_is_idempotent() {
+        let wf = WorkflowRun::from_tasks(
+            "p", "g", "r", vec![task("a", &[]), task("b", &["a"])], "t",
+        ).with_trailing_quality_gate();
+        let qg = wf.steps.iter().find(|s| s.kind == StepKind::QualityGate).unwrap();
+        assert_eq!(qg.id, "quality-gate");
+        let mut deps = qg.task.depends_on.clone();
+        deps.sort();
+        assert_eq!(deps, vec!["a".to_string(), "b".to_string()]);
+        // idempotent
+        let again = wf.with_trailing_quality_gate();
+        assert_eq!(again.steps.iter().filter(|s| s.kind == StepKind::QualityGate).count(), 1);
+    }
+
+    #[test]
+    fn quality_gate_ready_only_after_deps() {
+        let mut wf = WorkflowRun::from_tasks("p", "g", "r", vec![task("a", &[])], "t")
+            .with_trailing_quality_gate();
+        assert!(wf.ready_control_step().is_none()); // a not done yet
+        wf.steps[0].state = StepState::Passed;
+        let (id, kind) = wf.ready_control_step().unwrap();
+        assert_eq!(id, "quality-gate");
+        assert_eq!(kind, StepKind::QualityGate);
     }
 
     #[test]

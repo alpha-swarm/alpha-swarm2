@@ -58,22 +58,21 @@ impl DbResponse {
         Self { ok: false, rows: serde_json::Value::Array(vec![]), error: Some(error.into()), truncated: false }
     }
 
-    /// Serialize, halving the row count until under the payload guard.
-    fn to_bytes(mut self) -> Vec<u8> {
-        loop {
-            let bytes = serde_json::to_vec(&self).unwrap_or_default();
-            if bytes.len() <= MAX_RESPONSE_BYTES {
-                return bytes;
-            }
-            let serde_json::Value::Array(ref mut rows) = self.rows else {
-                return serde_json::to_vec(&DbResponse::err("response too large")).unwrap_or_default();
-            };
-            if rows.is_empty() {
-                return serde_json::to_vec(&DbResponse::err("response too large")).unwrap_or_default();
-            }
-            rows.truncate(rows.len() / 2);
-            self.truncated = true;
+    /// Serialize. A result that exceeds the payload guard is a HARD ERROR —
+    /// never silently truncated. Partial-but-OK data reads as complete and is
+    /// the worst failure mode for a dashboard; a loud error tells the caller
+    /// to add a LIMIT or narrow the query.
+    fn to_bytes(self) -> Vec<u8> {
+        let bytes = serde_json::to_vec(&self).unwrap_or_default();
+        if bytes.len() <= MAX_RESPONSE_BYTES {
+            return bytes;
         }
+        let n = self.rows.as_array().map(|a| a.len()).unwrap_or(0);
+        warn!(bytes = bytes.len(), rows = n, max = MAX_RESPONSE_BYTES, "bridge response over cap — rejecting (add LIMIT)");
+        serde_json::to_vec(&DbResponse::err(format!(
+            "result {} bytes ({} rows) exceeds {}-byte cap — add a LIMIT or narrow the query",
+            bytes.len(), n, MAX_RESPONSE_BYTES
+        ))).unwrap_or_default()
     }
 }
 
@@ -234,6 +233,20 @@ impl DbBridge {
                 Ok(defs) => DbResponse::ok(defs.iter().filter_map(|d| serde_json::to_value(d).ok()).collect()),
                 Err(e) => DbResponse::err(e.to_string()),
             },
+            "run-from-def" => {
+                let project = body.get("project").and_then(|v| v.as_str()).unwrap_or("");
+                let goal = body.get("goal").and_then(|v| v.as_str()).unwrap_or("");
+                let def_name = body.get("def_name").and_then(|v| v.as_str()).unwrap_or("");
+                let files: Vec<String> = body.get("files")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+                if project.is_empty() || goal.is_empty() || def_name.is_empty() {
+                    return DbResponse::err("project, goal, def_name required");
+                }
+                match self.engine.create_from_def(self.store.as_ref(), project, goal, def_name, files).await {
+                    Ok(run_id) => DbResponse::ok(vec![serde_json::json!({ "run_id": run_id })]),
+                    Err(e) => DbResponse::err(e.to_string()),
+                }
+            }
             other => DbResponse::err(format!("unknown workflow op: {other}")),
         }
     }
@@ -329,13 +342,23 @@ mod tests {
     }
 
     #[test]
-    fn oversized_response_truncates() {
+    fn oversized_response_fails_loud() {
         let big_row = serde_json::json!({ "data": "x".repeat(100_000) });
         let rows = vec![big_row; 20]; // ~2MB
-        let resp = DbResponse::ok(rows);
-        let bytes = resp.to_bytes();
+        let bytes = DbResponse::ok(rows).to_bytes();
         assert!(bytes.len() <= MAX_RESPONSE_BYTES);
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(parsed["truncated"], serde_json::Value::Bool(true));
+        // Hard error, NOT partial data.
+        assert_eq!(parsed["ok"], serde_json::Value::Bool(false));
+        assert!(parsed["error"].as_str().unwrap().contains("exceeds"));
+        assert_eq!(parsed["rows"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn normal_response_passes_through() {
+        let bytes = DbResponse::ok(vec![serde_json::json!({"x": 1})]).to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["ok"], serde_json::Value::Bool(true));
+        assert_eq!(parsed["rows"].as_array().unwrap().len(), 1);
     }
 }

@@ -136,6 +136,20 @@ async fn handle_workflow(
         "defs" => shared.engine.repo().list_defs().await
             .map(|d| d.iter().filter_map(|x| serde_json::to_value(x).ok()).collect())
             .map_err(|e| e.to_string()),
+        "run-from-def" => {
+            let project = body.get("project").and_then(|v| v.as_str()).unwrap_or("");
+            let goal = body.get("goal").and_then(|v| v.as_str()).unwrap_or("");
+            let def_name = body.get("def_name").and_then(|v| v.as_str()).unwrap_or("");
+            let files: Vec<String> = body.get("files")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+            if project.is_empty() || goal.is_empty() || def_name.is_empty() {
+                Err("project, goal, def_name required".to_string())
+            } else {
+                shared.engine.create_from_def(shared.store.as_ref(), project, goal, def_name, files).await
+                    .map(|run_id| vec![serde_json::json!({ "run_id": run_id })])
+                    .map_err(|e| e.to_string())
+            }
+        }
         "pause" if !run_id.is_empty() => {
             shared.engine.control_for(run_id).await.request_pause();
             Ok(vec![serde_json::json!({ "requested": "pause", "run_id": run_id })])
