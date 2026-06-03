@@ -104,6 +104,15 @@ async fn handle_workflow(
     let body: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
     let run_id = body.get("run_id").and_then(|v| v.as_str()).unwrap_or("");
 
+    // Output checkpoints (captured_files) stay server-side — strip from
+    // bridge responses.
+    fn strip_checkpoint(mut v: serde_json::Value) -> serde_json::Value {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("captured_files");
+        }
+        v
+    }
+
     let result: Result<Vec<serde_json::Value>, String> = match op.as_str() {
         "list" => {
             let project = body.get("project").and_then(|v| v.as_str()).unwrap_or("");
@@ -112,11 +121,17 @@ async fn handle_workflow(
             } else {
                 shared.engine.repo().list_runs(project).await
             };
-            r.map(|runs| runs.iter().filter_map(|x| serde_json::to_value(x).ok()).collect())
+            r.map(|runs| runs.iter()
+                    .filter_map(|x| serde_json::to_value(x).ok())
+                    .map(strip_checkpoint)
+                    .collect())
                 .map_err(|e| e.to_string())
         }
         "get" => shared.engine.repo().get_by_run_id(run_id).await
-            .map(|o| o.into_iter().filter_map(|x| serde_json::to_value(&x).ok()).collect())
+            .map(|o| o.into_iter()
+                .filter_map(|x| serde_json::to_value(&x).ok())
+                .map(strip_checkpoint)
+                .collect())
             .map_err(|e| e.to_string()),
         "defs" => shared.engine.repo().list_defs().await
             .map(|d| d.iter().filter_map(|x| serde_json::to_value(x).ok()).collect())

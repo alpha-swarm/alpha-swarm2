@@ -212,11 +212,41 @@ impl WorkflowEngine {
     ///
     /// Pre-existing `Passed` steps are never re-run within this engine session;
     /// steps found `Running` (crash residue) are reset to `Pending` first.
+    /// On resume, earlier rounds' file outputs are reproduced from the
+    /// checkpoint; an incomplete checkpoint resets Passed steps instead
+    /// (correctness over speed — never trust partial outputs).
     pub async fn execute(&self, wf: &mut WorkflowRun, ctx: &EngineContext<'_>) -> Result<EngineOutcome> {
         // Reset crash residue.
         for s in &mut wf.steps {
             if s.state == StepState::Running {
                 s.state = StepState::Pending;
+            }
+        }
+
+        // Resume seeding: reproduce checkpointed outputs of already-Passed
+        // steps, or re-run them when the checkpoint can't be trusted.
+        let has_passed = wf.steps.iter().any(|s| s.state == StepState::Passed);
+        let mut resume_seed: Option<SwarmResult> = None;
+        if has_passed {
+            if wf.checkpoint_complete {
+                info!(run_id = %wf.run_id, files = wf.captured_files.len(), "Resume: seeding outputs from checkpoint");
+                resume_seed = Some(SwarmResult {
+                    goal: wf.goal.clone(),
+                    tasks: vec![],
+                    results: vec![],
+                    merged_diff: None,
+                    quality_passed: true,
+                    total_duration_ms: 0,
+                    modified_files: wf.captured_files.iter()
+                        .map(|f| (f.path.clone(), f.content.clone().into_bytes()))
+                        .collect(),
+                    phase_timings: Default::default(),
+                    halted: false,
+                    retrieved_pattern_ids: vec![],
+                });
+            } else {
+                let reset = wf.reset_passed_steps();
+                warn!(run_id = %wf.run_id, reset, "Resume: checkpoint incomplete — re-running Passed steps");
             }
         }
 
@@ -228,7 +258,7 @@ impl WorkflowEngine {
 
         let control = self.control_for(&wf.run_id).await;
         control.resume();
-        let mut aggregate: Option<SwarmResult> = None;
+        let mut aggregate: Option<SwarmResult> = resume_seed;
 
         let outcome = loop {
             // Cooperative pause/cancel between rounds.
@@ -348,6 +378,9 @@ impl WorkflowEngine {
             let round = ctx.runner.run_planned(&wf.goal, remaining).await?;
             Self::absorb_round(wf, &round);
             Self::check_effects(wf, &round);
+            // Durable output checkpoint: a crash after this update cannot
+            // lose this round's edits.
+            wf.absorb_captured(&round.modified_files);
 
             // Checkpoint + per-step events.
             self.repo.update_run(wf).await?;

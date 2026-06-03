@@ -7,8 +7,8 @@
 // WASI-portable model (serde only).
 pub mod model;
 pub use model::{
-    Condition, StepKind, StepState, WorkflowDef, WorkflowRun, WorkflowState, WorkflowStep,
-    DEFAULT_STEP_MAX_ATTEMPTS, MAX_REPLAN_ATTEMPTS, WORKFLOW_SCHEMA_VERSION,
+    CapturedFile, Condition, StepKind, StepState, WorkflowDef, WorkflowRun, WorkflowState,
+    WorkflowStep, DEFAULT_STEP_MAX_ATTEMPTS, MAX_REPLAN_ATTEMPTS, WORKFLOW_SCHEMA_VERSION,
 };
 
 // Native-only: engine, persistence, templates.

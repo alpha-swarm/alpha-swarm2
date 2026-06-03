@@ -17,6 +17,10 @@ pub const MAX_REPLAN_ATTEMPTS: u32 = 3;
 pub const DEFAULT_STEP_MAX_ATTEMPTS: u32 = 2;
 /// Id prefix applied to steps spliced in by replan round `n`: `r{n}-{id}`.
 pub const REPLAN_STEP_ID_PREFIX: &str = "r";
+/// Max bytes of a single file checkpointed into the workflow document.
+pub const MAX_CHECKPOINT_FILE_BYTES: usize = 262_144;
+/// Max total bytes of checkpointed file content per workflow run.
+pub const MAX_CHECKPOINT_TOTAL_BYTES: usize = 2_097_152;
 
 /// Workflow run lifecycle: `created→running↔paused→completed/cancelled/failed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +147,18 @@ pub struct WorkflowDef {
     pub created_at: String,
 }
 
+/// A file output captured from a completed execution round, checkpointed so a
+/// daemon crash between rounds cannot lose already-Passed steps' edits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapturedFile {
+    pub path: String,
+    pub content: String,
+}
+
+fn default_checkpoint_complete() -> bool {
+    true
+}
+
 /// A concrete, persisted workflow execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRun {
@@ -163,6 +179,15 @@ pub struct WorkflowRun {
     pub schema_version: u32,
     pub created_at: String,
     pub updated_at: String,
+    /// File outputs of completed rounds (path → latest content), persisted
+    /// alongside step states so resume can reproduce earlier rounds' edits.
+    #[serde(default)]
+    pub captured_files: Vec<CapturedFile>,
+    /// False when checkpointing skipped content (binary or size caps) —
+    /// resume must then re-run Passed-but-unmerged steps instead of trusting
+    /// a partial checkpoint.
+    #[serde(default = "default_checkpoint_complete")]
+    pub checkpoint_complete: bool,
 }
 
 impl WorkflowRun {
@@ -188,7 +213,52 @@ impl WorkflowRun {
             schema_version: WORKFLOW_SCHEMA_VERSION,
             created_at: now.clone(),
             updated_at: now,
+            captured_files: Vec::new(),
+            checkpoint_complete: true,
         }
+    }
+
+    /// Fold a round's file outputs into the checkpoint (last write per path
+    /// wins). Content that is binary or exceeds the size caps is skipped and
+    /// marks the checkpoint incomplete so resume falls back to re-running.
+    pub fn absorb_captured(&mut self, modified_files: &[(String, Vec<u8>)]) {
+        for (path, bytes) in modified_files {
+            let Ok(content) = String::from_utf8(bytes.clone()) else {
+                self.checkpoint_complete = false;
+                continue;
+            };
+            if content.len() > MAX_CHECKPOINT_FILE_BYTES {
+                self.checkpoint_complete = false;
+                continue;
+            }
+            let current_total: usize = self.captured_files.iter().map(|f| f.content.len()).sum();
+            match self.captured_files.iter_mut().find(|f| &f.path == path) {
+                Some(existing) => existing.content = content,
+                None => {
+                    if current_total + content.len() > MAX_CHECKPOINT_TOTAL_BYTES {
+                        self.checkpoint_complete = false;
+                        continue;
+                    }
+                    self.captured_files.push(CapturedFile { path: path.clone(), content });
+                }
+            }
+        }
+    }
+
+    /// Reset Passed steps to Pending — used on resume when the checkpoint is
+    /// incomplete and earlier rounds' outputs cannot be reproduced. Returns
+    /// the number of steps reset.
+    pub fn reset_passed_steps(&mut self) -> usize {
+        let mut reset = 0;
+        for s in &mut self.steps {
+            if s.state == StepState::Passed {
+                s.state = StepState::Pending;
+                reset += 1;
+            }
+        }
+        self.captured_files.clear();
+        self.checkpoint_complete = true;
+        reset
     }
 
     /// Ids of steps in `Passed` state.
@@ -368,6 +438,44 @@ mod tests {
         wf.splice_replan("a", vec![task("x", &[]), task("y", &["x"])], "t");
         let y = wf.steps.iter().find(|s| s.id == "r1-y").unwrap();
         assert_eq!(y.task.depends_on, vec!["r1-x".to_string()]);
+    }
+
+    #[test]
+    fn absorb_captured_dedupes_and_tracks_completeness() {
+        let mut wf = WorkflowRun::from_tasks("p", "g", "r", vec![task("a", &[])], "t");
+        wf.absorb_captured(&[("src/a.rs".into(), b"v1".to_vec())]);
+        wf.absorb_captured(&[("src/a.rs".into(), b"v2".to_vec()), ("src/b.rs".into(), b"x".to_vec())]);
+        assert!(wf.checkpoint_complete);
+        assert_eq!(wf.captured_files.len(), 2);
+        assert_eq!(wf.captured_files.iter().find(|f| f.path == "src/a.rs").unwrap().content, "v2");
+    }
+
+    #[test]
+    fn absorb_captured_oversize_marks_incomplete() {
+        let mut wf = WorkflowRun::from_tasks("p", "g", "r", vec![task("a", &[])], "t");
+        let big = vec![b'x'; MAX_CHECKPOINT_FILE_BYTES + 1];
+        wf.absorb_captured(&[("big.rs".into(), big)]);
+        assert!(!wf.checkpoint_complete);
+        assert!(wf.captured_files.is_empty());
+    }
+
+    #[test]
+    fn absorb_captured_binary_marks_incomplete() {
+        let mut wf = WorkflowRun::from_tasks("p", "g", "r", vec![task("a", &[])], "t");
+        wf.absorb_captured(&[("bin".into(), vec![0xFF, 0xFE, 0x00])]);
+        assert!(!wf.checkpoint_complete);
+    }
+
+    #[test]
+    fn reset_passed_steps_clears_checkpoint() {
+        let mut wf = WorkflowRun::from_tasks("p", "g", "r", vec![task("a", &[]), task("b", &[])], "t");
+        wf.steps[0].state = StepState::Passed;
+        wf.absorb_captured(&[("x.rs".into(), b"data".to_vec())]);
+        wf.checkpoint_complete = false;
+        assert_eq!(wf.reset_passed_steps(), 1);
+        assert_eq!(wf.steps[0].state, StepState::Pending);
+        assert!(wf.captured_files.is_empty());
+        assert!(wf.checkpoint_complete);
     }
 
     #[test]

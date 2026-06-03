@@ -166,6 +166,15 @@ impl DbBridge {
         }
     }
 
+    /// Drop the (potentially multi-MB) output checkpoint from a workflow_run
+    /// JSON before it crosses the bridge — consumers want states, not blobs.
+    fn strip_checkpoint(mut v: serde_json::Value) -> serde_json::Value {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("captured_files");
+        }
+        v
+    }
+
     async fn handle_workflow(&self, op: &str, payload: &[u8]) -> DbResponse {
         let body: serde_json::Value = serde_json::from_slice(payload).unwrap_or(serde_json::Value::Null);
         let run_id = body.get("run_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -178,12 +187,15 @@ impl DbBridge {
                     self.engine.repo().list_runs(project).await
                 };
                 match result {
-                    Ok(runs) => DbResponse::ok(runs.iter().filter_map(|r| serde_json::to_value(r).ok()).collect()),
+                    Ok(runs) => DbResponse::ok(runs.iter()
+                        .filter_map(|r| serde_json::to_value(r).ok())
+                        .map(Self::strip_checkpoint)
+                        .collect()),
                     Err(e) => DbResponse::err(e.to_string()),
                 }
             }
             "get" => match self.engine.repo().get_by_run_id(run_id).await {
-                Ok(Some(run)) => DbResponse::ok(vec![serde_json::to_value(&run).unwrap_or_default()]),
+                Ok(Some(run)) => DbResponse::ok(vec![Self::strip_checkpoint(serde_json::to_value(&run).unwrap_or_default())]),
                 Ok(None) => DbResponse::ok(vec![]),
                 Err(e) => DbResponse::err(e.to_string()),
             },
