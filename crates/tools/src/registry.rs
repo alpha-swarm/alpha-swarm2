@@ -68,6 +68,16 @@ impl ToolRegistry {
         self
     }
 
+    /// Register the agent-facing memory tools (recall/store over the daemon's
+    /// NATS DB bridge). Only call when a NATS client is available so the
+    /// prompt's tool list stays honest.
+    #[cfg(feature = "native")]
+    pub fn with_memory_tools(mut self, client: async_nats::Client) -> Self {
+        self.register(Box::new(crate::memory_tools::MemoryRecallTool::new(client.clone())));
+        self.register(Box::new(crate::memory_tools::MemoryStoreTool::new(client)));
+        self
+    }
+
     /// Get tool names for inclusion in agent prompts.
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()

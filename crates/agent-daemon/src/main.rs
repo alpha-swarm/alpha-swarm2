@@ -32,6 +32,8 @@ const RESOURCE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const LEASE_RENEWAL_INTERVAL: Duration = Duration::from_secs(120);
 /// Text used by the startup embedding-dimension probe.
 const EMBED_PROBE_TEXT: &str = "probe";
+/// How often unused stale memory entries are pruned (per project).
+const MEMORY_DECAY_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -173,23 +175,47 @@ async fn main() -> Result<()> {
         ));
     }
 
+    let memory = Arc::new(knowledge_base::MemoryStore::new(
+        Arc::clone(&store),
+        Arc::clone(&ollama),
+        config.defaults.embed_model.clone(),
+    ));
+
     // NATS DB bridge: the query surface for native consumers (TUI, eval,
     // event-consumer, remote daemons).
     match async_nats::connect(&config.nats.url).await {
         Ok(bridge_client) => {
-            let memory = Arc::new(knowledge_base::MemoryStore::new(
-                Arc::clone(&store),
-                Arc::clone(&ollama),
-                config.defaults.embed_model.clone(),
-            ));
             let bridge = db_bridge::DbBridge::new(
                 Arc::clone(&store),
                 Arc::clone(&wf_engine),
-                memory,
+                Arc::clone(&memory),
             );
             tokio::spawn(bridge.serve(bridge_client));
         }
         Err(e) => warn!("DB bridge NATS connect failed (bridge unavailable): {e}"),
+    }
+
+    // Memory hygiene: periodically prune unused stale entries per project.
+    if config.learning.enabled {
+        let decay_store = Arc::clone(&store);
+        let decay_memory = Arc::clone(&memory);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(MEMORY_DECAY_INTERVAL).await;
+                let projects = decay_store
+                    .query_json("SELECT name FROM project", serde_json::Value::Null)
+                    .await
+                    .unwrap_or_default();
+                for row in projects {
+                    let Some(name) = row.get("name").and_then(|n| n.as_str()) else { continue };
+                    match decay_memory.decay(name).await {
+                        Ok(0) => {}
+                        Ok(pruned) => info!(project = name, pruned, "Memory decay pruned entries"),
+                        Err(e) => warn!(project = name, error = %e, "Memory decay failed"),
+                    }
+                }
+            }
+        });
     }
 
     // Start resource heartbeat

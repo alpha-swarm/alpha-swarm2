@@ -1,0 +1,25 @@
+# systemd user unit for malna (RPi) — wash host joining the alpha-swarm
+# lattice via picur's NATS over tailscale.
+#
+# Install (on malna):
+#   mkdir -p ~/.config/systemd/user
+#   cp alpha-swarm-wash-host.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now alpha-swarm-wash-host
+#   loginctl enable-linger markkovari   # survive logout/reboot
+[Unit]
+Description=alpha-swarm wasmCloud host (wash)
+After=network-online.target
+
+[Service]
+ExecStart=%h/.wash/bin/wash host \
+    --scheduler-nats-url nats://100.79.38.122:4223 \
+    --data-nats-url nats://100.79.38.122:4223 \
+    --host-name alpha-swarm-malna \
+    --host-group alpha-swarm \
+    --non-interactive
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -10,7 +10,8 @@ url = "http://100.81.10.8:11434"   # csatapaci
 #       remote   (external server at `url` — escape hatch)
 #       nats     (no direct DB; go through the daemon bridge swarm.db.>)
 mode = "embedded"
-path = "/tmp/alpha-swarm/surrealdb/embedded"
+# Durable location — /tmp would be wiped on reboot (incl. learned SONA patterns).
+path = "/Users/markkovari/.local/share/alpha-swarm/surrealdb/embedded"
 url = "127.0.0.1:8001"             # only used when mode = "remote"
 namespace = "alpha_swarm"
 database = "swarm"

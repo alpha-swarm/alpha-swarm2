@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.alphaswarm.agent-daemon</string>
+
+    <!-- Config (alpha-swarm.toml) is loaded from the working directory. -->
+    <key>WorkingDirectory</key>
+    <string>/Users/markkovari/DEV/markkovari/alpha-swarm2</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/markkovari/DEV/markkovari/alpha-swarm2/target/release/agent-daemon</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/markkovari/Library/Logs/alpha-swarm/agent-daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/markkovari/Library/Logs/alpha-swarm/agent-daemon.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/local/bin</string>
+    </dict>
+</dict>
+</plist>

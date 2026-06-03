@@ -23,6 +23,8 @@ mod tree_sitter_tools;
 mod web;
 #[cfg(feature = "native")]
 pub mod nats_dispatch;
+#[cfg(feature = "native")]
+pub mod memory_tools;
 
 pub mod registry;
 pub use registry::ToolRegistry;

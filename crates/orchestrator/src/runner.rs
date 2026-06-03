@@ -852,7 +852,12 @@ impl SwarmRunner {
                             });
                         }
 
-                        let tools = swarm_tools::ToolRegistry::with_defaults();
+                        let mut tools = swarm_tools::ToolRegistry::with_defaults();
+                        // Memory tools need the NATS bridge — register only
+                        // when a client is attached (prompt list stays honest).
+                        if let Some(nc) = nats_client_clone.clone() {
+                            tools = tools.with_memory_tools(nc);
+                        }
                         const MAX_TOOL_STEPS: u32 = 10;
                         let result = agent.run_with_tools(&augmented_desc, &task.files, task.complexity, &tools, MAX_TOOL_STEPS).await;
                         (task, result)

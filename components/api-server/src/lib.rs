@@ -436,18 +436,21 @@ fn api_goals(response_out: ResponseOutparam, project: &str) {
 const DB_WORKFLOW_SUBJECT_PREFIX: &str = "swarm.db.workflow.";
 
 /// Proxy a workflow op (list/get/pause/resume/cancel/defs) to the bridge:
-/// NATS messaging first, HTTP shim fallback (the daemon serves both).
+/// HTTP shim first (single-digit ms), NATS messaging fallback.
 fn api_workflow_op(response_out: ResponseOutparam, op: &str, body: serde_json::Value) {
     let subject = format!("{DB_WORKFLOW_SUBJECT_PREFIX}{op}");
     let payload = body.to_string();
     let parsed: Result<serde_json::Value, String> =
-        match wasmcloud::messaging::consumer::request(&subject, &payload.clone().into_bytes(), BRIDGE_TIMEOUT_MS) {
-            Ok(resp) => serde_json::from_slice(&resp.body).map_err(|e| format!("bridge json: {e}")),
+        match http_post_json(&format!("/workflow/{op}"), &payload)
+            .and_then(|t| serde_json::from_str(&t).map_err(|e| format!("shim json: {e}")))
+        {
+            Ok(v) => Ok(v),
             Err(_) => {
-                // Messaging unavailable (e.g. wash dev in-memory plugin) —
-                // POST the daemon's HTTP shim instead.
-                http_post_json(&format!("/workflow/{op}"), &payload)
-                    .and_then(|t| serde_json::from_str(&t).map_err(|e| format!("shim json: {e}")))
+                // Shim unreachable — try the NATS messaging path (real
+                // wasmCloud host with a live messaging provider).
+                wasmcloud::messaging::consumer::request(&subject, &payload.clone().into_bytes(), BRIDGE_TIMEOUT_MS)
+                    .map_err(|e| format!("bridge: {e}"))
+                    .and_then(|resp| serde_json::from_slice(&resp.body).map_err(|e| format!("bridge json: {e}")))
             }
         };
     match parsed {
@@ -541,19 +544,17 @@ fn bridge_query(query: &str) -> Result<String, String> {
 }
 
 fn surreal_query(query: &str) -> Result<String, String> {
-    // Prefer the NATS DB bridge (daemon-owned DB). Fall back to the legacy
-    // HTTP path while the external SurrealDB server still exists; the
-    // fallback dies with the embedded cutover.
-    if let Ok(body) = bridge_query(query) {
-        return Ok(body);
-    }
-    // Use inline NS/DB selection + table definitions as SQL prefix
-    // This avoids relying on HTTP headers for namespace selection
+    // Shim-first: the daemon's HTTP /sql shim answers in single-digit ms.
+    // The NATS messaging path is the fallback — under wash dev the messaging
+    // plugin is in-memory only and each attempt burns BRIDGE_TIMEOUT_MS.
     let full_query = format!(
         "USE NS alpha_swarm DB swarm; DEFINE TABLE IF NOT EXISTS agent_run SCHEMALESS; DEFINE TABLE IF NOT EXISTS project SCHEMALESS; {}",
         query
     );
-    surreal_raw_query_no_headers(&full_query)
+    if let Ok(body) = surreal_raw_query_no_headers(&full_query) {
+        return Ok(body);
+    }
+    bridge_query(query)
 }
 
 fn surreal_raw_query_no_headers(query: &str) -> Result<String, String> {
@@ -1186,11 +1187,11 @@ fn mcp_call_tool(name: &str, args: &serde_json::Value) -> Result<serde_json::Val
 }
 
 fn surreal_query_ns(query: &str) -> Result<String, String> {
-    // Bridge-first, legacy HTTP fallback (same policy as surreal_query).
-    if let Ok(body) = bridge_query(query) {
+    // Shim-first, messaging fallback (same policy as surreal_query).
+    if let Ok(body) = surreal_raw_query_full(query, "alpha_swarm", "swarm") {
         return Ok(body);
     }
-    surreal_raw_query_full(query, "alpha_swarm", "swarm")
+    bridge_query(query)
 }
 
 fn surreal_raw_query_full(query: &str, ns: &str, db: &str) -> Result<String, String> {
