@@ -9,15 +9,18 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 inference-client = { path = "../inference-client", default-features = false }
+swarm-config = { path = "../config", default-features = false }
 
 # Native-only
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
-surrealdb = { version = "3", optional = true }
+surrealdb = { version = "3", optional = true, features = ["kv-surrealkv"] }
 chrono = { version = "0.4", features = ["serde"], optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 sha2 = { version = "0.10", optional = true }
+async-nats = { version = "0.38", optional = true }
+async-trait = { workspace = true, optional = true }
 
 [features]
 default = ["native"]
-native = ["inference-client/native", "tokio", "tracing", "surrealdb", "chrono", "uuid", "sha2"]
+native = ["inference-client/native", "tokio", "tracing", "surrealdb", "chrono", "uuid", "sha2", "async-nats", "async-trait"]

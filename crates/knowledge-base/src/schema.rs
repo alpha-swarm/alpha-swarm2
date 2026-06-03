@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+/// Embedding vector dimension. Single source of truth shared by the HNSW index
+/// DDL and the startup dimension probe. Must match the output dimension of
+/// `config.defaults.embed_model` (nomic-embed-text = 768).
+pub const EMBED_DIM: usize = 768;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRun {
     pub id: Option<String>,
@@ -108,6 +113,9 @@ pub struct GoalPlan {
     pub web_searches: Vec<String>,
     pub reasoning: String,
     pub created_at: String,
+    /// Memory pattern ids injected into this plan's prompt (SONA signal).
+    #[serde(default)]
+    pub retrieved_pattern_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +125,67 @@ pub struct PlannedTask {
     pub files: Vec<String>,
     pub complexity: String,
     pub rationale: String,
+    /// Task ids this task depends on (DAG edges). Persisted so the plan's
+    /// dependency graph survives the SubTask → PlannedTask projection.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// Graph template ("edit", "create", "refactor", "doc") if assigned by the planner.
+    #[serde(default)]
+    pub template: Option<String>,
+    /// Direct edit payload if the planner emitted one (mirror of orchestrator's DirectEdit;
+    /// knowledge-base cannot depend on orchestrator, so the shape is duplicated here).
+    #[serde(default)]
+    pub edit: Option<PlannedEdit>,
+}
+
+/// WASI-portable mirror of `swarm_orchestrator::DirectEdit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannedEdit {
+    pub path: String,
+    pub old: String,
+    pub new: String,
+}
+
+// --- Agent memory (namespaced semantic memory; SONA learning loop) ---
+
+/// Distilled goal→plan patterns from successful runs.
+pub const MEM_NS_PATTERNS: &str = "patterns";
+/// Concrete working solutions worth recalling verbatim.
+pub const MEM_NS_SOLUTIONS: &str = "solutions";
+/// User feedback on plans, keyed by goal shape.
+pub const MEM_NS_FEEDBACK: &str = "feedback";
+/// Error signatures from failed runs.
+pub const MEM_NS_ERRORS: &str = "errors";
+/// Full run trajectories (goal → steps → outcome).
+pub const MEM_NS_TRAJECTORIES: &str = "trajectories";
+
+/// One namespaced memory entry. `embedding` is skipped in bridge JSON when
+/// empty so list/search responses stay small.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryEntry {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub namespace: String,
+    /// Stable key within (namespace, project) — e.g. a goal-shape hash.
+    pub key: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub embedding: Vec<f32>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    pub project: String,
+    pub created_at: String,
+    pub last_used_at: String,
+    pub use_count: u32,
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
+/// A semantic search hit with its cosine similarity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemorySearchHit {
+    pub entry: MemoryEntry,
+    pub similarity: f32,
 }
 
 impl AgentRun {

@@ -35,7 +35,8 @@ pub async fn execute(
     if let Some(pub_) = events {
         agent = agent.with_events(Arc::new(pub_));
     }
-    let kb_arc = kb.map(Arc::new);
+    let kb_arc: Option<Arc<dyn knowledge_base::KnowledgeBackend>> =
+        kb.map(|s| Arc::new(s) as Arc<dyn knowledge_base::KnowledgeBackend>);
     if let (Some(proj), Some(store)) = (&project, &kb_arc) {
         let embed_model = config.defaults.embed_model.clone();
         agent = agent.with_knowledge(KnowledgeConfig {

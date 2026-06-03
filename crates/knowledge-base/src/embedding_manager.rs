@@ -5,7 +5,7 @@ use std::sync::Arc;
 use sha2::{Sha256, Digest};
 use tracing::{info, warn, debug};
 use inference_client::OllamaBackend;
-use crate::KnowledgeStore;
+use crate::backend::KnowledgeBackend;
 
 const BATCH_SIZE: usize = 10;
 const SUMMARY_MAX_CHARS: usize = 500;
@@ -33,13 +33,13 @@ fn git_diff_files(repo: &Path, from: &str, to: &str) -> Vec<String> {
 }
 
 pub struct EmbeddingManager {
-    store: Arc<KnowledgeStore>,
+    store: Arc<dyn KnowledgeBackend>,
     ollama: Arc<OllamaBackend>,
     embed_model: String,
 }
 
 impl EmbeddingManager {
-    pub fn new(store: Arc<KnowledgeStore>, ollama: Arc<OllamaBackend>, embed_model: String) -> Self {
+    pub fn new(store: Arc<dyn KnowledgeBackend>, ollama: Arc<OllamaBackend>, embed_model: String) -> Self {
         Self { store, ollama, embed_model }
     }
 

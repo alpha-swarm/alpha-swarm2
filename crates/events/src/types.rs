@@ -95,6 +95,33 @@ pub enum SwarmEvent {
         edits_count: u32,
         timestamp: String,
     },
+    /// A persisted workflow run changed state (started/paused/resumed/completed/cancelled/failed).
+    WorkflowStateChanged {
+        project: String,
+        workflow_id: String,
+        run_id: String,
+        state: String,
+        timestamp: String,
+    },
+    /// One workflow step finished (passed or failed).
+    WorkflowStepDone {
+        project: String,
+        workflow_id: String,
+        run_id: String,
+        step_id: String,
+        passed: bool,
+        timestamp: String,
+    },
+    /// A failed step triggered adaptive replanning; remaining DAG was replaced.
+    WorkflowReplanned {
+        project: String,
+        workflow_id: String,
+        run_id: String,
+        failed_step_id: String,
+        new_step_count: u32,
+        replan_attempt: u32,
+        timestamp: String,
+    },
 }
 
 impl SwarmEvent {
@@ -109,6 +136,9 @@ impl SwarmEvent {
             Self::QualityChecked { project, .. } => format!("alpha-swarm.{project}.quality.checked"),
             Self::ToolCallExecuted { project, .. } => format!("alpha-swarm.{project}.tool.executed"),
             Self::AgentProgress { project, .. } => format!("alpha-swarm.{project}.agent.progress"),
+            Self::WorkflowStateChanged { project, .. } => format!("alpha-swarm.{project}.workflow.state"),
+            Self::WorkflowStepDone { project, .. } => format!("alpha-swarm.{project}.workflow.step"),
+            Self::WorkflowReplanned { project, .. } => format!("alpha-swarm.{project}.workflow.replanned"),
         }
     }
 
@@ -122,7 +152,10 @@ impl SwarmEvent {
             | Self::QualityChecked { project, .. }
             | Self::TaskSubmitted { project, .. }
             | Self::ToolCallExecuted { project, .. }
-            | Self::AgentProgress { project, .. } => project,
+            | Self::AgentProgress { project, .. }
+            | Self::WorkflowStateChanged { project, .. }
+            | Self::WorkflowStepDone { project, .. }
+            | Self::WorkflowReplanned { project, .. } => project,
         }
     }
 

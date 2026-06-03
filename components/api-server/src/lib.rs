@@ -63,6 +63,28 @@ impl Guest for ApiServer {
                 let project = p.strip_prefix("/api/goals/").unwrap_or("default");
                 api_goals(response_out, project);
             }
+            (Method::Get, "/api/workflows") => {
+                api_workflow_op(response_out, "list", serde_json::json!({}));
+            }
+            (Method::Get, p) if p.starts_with("/api/workflows/") => {
+                let run_id = p.strip_prefix("/api/workflows/").unwrap_or("");
+                api_workflow_op(response_out, "get", serde_json::json!({ "run_id": run_id }));
+            }
+            (Method::Post, p) if p.ends_with("/pause") && p.starts_with("/api/workflows/") => {
+                let run_id = p.strip_prefix("/api/workflows/").unwrap_or("").strip_suffix("/pause").unwrap_or("");
+                api_workflow_op(response_out, "pause", serde_json::json!({ "run_id": run_id }));
+            }
+            (Method::Post, p) if p.ends_with("/resume") && p.starts_with("/api/workflows/") => {
+                let run_id = p.strip_prefix("/api/workflows/").unwrap_or("").strip_suffix("/resume").unwrap_or("");
+                api_workflow_op(response_out, "resume", serde_json::json!({ "run_id": run_id }));
+            }
+            (Method::Post, p) if p.ends_with("/cancel") && p.starts_with("/api/workflows/") => {
+                let run_id = p.strip_prefix("/api/workflows/").unwrap_or("").strip_suffix("/cancel").unwrap_or("");
+                api_workflow_op(response_out, "cancel", serde_json::json!({ "run_id": run_id }));
+            }
+            (Method::Get, "/api/workflow-defs") => {
+                api_workflow_op(response_out, "defs", serde_json::json!({}));
+            }
             (Method::Post, "/api/run") => {
                 let body = read_body(&request);
                 api_submit_run(response_out, &body);
@@ -410,7 +432,121 @@ fn api_goals(response_out: ResponseOutparam, project: &str) {
     }
 }
 
+/// Typed workflow ops over the daemon's NATS DB bridge.
+const DB_WORKFLOW_SUBJECT_PREFIX: &str = "swarm.db.workflow.";
+
+/// Proxy a workflow op (list/get/pause/resume/cancel/defs) to the bridge:
+/// NATS messaging first, HTTP shim fallback (the daemon serves both).
+fn api_workflow_op(response_out: ResponseOutparam, op: &str, body: serde_json::Value) {
+    let subject = format!("{DB_WORKFLOW_SUBJECT_PREFIX}{op}");
+    let payload = body.to_string();
+    let parsed: Result<serde_json::Value, String> =
+        match wasmcloud::messaging::consumer::request(&subject, &payload.clone().into_bytes(), BRIDGE_TIMEOUT_MS) {
+            Ok(resp) => serde_json::from_slice(&resp.body).map_err(|e| format!("bridge json: {e}")),
+            Err(_) => {
+                // Messaging unavailable (e.g. wash dev in-memory plugin) —
+                // POST the daemon's HTTP shim instead.
+                http_post_json(&format!("/workflow/{op}"), &payload)
+                    .and_then(|t| serde_json::from_str(&t).map_err(|e| format!("shim json: {e}")))
+            }
+        };
+    match parsed {
+        Ok(parsed) if parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) => {
+            let rows = parsed.get("rows").cloned().unwrap_or(serde_json::Value::Array(vec![]));
+            respond_json(response_out, 200, &rows.to_string());
+        }
+        Ok(parsed) => {
+            let err = parsed.get("error").and_then(|e| e.as_str()).unwrap_or("bridge error");
+            respond_json(response_out, 502, &format!(r#"{{"error":"{}"}}"#, err.replace('"', "'")));
+        }
+        Err(e) => respond_json(response_out, 502, &format!(r#"{{"error":"workflow bridge: {}"}}"#, e.replace('"', "'"))),
+    }
+}
+
+/// POST a JSON body to the daemon HTTP shim at the legacy DB address.
+fn http_post_json(path: &str, body: &str) -> Result<String, String> {
+    let headers = Fields::new();
+    headers.append("content-type", &b"application/json"[..]).map_err(|e| format!("{e:?}"))?;
+    let request = OutgoingRequest::new(headers);
+    request.set_method(&Method::Post).map_err(|_| "method")?;
+    request.set_scheme(Some(&Scheme::Http)).map_err(|_| "scheme")?;
+    request.set_authority(Some("127.0.0.1:8001")).map_err(|_| "authority")?;
+    request.set_path_with_query(Some(path)).map_err(|_| "path")?;
+
+    let out_body = request.body().map_err(|_| "body")?;
+    let out_stream = out_body.write().map_err(|_| "stream")?;
+    out_stream.blocking_write_and_flush(body.as_bytes()).map_err(|e| format!("write: {e:?}"))?;
+    drop(out_stream);
+    OutgoingBody::finish(out_body, None).map_err(|_| "finish")?;
+
+    let future_response = outgoing_handler::handle(request, None).map_err(|e| format!("send: {e:?}"))?;
+    let pollable = future_response.subscribe();
+    pollable.block();
+    let response = future_response.get()
+        .ok_or("no response")?
+        .map_err(|_| "response error")?
+        .map_err(|e| format!("http: {e:?}"))?;
+    let resp_body = response.consume().map_err(|_| "consume")?;
+    let resp_stream = resp_body.stream().map_err(|_| "stream")?;
+    let mut bytes = Vec::new();
+    while let Ok(chunk) = resp_stream.read(65536) {
+        if chunk.is_empty() {
+            resp_stream.subscribe().block();
+            match resp_stream.read(65536) {
+                Ok(c) if !c.is_empty() => bytes.extend_from_slice(&c),
+                _ => break,
+            }
+        } else {
+            bytes.extend_from_slice(&chunk);
+        }
+    }
+    drop(resp_stream);
+    let _ = IncomingBody::finish(resp_body);
+    String::from_utf8(bytes).map_err(|e| format!("utf8: {e}"))
+}
+
+/// Read-only SurrealQL over the daemon's NATS DB bridge.
+const DB_QUERY_SUBJECT: &str = "swarm.db.query";
+/// Write SurrealQL over the daemon's NATS DB bridge.
+const DB_EXEC_SUBJECT: &str = "swarm.db.exec";
+/// Request-reply timeout for bridge calls. Real NATS round-trips measure
+/// 3-13ms; this also bounds the dead-wait before the HTTP-shim fallback when
+/// messaging is the in-memory dev plugin (wash dev).
+const BRIDGE_TIMEOUT_MS: u32 = 2_000;
+
+/// Pick the bridge subject for a statement by its leading verb.
+fn bridge_subject_for(query: &str) -> &'static str {
+    let verb = query.trim_start().split_whitespace().next().unwrap_or("").to_uppercase();
+    if verb == "SELECT" { DB_QUERY_SUBJECT } else { DB_EXEC_SUBJECT }
+}
+
+/// Query the daemon-owned DB via NATS request-reply (`wasmcloud:messaging`).
+/// The response is reshaped to the HTTP `/sql` body shape
+/// (`[{"status":"OK","result":[...]}]`) so existing parsers keep working.
+fn bridge_query(query: &str) -> Result<String, String> {
+    let payload = serde_json::json!({ "query": query }).to_string();
+    let resp = wasmcloud::messaging::consumer::request(
+        bridge_subject_for(query),
+        &payload.into_bytes(),
+        BRIDGE_TIMEOUT_MS,
+    ).map_err(|e| format!("bridge: {e}"))?;
+    let parsed: serde_json::Value = serde_json::from_slice(&resp.body)
+        .map_err(|e| format!("bridge json: {e}"))?;
+    if parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let rows = parsed.get("rows").cloned().unwrap_or(serde_json::Value::Array(vec![]));
+        Ok(serde_json::json!([{ "status": "OK", "result": rows }]).to_string())
+    } else {
+        Err(parsed.get("error").and_then(|e| e.as_str()).unwrap_or("bridge error").to_string())
+    }
+}
+
 fn surreal_query(query: &str) -> Result<String, String> {
+    // Prefer the NATS DB bridge (daemon-owned DB). Fall back to the legacy
+    // HTTP path while the external SurrealDB server still exists; the
+    // fallback dies with the embedded cutover.
+    if let Ok(body) = bridge_query(query) {
+        return Ok(body);
+    }
     // Use inline NS/DB selection + table definitions as SQL prefix
     // This avoids relying on HTTP headers for namespace selection
     let full_query = format!(
@@ -1050,6 +1186,10 @@ fn mcp_call_tool(name: &str, args: &serde_json::Value) -> Result<serde_json::Val
 }
 
 fn surreal_query_ns(query: &str) -> Result<String, String> {
+    // Bridge-first, legacy HTTP fallback (same policy as surreal_query).
+    if let Ok(body) = bridge_query(query) {
+        return Ok(body);
+    }
     surreal_raw_query_full(query, "alpha_swarm", "swarm")
 }
 

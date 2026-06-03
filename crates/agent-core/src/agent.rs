@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use inference_client::{Complexity, InferenceOptions, InferenceResponse, InferenceRouter, OllamaBackend};
-use knowledge_base::{AgentRun, AttemptRecord, KnowledgeStore, RunStatus};
+use knowledge_base::{AgentRun, AttemptRecord, KnowledgeBackend, RunStatus};
 use swarm_events::{EventPublisher, SwarmEvent};
 
 use crate::parser::{FileEdit, parse_edits};
@@ -81,7 +81,7 @@ pub struct AgentResult {
 
 /// Configuration for knowledge-aware agent.
 pub struct KnowledgeConfig {
-    pub store: Arc<KnowledgeStore>,
+    pub store: Arc<dyn KnowledgeBackend>,
     pub embedder: Arc<OllamaBackend>,
     pub embed_model: String,
     pub project: String,

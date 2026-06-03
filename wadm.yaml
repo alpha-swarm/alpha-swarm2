@@ -28,6 +28,17 @@ spec:
               - name: default-http
                 properties:
                   address: 0.0.0.0:8080
+        # NATS request-reply to the agent-daemon DB bridge (swarm.db.>)
+        - type: link
+          properties:
+            target: messaging-nats
+            namespace: wasmcloud
+            package: messaging
+            interfaces: [consumer]
+            target_config:
+              - name: db-bridge-nats
+                properties:
+                  cluster_uris: nats://127.0.0.1:4223
 
     # Agent Worker — runs LLM inference + edit parsing
     - name: agent-worker
@@ -139,6 +150,18 @@ spec:
             properties:
               endpoint: nats://127.0.0.1:4223
 
+    # Messaging NATS — request-reply to the agent-daemon DB bridge
+    - name: messaging-nats
+      type: capability
+      properties:
+        image: ghcr.io/wasmcloud/messaging-nats:0.19.0
+
     # === Native Services (standalone, communicate via NATS) ===
     #   - git-provider (swarm.git.*)
-    #   - agent-daemon (orchestrator, SurrealDB polling)
+    #   - agent-daemon (orchestrator; embeds SurrealDB and serves the
+    #     swarm.db.> request-reply bridge — sole DB owner)
+    #
+    # === Undeployed components (source exists, NOT in this manifest) ===
+    #   knowledge-store, orchestrator-worker, quality-gate-worker,
+    #   tools-worker — deferred; do not wire them to providers without
+    #   also adding them here.

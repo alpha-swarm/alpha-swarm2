@@ -30,7 +30,9 @@ pub fn get_ollama(config: &SwarmConfig) -> OllamaBackend {
 }
 
 pub async fn get_knowledge_store(config: &SwarmConfig) -> Result<Option<KnowledgeStore>> {
-    match KnowledgeStore::connect(&config.surrealdb.url, &config.surrealdb.namespace, &config.surrealdb.database).await {
+    // Embedded mode: surrealkv is single-process — if the daemon already owns
+    // the data dir this fails and the CLI degrades to running without a store.
+    match KnowledgeStore::connect_with(&config.surrealdb).await {
         Ok(store) => Ok(Some(store)),
         Err(e) => {
             tracing::warn!("Knowledge base unavailable: {e}");

@@ -1,13 +1,25 @@
-/// Event consumer daemon: subscribes to NATS events and persists them to SurrealDB.
-/// Single writer to SurrealDB — all other components publish to NATS only.
+/// Event consumer daemon: subscribes to NATS events and persists them via the
+/// agent-daemon's DB bridge. The daemon is the sole DB owner (embedded
+/// surrealkv); this process never opens a SurrealDB connection.
 ///
 /// Configuration: alpha-swarm.toml or env vars.
 use anyhow::Result;
 use tracing::{info, warn, error};
 
-use knowledge_base::{AgentRun, KnowledgeStore, RunStatus};
+use knowledge_base::{AgentRun, RunStatus};
+use knowledge_base::bridge_client::NatsDbClient;
 use swarm_config::SwarmConfig;
 use swarm_events::{EventSubscriber, SwarmEvent};
+
+/// Store an agent run through the DB bridge.
+async fn store_run(bridge: &NatsDbClient, run: &AgentRun) -> Result<()> {
+    let mut json = serde_json::to_value(run)?;
+    if let serde_json::Value::Object(ref mut map) = json {
+        map.remove("id");
+    }
+    bridge.query("CREATE agent_run CONTENT $data", serde_json::json!({ "data": json })).await?;
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -18,8 +30,8 @@ async fn main() -> Result<()> {
     info!(nats = %config.nats.url, "Connecting to NATS");
     let subscriber = EventSubscriber::connect(&config.nats.url).await?;
 
-    info!(surrealdb = %config.surrealdb.url, "Connecting to SurrealDB");
-    let store = KnowledgeStore::connect(&config.surrealdb.url, &config.surrealdb.namespace, &config.surrealdb.database).await?;
+    info!(nats = %config.nats.url, "Connecting to DB bridge (swarm.db.>)");
+    let store = NatsDbClient::connect(&config.nats.url).await?;
 
     info!("Subscribing to all alpha-swarm events...");
     let mut stream = subscriber.subscribe_all().await?;
@@ -38,8 +50,8 @@ async fn main() -> Result<()> {
                 let mut run = AgentRun::new(project, task, agent_id, model);
                 run.status = RunStatus::Running;
                 run.files_modified = files.clone();
-                match store.store_run(&run).await {
-                    Ok(id) => info!(id, "Stored agent start"),
+                match store_run(&store, &run).await {
+                    Ok(()) => info!("Stored agent start"),
                     Err(e) => error!("Failed to store: {e}"),
                 }
             }
@@ -54,7 +66,7 @@ async fn main() -> Result<()> {
                 run.tokens_input = *tokens_input;
                 run.tokens_output = *tokens_output;
                 run.duration_ms = *duration_ms;
-                let _ = store.store_run(&run).await;
+                let _ = store_run(&store, &run).await;
             }
             SwarmEvent::AgentFailed { project, agent_id, error, model, duration_ms, .. } => {
                 warn!(project, agent_id, error, "Agent failed");
@@ -62,7 +74,7 @@ async fn main() -> Result<()> {
                 run.status = RunStatus::Failed;
                 run.error_message = Some(error.clone());
                 run.duration_ms = *duration_ms;
-                let _ = store.store_run(&run).await;
+                let _ = store_run(&store, &run).await;
             }
             SwarmEvent::SwarmPlanned { project, goal, task_count, .. } => {
                 info!(project, goal, task_count, "Swarm planned");
@@ -76,6 +88,18 @@ async fn main() -> Result<()> {
             SwarmEvent::TaskSubmitted { project, task_id, goal, .. } => {
                 info!(project, task_id, goal, "Task submitted");
             }
+            SwarmEvent::WorkflowStateChanged { project, run_id, state, .. } => {
+                info!(project, run_id, state, "Workflow state changed");
+            }
+            SwarmEvent::WorkflowStepDone { project, run_id, step_id, passed, .. } => {
+                info!(project, run_id, step_id, passed, "Workflow step done");
+            }
+            SwarmEvent::WorkflowReplanned { project, run_id, failed_step_id, new_step_count, .. } => {
+                info!(project, run_id, failed_step_id, new_step_count, "Workflow replanned");
+            }
+            // High-frequency progress events: observed live by the dashboard,
+            // not persisted here.
+            SwarmEvent::ToolCallExecuted { .. } | SwarmEvent::AgentProgress { .. } => {}
         }
     }
     Ok(())

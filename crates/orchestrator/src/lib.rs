@@ -11,10 +11,12 @@ mod memtree;
 mod runner;
 #[cfg(feature = "native")]
 pub mod graph;
+#[cfg(feature = "native")]
+pub mod hooks;
 
 #[cfg(feature = "native")]
-pub use planner::plan_goal;
+pub use planner::{plan_goal, replan_goal};
 #[cfg(feature = "native")]
 pub use memtree::MemTreeManager;
 #[cfg(feature = "native")]
-pub use runner::{SwarmRunner, SwarmResult, GitHubRepo, PhaseTimings};
+pub use runner::{SwarmRunner, SwarmResult, TaskRunResult, GitHubRepo, PhaseTimings, RunControl, ControlState};

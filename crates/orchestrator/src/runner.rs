@@ -7,7 +7,7 @@ use tracing::{info, warn, error};
 
 use agent_core::{Agent, AgentResult, KnowledgeConfig, parse_edits};
 use inference_client::{InferenceRouter, OllamaBackend};
-use knowledge_base::KnowledgeStore;
+use knowledge_base::KnowledgeBackend;
 
 use crate::planner::plan_goal;
 use crate::planner_types::SubTask;
@@ -50,6 +50,57 @@ pub struct SwarmResult {
     pub modified_files: Vec<(String, Vec<u8>)>,
     /// Phase timing breakdown.
     pub phase_timings: PhaseTimings,
+    /// True when execution stopped early because a pause/cancel was requested
+    /// via `RunControl`; unfinished tasks have no entry in `results`.
+    pub halted: bool,
+    /// Memory pattern ids injected into the planner prompt (SONA effectiveness
+    /// signal; empty when retrieval-augmented planning was off or found nothing).
+    pub retrieved_pattern_ids: Vec<String>,
+}
+
+/// Requested cooperative control state for a running swarm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlState {
+    Continue,
+    Pause,
+    Cancel,
+}
+
+const CONTROL_CONTINUE: u8 = 0;
+const CONTROL_PAUSE: u8 = 1;
+const CONTROL_CANCEL: u8 = 2;
+
+/// Cooperative pause/cancel flag checked between execution waves — never
+/// preempts an in-flight agent (correctness over speed).
+#[derive(Default)]
+pub struct RunControl {
+    state: std::sync::atomic::AtomicU8,
+}
+
+impl RunControl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn request_pause(&self) {
+        self.state.store(CONTROL_PAUSE, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn request_cancel(&self) {
+        self.state.store(CONTROL_CANCEL, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn resume(&self) {
+        self.state.store(CONTROL_CONTINUE, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn state(&self) -> ControlState {
+        match self.state.load(std::sync::atomic::Ordering::SeqCst) {
+            CONTROL_PAUSE => ControlState::Pause,
+            CONTROL_CANCEL => ControlState::Cancel,
+            _ => ControlState::Continue,
+        }
+    }
 }
 
 pub struct TaskRunResult {
@@ -70,7 +121,7 @@ pub struct GitHubRepo {
 pub struct SwarmRunner {
     router: Arc<InferenceRouter>,
     ollama: Arc<OllamaBackend>,
-    store: Option<Arc<KnowledgeStore>>,
+    store: Option<Arc<dyn KnowledgeBackend>>,
     repo_path: PathBuf,
     project: String,
     parent_run_id: Option<String>,
@@ -81,6 +132,15 @@ pub struct SwarmRunner {
     github: Option<GitHubRepo>,
     /// Remaining depth for recursive sub-planning (0 = no sub-plans).
     depth: u32,
+    /// Embedding model for RAG/goal embeddings. Must come from the LOADED config
+    /// (`config.defaults.embed_model`) so every embedding path uses one model/dimension.
+    embed_model: String,
+    /// Lifecycle hooks fired around run/task boundaries (sequential, infallible).
+    hooks: Arc<crate::hooks::HookSet>,
+    /// Cooperative pause/cancel flag, checked between waves.
+    control: Option<Arc<RunControl>>,
+    /// SONA retrieval-augmented planning config; None disables retrieval.
+    learning: Option<swarm_config::LearningConfig>,
 }
 
 /// Default concurrency when not configured
@@ -105,11 +165,40 @@ impl SwarmRunner {
             planner_tier: swarm_config::TierConfig::orchestrator(),
             github: None,
             depth: 0,
+            embed_model: swarm_config::DEFAULT_EMBED_MODEL.into(),
+            hooks: Arc::new(crate::hooks::HookSet::new()),
+            control: None,
+            learning: None,
         }
     }
 
-    pub fn with_store(mut self, store: Arc<KnowledgeStore>) -> Self {
+    pub fn with_store(mut self, store: Arc<dyn KnowledgeBackend>) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Set the embedding model from the loaded config (`config.defaults.embed_model`).
+    pub fn with_embed_model(mut self, model: impl Into<String>) -> Self {
+        self.embed_model = model.into();
+        self
+    }
+
+    /// Attach lifecycle hooks fired around run/task boundaries.
+    pub fn with_hooks(mut self, hooks: Arc<crate::hooks::HookSet>) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    /// Attach a cooperative pause/cancel flag, checked between waves.
+    pub fn with_control(mut self, control: Arc<RunControl>) -> Self {
+        self.control = Some(control);
+        self
+    }
+
+    /// Enable SONA retrieval-augmented planning (past proven plans injected
+    /// into the planner prompt).
+    pub fn with_learning(mut self, learning: swarm_config::LearningConfig) -> Self {
+        self.learning = Some(learning);
         self
     }
 
@@ -145,6 +234,40 @@ impl SwarmRunner {
         self
     }
 
+    /// Fire the matching task-level hook for a finished task result.
+    async fn fire_task_hooks(&self, result: &TaskRunResult) {
+        if self.hooks.is_empty() {
+            return;
+        }
+        let run_id = self.parent_run_id.as_deref().unwrap_or_default();
+        match (&result.agent_result, &result.error) {
+            (Some(ar), _) => {
+                self.hooks.emit_task_complete(&crate::hooks::TaskCompleteCtx {
+                    run_id,
+                    project: &self.project,
+                    task_id: &result.task.id,
+                    description: &result.task.description,
+                    files: &result.task.files,
+                    applied: ar.applied,
+                    duration_ms: ar.inference_response.duration_ms,
+                    tokens_in: ar.inference_response.tokens_input,
+                    tokens_out: ar.inference_response.tokens_output,
+                    model: &ar.inference_response.model,
+                }).await;
+            }
+            (None, Some(err)) => {
+                self.hooks.emit_task_fail(&crate::hooks::TaskFailCtx {
+                    run_id,
+                    project: &self.project,
+                    task_id: &result.task.id,
+                    description: &result.task.description,
+                    error: err,
+                }).await;
+            }
+            _ => {}
+        }
+    }
+
     /// Execute a high-level goal: plan → spawn agents in parallel → merge → validate.
     pub async fn run(&self, goal: &str) -> Result<SwarmResult> {
         let start = Instant::now();
@@ -155,36 +278,62 @@ impl SwarmRunner {
         let repo_files = discover_source_files(&self.repo_path)?;
         info!(file_count = repo_files.len(), "Discovered repo files");
 
-        // 2. RAG: find relevant files for this goal
+        // 2. RAG: find relevant files + past proven plans for this goal.
+        // The goal is embedded ONCE; file RAG and memory retrieval share it.
         let rag_start = Instant::now();
-        let relevant_files = if let Some(ref store) = self.store {
-            let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
-                .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
-            match self.ollama.embed(&embed_model, goal).await {
-                Ok(embedding) => {
-                    match store.find_relevant_files(&self.project, &embedding, 15, 0.3).await {
-                        Ok(files) if !files.is_empty() => {
-                            let result: Vec<(String, f32)> = files.iter()
-                                .map(|(path, _summary, score)| (path.clone(), *score))
-                                .collect();
-                            info!(count = result.len(), "RAG: found relevant files for goal");
-                            Some(result)
+        let mut relevant_files: Option<Vec<(String, f32)>> = None;
+        let mut past_plans_block: Option<String> = None;
+        let mut retrieved_pattern_ids: Vec<String> = Vec::new();
+
+        if let Some(ref store) = self.store {
+            if let Ok(embedding) = self.ollama.embed(&self.embed_model, goal).await {
+                if let Ok(files) = store.find_relevant_files(&self.project, &embedding, 15, 0.3).await
+                    && !files.is_empty() {
+                        let result: Vec<(String, f32)> = files.iter()
+                            .map(|(path, _summary, score)| (path.clone(), *score))
+                            .collect();
+                        info!(count = result.len(), "RAG: found relevant files for goal");
+                        relevant_files = Some(result);
+                }
+
+                // SONA: retrieve past proven plans from memory (same embedding).
+                if let Some(learning) = self.learning.as_ref().filter(|l| l.enabled) {
+                    let memory = knowledge_base::MemoryStore::new(
+                        Arc::clone(store), Arc::clone(&self.ollama), self.embed_model.clone(),
+                    );
+                    let namespaces = [knowledge_base::MEM_NS_PATTERNS, knowledge_base::MEM_NS_SOLUTIONS];
+                    match memory.search(&namespaces, &self.project, &embedding, learning.max_proven_plans).await {
+                        Ok(hits) if !hits.is_empty() => {
+                            let mut block = String::new();
+                            for hit in &hits {
+                                if hit.similarity < learning.min_similarity { continue; }
+                                if block.len() + hit.entry.content.len() > learning.proven_plans_char_budget { break; }
+                                block.push_str(&format!("- (sim {:.2}) {}\n", hit.similarity, hit.entry.content));
+                                if let Some(id) = &hit.entry.id {
+                                    retrieved_pattern_ids.push(id.clone());
+                                }
+                            }
+                            if !block.is_empty() {
+                                info!(patterns = retrieved_pattern_ids.len(), "SONA: injecting past proven plans");
+                                past_plans_block = Some(block);
+                            }
                         }
-                        _ => None,
+                        Ok(_) => {}
+                        Err(e) => warn!(error = %e, "SONA memory retrieval failed (continuing without)"),
                     }
                 }
-                Err(_) => None,
             }
-        } else { None };
+        }
 
         let rag_ms = rag_start.elapsed().as_millis() as u64;
         info!(rag_ms, "Phase 2a: RAG file selection");
 
-        // 3. Plan: decompose goal into sub-tasks (with RAG context)
+        // 3. Plan: decompose goal into sub-tasks (with RAG + memory context)
         let plan_start = Instant::now();
         let tasks = plan_goal(
             &self.router, goal, &repo_files, &self.planner_tier,
             relevant_files.as_deref(),
+            past_plans_block.as_deref(),
         ).await.context("Goal planning failed")?;
 
         // Post-plan fixup: tasks with empty files (e.g. glob patterns were rejected)
@@ -215,12 +364,41 @@ impl SwarmRunner {
         let planning_ms = plan_start.elapsed().as_millis() as u64;
         info!(task_count = tasks.len(), planning_ms, "Phase 2b: Planning complete");
 
+        self.execute_tasks(goal, tasks, rag_ms, planning_ms, start, retrieved_pattern_ids).await
+    }
+
+    /// Execute a pre-planned task list, skipping RAG + planning. Entry point for
+    /// the workflow engine and approved-plan execution (no re-planning).
+    pub async fn run_planned(&self, goal: &str, tasks: Vec<SubTask>) -> Result<SwarmResult> {
+        /// Phase duration reported when a phase did not run.
+        const NO_PHASE_MS: u64 = 0;
+        self.execute_tasks(goal, tasks, NO_PHASE_MS, NO_PHASE_MS, Instant::now(), Vec::new()).await
+    }
+
+    /// Shared execution path: dependency waves (or zero-disk loop) → capture → quality gate.
+    async fn execute_tasks(
+        &self,
+        goal: &str,
+        tasks: Vec<SubTask>,
+        rag_ms: u64,
+        planning_ms: u64,
+        start: Instant,
+        retrieved_pattern_ids: Vec<String>,
+    ) -> Result<SwarmResult> {
+        self.hooks.emit_run_start(&crate::hooks::RunStartCtx {
+            run_id: self.parent_run_id.as_deref().unwrap_or_default(),
+            project: &self.project,
+            goal,
+            planned_task_count: tasks.len(),
+        }).await;
+
         // 3-6. Run agents and collect results
         let agent_start = Instant::now();
         let mut results = Vec::new();
         let mut any_applied = false;
         let mut captured_files: Vec<(String, Vec<u8>)> = Vec::new();
         let mut merged_diff = String::new();
+        let mut halted = false;
 
         // Zero-disk mode: use VirtFileProvider + GitHub API
         if let Some(ref gh) = self.github {
@@ -347,10 +525,14 @@ impl SwarmRunner {
                     match result {
                         Ok(agent_result) => {
                             if agent_result.applied { any_applied = true; }
-                            results.push(TaskRunResult { task: task.clone(), agent_result: Some(agent_result), error: None });
+                            let r = TaskRunResult { task: task.clone(), agent_result: Some(agent_result), error: None };
+                            self.fire_task_hooks(&r).await;
+                            results.push(r);
                         }
                         Err(e) => {
-                            results.push(TaskRunResult { task: task.clone(), agent_result: None, error: Some(e.to_string()) });
+                            let r = TaskRunResult { task: task.clone(), agent_result: None, error: Some(e.to_string()) };
+                            self.fire_task_hooks(&r).await;
+                            results.push(r);
                         }
                     }
                     continue;
@@ -423,7 +605,7 @@ impl SwarmRunner {
                                     }
                                 }
 
-                                results.push(TaskRunResult {
+                                let r = TaskRunResult {
                                     task: task.clone(),
                                     agent_result: Some(AgentResult {
                                         edits: parsed,
@@ -438,15 +620,21 @@ impl SwarmRunner {
                                         escalated_from: None, tool_calls: vec![],
                                     }),
                                     error: None,
-                                });
+                                };
+                                self.fire_task_hooks(&r).await;
+                                results.push(r);
                             } else {
-                                results.push(TaskRunResult { task: task.clone(), agent_result: None, error: Some(format!("Agent: {status}, edits: {edits}")) });
+                                let r = TaskRunResult { task: task.clone(), agent_result: None, error: Some(format!("Agent: {status}, edits: {edits}")) };
+                                self.fire_task_hooks(&r).await;
+                                results.push(r);
                             }
                         }
                     }
                     Err(e) => {
                         error!(task_id = %task.id, error = %e, "WASI agent-worker call failed");
-                        results.push(TaskRunResult { task: task.clone(), agent_result: None, error: Some(e.to_string()) });
+                        let r = TaskRunResult { task: task.clone(), agent_result: None, error: Some(e.to_string()) };
+                        self.fire_task_hooks(&r).await;
+                        results.push(r);
                     }
                 }
             }
@@ -458,6 +646,15 @@ impl SwarmRunner {
             let task_map: std::collections::HashMap<String, SubTask> = tasks.iter().map(|t| (t.id.clone(), t.clone())).collect();
 
             while completed.len() < tasks.len() {
+                // Cooperative pause/cancel: stop dispatching new waves; in-flight
+                // agents have already finished (checked between waves only).
+                if let Some(ref ctl) = self.control
+                    && ctl.state() != ControlState::Continue {
+                        info!(state = ?ctl.state(), "Run control requested — halting before next wave");
+                        halted = true;
+                        break;
+                }
+
                 // Find ready tasks: all depends_on satisfied
                 let ready: Vec<String> = tasks.iter()
                     .filter(|t| !completed.contains_key(&t.id))
@@ -533,7 +730,7 @@ impl SwarmRunner {
                             any_applied = true;
                             let summary = format!("Direct edit: {} ({}→{})", edit.path, edit.old.chars().take(30).collect::<String>(), edit.new.chars().take(30).collect::<String>());
                             completed_summaries.insert(task.id.clone(), summary);
-                            completed.insert(task.id.clone(), TaskRunResult {
+                            let result = TaskRunResult {
                                 task, agent_result: Some(AgentResult {
                                     edits: vec![],
                                     inference_response: inference_client::InferenceResponse {
@@ -546,7 +743,9 @@ impl SwarmRunner {
                                     escalated_from: None, tool_calls: vec![],
                                 }),
                                 error: None,
-                            });
+                            };
+                            self.fire_task_hooks(&result).await;
+                            completed.insert(result.task.id.clone(), result);
                             continue;
                         }
                     }
@@ -571,13 +770,15 @@ impl SwarmRunner {
                                 any_applied = true;
                                 let summary = format!("Graph:{tmpl} edits:{}", gr.edits.len());
                                 completed_summaries.insert(task.id.clone(), summary);
-                                completed.insert(task.id.clone(), TaskRunResult {
+                                let result = TaskRunResult {
                                     task, agent_result: Some(AgentResult {
                                         edits: gr.edits, inference_response: gr.response,
                                         applied: true, skipped: false, run_id: None, attempt: 1,
                                         escalated_from: None, tool_calls: vec![],
                                     }), error: None,
-                                });
+                                };
+                                self.fire_task_hooks(&result).await;
+                                completed.insert(result.task.id.clone(), result);
                                 continue;
                             }
                             Ok(_gr) => {
@@ -597,8 +798,7 @@ impl SwarmRunner {
                     let project = self.project.clone();
                     let parent_id = self.parent_run_id.clone();
                     let nats_client_clone = self.nats_client.clone();
-                    let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
-                        .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
+                    let embed_model = self.embed_model.clone();
 
                     join_set.spawn(async move {
                         let _permit = sem.acquire().await.expect("semaphore closed");
@@ -637,6 +837,7 @@ impl SwarmRunner {
                                         let _ = store.db_query_raw(&query).await;
                                         // Publish real-time progress event via NATS
                                         if let Some(ref nc) = nats {
+                                            let subject = format!("alpha-swarm.{}.agent.progress", proj);
                                             let event = serde_json::to_vec(&swarm_events::SwarmEvent::AgentProgress {
                                                 project: proj, run_id, agent_id: "agent".into(),
                                                 step: p.step, max_steps: p.max_steps,
@@ -644,7 +845,7 @@ impl SwarmRunner {
                                                 tokens_in: p.tokens_in, tokens_out: p.tokens_out, edits_count: p.edits_count as u32,
                                                 timestamp: chrono::Utc::now().to_rfc3339(),
                                             }).unwrap_or_default();
-                                            let _ = nc.publish(format!("alpha-swarm.{}.agent.progress", "alpha-swarm2"), event.into()).await;
+                                            let _ = nc.publish(subject, event.into()).await;
                                         }
                                     });
                                 });
@@ -671,11 +872,15 @@ impl SwarmRunner {
                                 agent_result.inference_response.content.chars().take(200).collect::<String>(),
                             );
                             completed_summaries.insert(task.id.clone(), summary);
-                            completed.insert(task.id.clone(), TaskRunResult { task, agent_result: Some(agent_result), error: None });
+                            let result = TaskRunResult { task, agent_result: Some(agent_result), error: None };
+                            self.fire_task_hooks(&result).await;
+                            completed.insert(result.task.id.clone(), result);
                         }
                         Ok((task, Err(e))) => {
                             completed_summaries.insert(task.id.clone(), format!("FAILED: {e}"));
-                            completed.insert(task.id.clone(), TaskRunResult { task, agent_result: None, error: Some(e.to_string()) });
+                            let result = TaskRunResult { task, agent_result: None, error: Some(e.to_string()) };
+                            self.fire_task_hooks(&result).await;
+                            completed.insert(result.task.id.clone(), result);
                         }
                         Err(e) => { warn!("Agent panicked: {e}"); }
                     }
@@ -779,6 +984,8 @@ impl SwarmRunner {
             total_duration_ms,
             modified_files: captured_files,
             phase_timings,
+            halted,
+            retrieved_pattern_ids,
         })
     }
 }
@@ -843,9 +1050,8 @@ async fn index_file_embeddings(
     project: &str,
     repo_path: &std::path::Path,
     files: &[String],
+    embed_model: &str,
 ) {
-    let embed_model = std::env::var("ALPHA_SWARM_EMBED_MODEL")
-        .unwrap_or_else(|_| swarm_config::DefaultsConfig::default().embed_model);
 
     /// Max files to embed per run (avoid overloading Ollama).
     const MAX_FILES_TO_EMBED: usize = 50;

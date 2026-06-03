@@ -20,10 +20,14 @@ swarm-config = { path = "../config" }
 inference-client = { path = "../inference-client" }
 agent-core = { path = "../agent-core" }
 swarm-orchestrator = { path = "../orchestrator" }
+swarm-workflow = { path = "../workflow" }
 knowledge-base = { path = "../knowledge-base" }
 quality-gate-lib = { path = "../quality-gate" }
 swarm-events = { path = "../events" }
 async-nats = "0.38"
+async-trait.workspace = true
+axum = "0.8"
+sha2 = "0.10"
 chrono = "0.4"
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }

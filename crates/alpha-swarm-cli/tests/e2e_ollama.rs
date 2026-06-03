@@ -53,7 +53,7 @@ async fn agent_modifies_code_via_ollama() {
     .unwrap();
 
     let router = setup_router();
-    let agent = Agent::new(Arc::new(router), dir.path());
+    let mut agent = Agent::new(Arc::new(router), dir.path());
     let result = agent
         .run(
             "Add a function called greet that takes a name parameter and prints a greeting. Call it from main.",

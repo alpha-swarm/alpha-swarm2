@@ -21,11 +21,12 @@ mod resources;
 
 // --- Configuration constants ---
 
-/// SurrealDB connection.
-const SURREAL_HOST: &str = "127.0.0.1:8000";
+/// SurrealDB connection. Port and db name must match the rest of the system
+/// (consumers use :8001; ns = alpha_swarm, db = swarm — NOT alpha_swarm/alpha_swarm).
+const SURREAL_HOST: &str = "127.0.0.1:8001";
 const SURREAL_PATH: &str = "/sql";
 const SURREAL_NS: &str = "alpha_swarm";
-const SURREAL_DB: &str = "alpha_swarm";
+const SURREAL_DB: &str = "swarm";
 /// base64("root:root")
 const SURREAL_AUTH: &str = "Basic cm9vdDpyb290";
 

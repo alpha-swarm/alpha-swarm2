@@ -8,6 +8,7 @@ world api-server {
     import wasi:io/streams@0.2.0;
     import wasi:io/poll@0.2.0;
     import wasi:io/error@0.2.0;
+    import wasmcloud:messaging/consumer@0.2.0;
 
     export wasi:http/incoming-handler@0.2.0;
 }

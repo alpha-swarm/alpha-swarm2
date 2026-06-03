@@ -6,13 +6,21 @@
 url = "http://100.81.10.8:11434"   # csatapaci
 
 [surrealdb]
-url = "127.0.0.1:8001"
+# mode: embedded (in-process surrealkv, daemon = sole owner; default)
+#       remote   (external server at `url` — escape hatch)
+#       nats     (no direct DB; go through the daemon bridge swarm.db.>)
+mode = "embedded"
+path = "/tmp/alpha-swarm/surrealdb/embedded"
+url = "127.0.0.1:8001"             # only used when mode = "remote"
 namespace = "alpha_swarm"
 database = "swarm"
 username = "root"
 password = "root"
+bridge_timeout_secs = 30
 
 [nats]
+# Local system NATS daemon ("picur", ~/Library/NATS/nats-server.conf) —
+# clustered with csatapaci as "alpha_swarm". 8MB max_payload.
 url = "nats://127.0.0.1:4223"
 
 [claude]
@@ -20,7 +28,7 @@ url = "nats://127.0.0.1:4223"
 model = "claude-sonnet-4-20250514"
 
 [defaults]
-embed_model = "nomic-embed-text"
+embed_model = "nomic-embed-text"    # 768-dim; must match knowledge_base::EMBED_DIM
 simple_model = "qwen2.5-coder:7b"
 project = "default"
 

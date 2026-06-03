@@ -21,7 +21,8 @@ pub async fn execute(
     let ollama = Arc::new(setup::get_ollama(config));
     let kb = setup::get_knowledge_store(config).await?;
 
-    let mut runner = swarm_orchestrator::SwarmRunner::new(Arc::clone(&router), ollama, &repo, &project);
+    let mut runner = swarm_orchestrator::SwarmRunner::new(Arc::clone(&router), ollama, &repo, &project)
+        .with_embed_model(config.defaults.embed_model.clone());
     if let Some(store) = kb {
         runner = runner.with_store(Arc::new(store));
     }

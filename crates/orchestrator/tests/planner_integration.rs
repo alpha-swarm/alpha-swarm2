@@ -36,6 +36,7 @@ mod tests {
             &repo_files,
             &tier,
             None,
+            None,
         ).await;
 
         assert!(result.is_ok(), "Planning failed: {:?}", result.err());
@@ -68,6 +69,7 @@ mod tests {
             "Add a struct User { name: String, age: u32 } to src/types.rs, then add a test for it in tests/test.rs",
             &repo_files,
             &tier,
+            None,
             None,
         ).await;
 

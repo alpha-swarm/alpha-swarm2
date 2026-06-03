@@ -150,5 +150,8 @@ fn event_to_log(event: &SwarmEvent) -> LogLine {
         SwarmEvent::SwarmCompleted { quality_passed, .. } => LogLine { timestamp: now, kind: "SWARM".into(), message: format!("QG: {quality_passed}"), is_error: !quality_passed },
         SwarmEvent::TaskSubmitted { goal, .. } => LogLine { timestamp: now, kind: "NEW".into(), message: goal[..goal.len().min(70)].into(), is_error: false },
         SwarmEvent::QualityChecked { check_name, passed, .. } => LogLine { timestamp: now, kind: "QG".into(), message: format!("{check_name}: {passed}"), is_error: !passed },
+        SwarmEvent::WorkflowStateChanged { run_id, state, .. } => LogLine { timestamp: now, kind: "WFLOW".into(), message: format!("{run_id} → {state}"), is_error: state == "failed" },
+        SwarmEvent::WorkflowStepDone { step_id, passed, .. } => LogLine { timestamp: now, kind: "WSTEP".into(), message: format!("{step_id}: {}", if *passed { "passed" } else { "failed" }), is_error: !passed },
+        SwarmEvent::WorkflowReplanned { failed_step_id, new_step_count, replan_attempt, .. } => LogLine { timestamp: now, kind: "RPLAN".into(), message: format!("after {failed_step_id}: {new_step_count} new steps (attempt {replan_attempt})"), is_error: false },
     }
 }

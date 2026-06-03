@@ -63,6 +63,37 @@ OUTPUT FORMAT (JSON array only, no other text):
 /// Maximum number of sub-tasks the planner can create.
 pub const MAX_TASKS: usize = 5;
 
+/// System prompt for distilling a successful run into a reusable pattern
+/// (SONA loop). Output is plain guidance text stored in memory — it is never
+/// executed, only injected into future planner prompts as advice.
+pub const DISTILL_SYSTEM: &str = r#"You summarize a successful software task into a reusable pattern for future planning.
+
+Given a GOAL, the PLAN that worked, and the OUTCOME, write a compact pattern:
+- 1 line: the goal shape (generalized, no project-specific names).
+- 2-5 lines: the plan shape that worked (step structure, ordering, templates used).
+- 1 line: any pitfall avoided or key insight.
+
+Maximum 120 words. Plain text only — no JSON, no markdown headers."#;
+
+/// System prompt for adaptive replanning after a step failure. The output goes
+/// through the same `parse_plan()` validator as initial plans — never a looser parser.
+pub const REPLANNER_SYSTEM: &str = r#"You repair a partially-executed plan after one step failed. Correctness matters more than speed.
+
+You are given: the original GOAL, the steps already DONE (do not redo them), the FAILED step with its error, and the files already changed.
+
+RULES:
+- Output ONLY the REMAINING tasks needed to finish the goal from the CURRENT state.
+- Do NOT repeat tasks listed as DONE.
+- Address the failure: either fix the failed step's approach or route around it.
+- ONLY use file paths from the REPOSITORY FILE LIST. Never invent paths. Never use glob patterns.
+- Each task lists the specific files it will read, modify, or create.
+- Classify complexity: simple (1-2 files), medium (2-4 files), complex (4+ files).
+- Use depends_on between the NEW tasks only (ids you output). Tasks without depends_on run first.
+- Maximum 5 tasks. Fewer is better.
+
+OUTPUT FORMAT (JSON array only, no other text):
+[{"id":"task-1","description":"what to do","files":["file.rs"],"complexity":"simple","depends_on":[],"edit":null,"template":"edit"}]"#;
+
 /// Parse a planner response into sub-tasks, validating against known repo files.
 /// Tolerant: tries JSON directly, then extracts from markdown fences, then falls back to single task.
 pub fn parse_plan(json_str: &str, repo_files: &[String]) -> Result<Vec<SubTask>, String> {

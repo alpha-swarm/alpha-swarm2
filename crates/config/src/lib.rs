@@ -18,9 +18,46 @@ pub struct SwarmConfig {
     pub defaults: DefaultsConfig,
     pub tiers: TiersConfig,
     pub resources: ResourceConfig,
+    /// SONA learning loop (trajectory distillation + retrieval-augmented planning).
+    pub learning: LearningConfig,
     /// Inference providers (multiple Ollama hosts, etc.)
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+}
+
+/// Default number of past proven plans injected into the planner prompt.
+pub const DEFAULT_MAX_PROVEN_PLANS: usize = 3;
+/// Default minimum similarity for a memory hit to be injected.
+pub const DEFAULT_LEARNING_MIN_SIMILARITY: f32 = 0.5;
+/// Default char budget for the injected past-plans block.
+pub const DEFAULT_PROVEN_PLANS_CHAR_BUDGET: usize = 1200;
+
+/// SONA learning loop configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct LearningConfig {
+    /// Master switch for trajectory recording, distillation, and retrieval.
+    pub enabled: bool,
+    /// Distill a pattern via the planner-tier LLM on successful runs.
+    pub distill_on_success: bool,
+    /// Max past proven plans injected into the planner prompt.
+    pub max_proven_plans: usize,
+    /// Minimum similarity for a memory hit to be injected.
+    pub min_similarity: f32,
+    /// Char budget for the injected past-plans block.
+    pub proven_plans_char_budget: usize,
+}
+
+impl Default for LearningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            distill_on_success: true,
+            max_proven_plans: DEFAULT_MAX_PROVEN_PLANS,
+            min_similarity: DEFAULT_LEARNING_MIN_SIMILARITY,
+            proven_plans_char_budget: DEFAULT_PROVEN_PLANS_CHAR_BUDGET,
+        }
+    }
 }
 
 /// An inference provider configuration.
@@ -124,14 +161,41 @@ pub struct OllamaConfig {
     pub url: String,
 }
 
+/// Default embedded SurrealDB data directory (kv-surrealkv).
+/// NOTE: under /tmp for consistency with the existing DATA_DIR convention —
+/// move off /tmp for reboot durability once validated.
+pub const DEFAULT_SURREAL_PATH: &str = "/tmp/alpha-swarm/surrealdb/embedded";
+/// Default request-reply timeout for the NATS DB bridge.
+pub const DEFAULT_BRIDGE_TIMEOUT_SECS: u64 = 30;
+
+/// How the process reaches SurrealDB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SurrealMode {
+    /// In-process kv-surrealkv engine at `path` — the daemon is sole DB owner.
+    #[default]
+    Embedded,
+    /// External SurrealDB server over WebSocket at `url` (escape hatch).
+    Remote,
+    /// No direct DB — consumers go through the daemon's NATS bridge
+    /// (`swarm.db.>`); used by remote daemons and native tools.
+    Nats,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SurrealConfig {
+    pub mode: SurrealMode,
+    /// Embedded engine data directory (mode = embedded).
+    pub path: String,
+    /// External server address (mode = remote).
     pub url: String,
     pub namespace: String,
     pub database: String,
     pub username: String,
     pub password: String,
+    /// NATS bridge request timeout (mode = nats consumers).
+    pub bridge_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -286,18 +350,24 @@ impl Default for OllamaConfig {
 impl Default for SurrealConfig {
     fn default() -> Self {
         Self {
+            mode: SurrealMode::Embedded,
+            path: DEFAULT_SURREAL_PATH.into(),
             url: "127.0.0.1:8001".into(),
             namespace: "alpha_swarm".into(),
             database: "swarm".into(),
             username: "root".into(),
             password: "root".into(),
+            bridge_timeout_secs: DEFAULT_BRIDGE_TIMEOUT_SECS,
         }
     }
 }
 
 impl Default for NatsConfig {
     fn default() -> Self {
-        Self { url: "nats://127.0.0.1:4222".into() }
+        // Matches alpha-swarm.toml (the source of truth): the local system
+        // NATS daemon ("picur", port 4223), clustered with csatapaci as
+        // "alpha_swarm".
+        Self { url: "nats://127.0.0.1:4223".into() }
     }
 }
 
@@ -310,10 +380,16 @@ impl Default for ClaudeConfig {
     }
 }
 
+/// Default embedding model. Must be a dedicated embedding model whose output
+/// dimension matches `knowledge_base::EMBED_DIM` (nomic-embed-text = 768).
+/// Code models like qwen2.5-coder emit 3584-dim vectors which are incompatible
+/// with the HNSW indexes.
+pub const DEFAULT_EMBED_MODEL: &str = "nomic-embed-text";
+
 impl Default for DefaultsConfig {
     fn default() -> Self {
         Self {
-            embed_model: "qwen2.5-coder:7b".into(),
+            embed_model: DEFAULT_EMBED_MODEL.into(),
             simple_model: "qwen2.5-coder:7b".into(),
             project: "default".into(),
         }
@@ -355,6 +431,15 @@ impl SwarmConfig {
 
     fn apply_env(&mut self) {
         if let Ok(v) = std::env::var("ALPHA_SWARM_OLLAMA_URL") { self.ollama.url = v; }
+        if let Ok(v) = std::env::var("ALPHA_SWARM_SURREALDB_MODE") {
+            match v.to_lowercase().as_str() {
+                "embedded" => self.surrealdb.mode = SurrealMode::Embedded,
+                "remote" => self.surrealdb.mode = SurrealMode::Remote,
+                "nats" => self.surrealdb.mode = SurrealMode::Nats,
+                _ => {}
+            }
+        }
+        if let Ok(v) = std::env::var("ALPHA_SWARM_SURREALDB_PATH") { self.surrealdb.path = v; }
         if let Ok(v) = std::env::var("ALPHA_SWARM_SURREALDB_URL") { self.surrealdb.url = v; }
         if let Ok(v) = std::env::var("ALPHA_SWARM_SURREALDB_NS") { self.surrealdb.namespace = v; }
         if let Ok(v) = std::env::var("ALPHA_SWARM_SURREALDB_DB") { self.surrealdb.database = v; }
@@ -364,6 +449,9 @@ impl SwarmConfig {
         if let Ok(v) = std::env::var("ANTHROPIC_API_KEY") { self.claude.api_key = v; }
         if let Ok(v) = std::env::var("ALPHA_SWARM_CLAUDE_MODEL") { self.claude.model = v; }
         if let Ok(v) = std::env::var("ALPHA_SWARM_EMBED_MODEL") { self.defaults.embed_model = v; }
+        if let Ok(v) = std::env::var("ALPHA_SWARM_LEARNING") {
+            self.learning.enabled = matches!(v.to_lowercase().as_str(), "1" | "true" | "on");
+        }
     }
 
     /// SurrealDB basic auth header value (base64 of user:pass).

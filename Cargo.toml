@@ -9,6 +9,7 @@ members = [
     "crates/knowledge-base",
     "crates/events",
     "crates/orchestrator",
+    "crates/workflow",
     "crates/virt-git",
     "crates/tools",
     "crates/agent-daemon",

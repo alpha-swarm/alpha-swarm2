@@ -24,29 +24,38 @@ if ! kill -0 "$NATS_PID" 2>/dev/null; then
 fi
 echo "  NATS listening on :4222, cluster on :6222, monitoring on :8222"
 
-# --- SurrealDB ---
-echo "[2/3] Starting SurrealDB..."
-mkdir -p "$DATA_DIR/surrealdb"
-surreal start \
-    --bind 0.0.0.0:8000 \
-    --user root --pass root \
-    "file://$DATA_DIR/surrealdb/data.db" &
-SURREAL_PID=$!
-echo "  SurrealDB PID: $SURREAL_PID"
-sleep 2
+SURREAL_PID=""
 
-if ! kill -0 "$SURREAL_PID" 2>/dev/null; then
-    echo "  ERROR: SurrealDB failed to start"
-    kill "$NATS_PID" 2>/dev/null
-    exit 1
+# --- SurrealDB (remote mode ONLY) ---
+# Default is mode=embedded: agent-daemon embeds kv-surrealkv and serves all
+# consumers via the NATS DB bridge (swarm.db.>). Start an external server only
+# when alpha-swarm.toml sets [surrealdb] mode = "remote".
+if [ "${ALPHA_SWARM_SURREALDB_MODE:-embedded}" = "remote" ]; then
+    echo "[2/3] Starting SurrealDB (remote mode)..."
+    mkdir -p "$DATA_DIR/surrealdb"
+    surreal start \
+        --bind 0.0.0.0:8000 \
+        --user root --pass root \
+        "file://$DATA_DIR/surrealdb/data.db" &
+    SURREAL_PID=$!
+    echo "  SurrealDB PID: $SURREAL_PID"
+    sleep 2
+
+    if ! kill -0 "$SURREAL_PID" 2>/dev/null; then
+        echo "  ERROR: SurrealDB failed to start"
+        kill "$NATS_PID" 2>/dev/null
+        exit 1
+    fi
+    echo "  SurrealDB listening on :8000"
+else
+    echo "[2/3] SurrealDB: embedded in agent-daemon (no external server)"
 fi
-echo "  SurrealDB listening on :8000"
 
 # --- WasmCloud Host ---
 echo "[3/3] Starting WasmCloud host..."
 wash host \
-    --scheduler-nats-url nats://127.0.0.1:4222 \
-    --data-nats-url nats://127.0.0.1:4222 \
+    --scheduler-nats-url nats://127.0.0.1:4223 \
+    --data-nats-url nats://127.0.0.1:4223 \
     --host-name alpha-swarm-local \
     --host-group alpha-swarm \
     --non-interactive &
@@ -56,7 +65,7 @@ sleep 2
 
 if ! kill -0 "$WASMCLOUD_PID" 2>/dev/null; then
     echo "  ERROR: WasmCloud failed to start"
-    kill "$NATS_PID" "$SURREAL_PID" 2>/dev/null
+    kill "$NATS_PID" ${SURREAL_PID:+"$SURREAL_PID"} 2>/dev/null
     exit 1
 fi
 
@@ -69,8 +78,12 @@ EOF
 
 echo ""
 echo "=== Local infrastructure running ==="
-echo "  NATS:      nats://127.0.0.1:4222"
-echo "  SurrealDB: ws://127.0.0.1:8000"
+echo "  NATS:      nats://127.0.0.1:4223"
+if [ -n "$SURREAL_PID" ]; then
+    echo "  SurrealDB: ws://127.0.0.1:8000 (remote mode)"
+else
+    echo "  SurrealDB: embedded in agent-daemon (bridge: swarm.db.>)"
+fi
 echo "  WasmCloud: running (wash host)"
 echo ""
 echo "  Stop with: ./scripts/infra-down-local.sh"

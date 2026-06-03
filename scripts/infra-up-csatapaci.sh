@@ -10,8 +10,9 @@ DATA_DIR="/tmp/alpha-swarm"
 
 echo "=== alpha-swarm infrastructure (csatapaci) ==="
 
-# --- Get local machine's Tailscale IP ---
-LOCAL_IP=$(ssh "$REMOTE" "echo dummy" 2>/dev/null; tailscale ip -4 2>/dev/null || echo "UNKNOWN")
+# --- Verify SSH connectivity, then get local machine's Tailscale IP ---
+ssh -o ConnectTimeout=10 "$REMOTE" "true" || { echo "ERROR: cannot SSH to $REMOTE"; exit 1; }
+LOCAL_IP=$(tailscale ip -4 2>/dev/null | head -1 || echo "UNKNOWN")
 echo "  Local Tailscale IP: $LOCAL_IP"
 
 # --- Copy NATS config ---
@@ -29,27 +30,40 @@ ssh "$REMOTE" "mkdir -p $DATA_DIR/nats/jetstream && nohup nats-server -c $DATA_D
 sleep 1
 ssh "$REMOTE" "pgrep -f 'nats-server.*nats.conf' > /dev/null && echo '  NATS running' || echo '  ERROR: NATS failed'"
 
-# --- SurrealDB ---
-echo "[2/4] Starting SurrealDB..."
-ssh "$REMOTE" "mkdir -p $DATA_DIR/surrealdb && nohup surreal start --bind 0.0.0.0:8000 --user root --pass root 'file://$DATA_DIR/surrealdb/data.db' > $DATA_DIR/surreal.log 2>&1 &"
-sleep 2
-ssh "$REMOTE" "pgrep -f 'surreal start' > /dev/null && echo '  SurrealDB running' || echo '  ERROR: SurrealDB failed'"
+# NOTE: SurrealDB no longer runs on csatapaci — the local agent-daemon embeds
+# the database (kv-surrealkv) and serves all consumers via the NATS DB bridge
+# (swarm.db.>). csatapaci is inference-only: NATS + Ollama + wash.
 
 # --- Ollama ---
-echo "[3/4] Ensuring Ollama is running..."
-ssh "$REMOTE" "pgrep -f 'ollama serve' > /dev/null 2>&1 && echo '  Ollama already running' || (nohup ollama serve > $DATA_DIR/ollama.log 2>&1 & sleep 2 && echo '  Ollama started')"
+# csatapaci's login shell is fish — run remote snippets under bash explicitly.
+echo "[2/3] Ensuring Ollama is running..."
+ssh "$REMOTE" bash -s <<EOF
+if pgrep -f 'ollama serve' > /dev/null 2>&1; then
+    echo '  Ollama already running'
+else
+    nohup ollama serve > $DATA_DIR/ollama.log 2>&1 &
+    sleep 2
+    echo '  Ollama started'
+fi
+EOF
 
 # --- WasmCloud Host ---
-echo "[4/4] Starting WasmCloud host..."
-ssh "$REMOTE" "nohup wash host --scheduler-nats-url nats://127.0.0.1:4222 --data-nats-url nats://127.0.0.1:4222 --host-name alpha-swarm-csatapaci --host-group alpha-swarm --non-interactive > $DATA_DIR/wasmcloud.log 2>&1 &"
-sleep 2
-ssh "$REMOTE" "pgrep -f 'wash host' > /dev/null && echo '  WasmCloud running' || echo '  ERROR: WasmCloud failed'"
+echo "[3/3] Starting WasmCloud host..."
+ssh "$REMOTE" bash -s <<EOF
+if pgrep -f 'wash host' > /dev/null 2>&1; then
+    echo '  WasmCloud already running'
+else
+    nohup wash host --scheduler-nats-url nats://127.0.0.1:4222 --data-nats-url nats://127.0.0.1:4222 --host-name alpha-swarm-csatapaci --host-group alpha-swarm --non-interactive > $DATA_DIR/wasmcloud.log 2>&1 &
+    sleep 2
+fi
+pgrep -f 'wash host' > /dev/null && echo '  WasmCloud running' || echo '  ERROR: WasmCloud failed'
+EOF
 
 echo ""
 echo "=== csatapaci infrastructure running ==="
 echo "  NATS:      nats://csatapaci:4222"
-echo "  SurrealDB: ws://csatapaci:8000"
 echo "  Ollama:    http://csatapaci:11434"
 echo "  WasmCloud: running (wash host)"
+echo "  (DB is embedded in the local agent-daemon; bridge: swarm.db.>)"
 echo ""
 echo "  Stop with: ./scripts/infra-down-csatapaci.sh"

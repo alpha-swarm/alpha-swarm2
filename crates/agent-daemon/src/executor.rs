@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tracing::{info, warn, error};
 
 use inference_client::{InferenceRouter, OllamaBackend};
-use knowledge_base::{AgentRun, AttemptRecord, KnowledgeStore, RunStatus};
+use knowledge_base::{AgentRun, AttemptRecord, KnowledgeBackend, RunStatus};
 use swarm_config::SwarmConfig;
 
 /// Max chars for attempt preview fields
@@ -55,8 +55,9 @@ pub async fn handle_task(
     config: &SwarmConfig,
     router: Arc<InferenceRouter>,
     ollama: Arc<OllamaBackend>,
-    store: Arc<KnowledgeStore>,
+    store: Arc<dyn KnowledgeBackend>,
     publisher: Option<Arc<EventPublisher>>,
+    engine: Arc<swarm_workflow::WorkflowEngine>,
     task_id: &str,
     project: &str,
     goal: &str,
@@ -64,8 +65,30 @@ pub async fn handle_task(
 ) {
     match status {
         "planning" => handle_planning(config, router, ollama, store, task_id, project, goal).await,
-        "approved" => handle_approved(config, router, ollama, store, publisher, task_id, project, goal).await,
-        _ => handle_execute(config, router, ollama, store, publisher, task_id, project, goal).await,
+        "approved" => handle_approved(config, router, ollama, store, publisher, engine, task_id, project, goal).await,
+        _ => handle_execute(config, router, ollama, store, publisher, engine, task_id, project, goal).await,
+    }
+}
+
+/// Convert a persisted `PlannedTask` back into the runner's `SubTask`.
+fn planned_to_subtask(t: &knowledge_base::PlannedTask) -> swarm_orchestrator::SubTask {
+    let complexity = match t.complexity.to_lowercase().as_str() {
+        "medium" => inference_client::Complexity::Medium,
+        "complex" => inference_client::Complexity::Complex,
+        _ => inference_client::Complexity::Simple,
+    };
+    swarm_orchestrator::SubTask {
+        id: t.id.clone(),
+        description: t.description.clone(),
+        files: t.files.clone(),
+        complexity,
+        depends_on: t.depends_on.clone(),
+        edit: t.edit.as_ref().map(|e| swarm_orchestrator::planner_types::DirectEdit {
+            path: e.path.clone(),
+            old: e.old.clone(),
+            new: e.new.clone(),
+        }),
+        template: t.template.clone(),
     }
 }
 
@@ -73,8 +96,8 @@ pub async fn handle_task(
 async fn handle_planning(
     config: &SwarmConfig,
     router: Arc<InferenceRouter>,
-    _ollama: Arc<OllamaBackend>,
-    store: Arc<KnowledgeStore>,
+    ollama: Arc<OllamaBackend>,
+    store: Arc<dyn KnowledgeBackend>,
     task_id: &str,
     project: &str,
     goal: &str,
@@ -141,11 +164,65 @@ async fn handle_planning(
     };
     let _ = store.db_query_raw(&format_update(task_id, &format!("SET progress_message = '{}'", progress.replace('\'', "")))).await;
 
-    match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files, &config.tiers.orchestrator, None).await {
+    // SONA: feedback capture + retrieval of past proven plans.
+    let memory = config.learning.enabled.then(|| knowledge_base::MemoryStore::new(
+        Arc::clone(&store), Arc::clone(&ollama), config.defaults.embed_model.clone(),
+    ));
+
+    // User feedback on a previous plan version is high-signal — persist it
+    // into the feedback namespace keyed by goal shape.
+    if let Some(memory) = &memory
+        && let Some(fb) = previous_plans.last().and_then(|p| p.user_feedback.clone()) {
+            let now = chrono::Utc::now().to_rfc3339();
+            let entry = knowledge_base::MemoryEntry {
+                id: None,
+                namespace: knowledge_base::MEM_NS_FEEDBACK.into(),
+                key: task_id.to_string(),
+                content: format!("GOAL: {goal}\nFEEDBACK: {fb}"),
+                embedding: Vec::new(), // embedded from content on store
+                metadata: serde_json::json!({ "run_id": task_id }),
+                project: project.to_string(),
+                created_at: now.clone(),
+                last_used_at: now,
+                use_count: 0,
+                ttl_secs: None,
+            };
+            if let Err(e) = memory.store(entry).await {
+                warn!(task_id, error = %e, "feedback memory store failed");
+            }
+    }
+
+    // Retrieve past proven plans for similar goals and inject as guidance.
+    let (past_plans_block, retrieved_pattern_ids) = if let Some(memory) = &memory {
+        let namespaces = [knowledge_base::MEM_NS_PATTERNS, knowledge_base::MEM_NS_SOLUTIONS];
+        match memory.search_text(&namespaces, project, goal, config.learning.max_proven_plans).await {
+            Ok(hits) if !hits.is_empty() => {
+                let mut block = String::new();
+                let mut ids = Vec::new();
+                for hit in &hits {
+                    if hit.similarity < config.learning.min_similarity { continue; }
+                    if block.len() + hit.entry.content.len() > config.learning.proven_plans_char_budget { break; }
+                    block.push_str(&format!("- (sim {:.2}) {}\n", hit.similarity, hit.entry.content));
+                    if let Some(id) = &hit.entry.id { ids.push(id.clone()); }
+                }
+                if block.is_empty() { (None, Vec::new()) } else {
+                    info!(task_id, patterns = ids.len(), "SONA: injecting past proven plans into planner");
+                    (Some(block), ids)
+                }
+            }
+            _ => (None, Vec::new()),
+        }
+    } else {
+        (None, Vec::new())
+    };
+
+    match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files, &config.tiers.orchestrator, None, past_plans_block.as_deref()).await {
         Ok(tasks) => {
             let duration_ms = start.elapsed().as_millis() as u64;
 
-            // Convert SubTasks to PlannedTasks
+            // Convert SubTasks to PlannedTasks (lossless: DAG edges, template, and
+            // direct-edit payload are persisted so approved plans can be executed
+            // without re-planning).
             let sub_tasks: Vec<knowledge_base::PlannedTask> = tasks.iter().map(|t| {
                 knowledge_base::PlannedTask {
                     id: t.id.clone(),
@@ -153,6 +230,13 @@ async fn handle_planning(
                     files: t.files.clone(),
                     complexity: format!("{:?}", t.complexity),
                     rationale: String::new(),
+                    depends_on: t.depends_on.clone(),
+                    template: t.template.clone(),
+                    edit: t.edit.as_ref().map(|e| knowledge_base::PlannedEdit {
+                        path: e.path.clone(),
+                        old: e.old.clone(),
+                        new: e.new.clone(),
+                    }),
                 }
             }).collect();
 
@@ -173,6 +257,7 @@ async fn handle_planning(
                 web_searches: vec![],
                 reasoning: format!("Decomposed into {} sub-tasks", tasks.len()),
                 created_at: chrono::Utc::now().to_rfc3339(),
+                retrieved_pattern_ids,
             };
 
             let _ = store.store_plan(&plan).await;
@@ -186,23 +271,22 @@ async fn handle_planning(
     }
 }
 
-/// Execute with an approved plan — load plan, skip re-planning, run agents.
+/// Execute with an approved plan. `handle_execute` detects the approved plan
+/// and routes through the persisted workflow engine (no re-planning).
 #[allow(clippy::too_many_arguments)]
 async fn handle_approved(
     config: &SwarmConfig,
     router: Arc<InferenceRouter>,
     ollama: Arc<OllamaBackend>,
-    store: Arc<KnowledgeStore>,
+    store: Arc<dyn KnowledgeBackend>,
     publisher: Option<Arc<EventPublisher>>,
+    engine: Arc<swarm_workflow::WorkflowEngine>,
     task_id: &str,
     project: &str,
     goal: &str,
 ) {
     info!(task_id, project, "Executing approved plan");
-    // For now, delegate to the standard executor which will re-plan internally.
-    // TODO: Load approved plan's sub_tasks and pass directly to SwarmRunner
-    // to skip the planning step. For MVP, re-running is acceptable.
-    handle_execute(config, router, ollama, store, publisher, task_id, project, goal).await;
+    handle_execute(config, router, ollama, store, publisher, engine, task_id, project, goal).await;
 }
 
 /// Standard execution: claim → plan → execute → PR.
@@ -211,8 +295,9 @@ async fn handle_execute(
     config: &SwarmConfig,
     router: Arc<InferenceRouter>,
     ollama: Arc<OllamaBackend>,
-    store: Arc<KnowledgeStore>,
+    store: Arc<dyn KnowledgeBackend>,
     publisher: Option<Arc<EventPublisher>>,
+    engine: Arc<swarm_workflow::WorkflowEngine>,
     task_id: &str,
     project: &str,
     goal: &str,
@@ -246,11 +331,11 @@ async fn handle_execute(
     let repo_url = match store.get_project_repo(project).await {
         Ok(Some(url)) => url,
         Ok(None) => {
-            fail_task(&store, &publisher, task_id, project, goal, "No repo URL configured for project").await;
+            fail_task(store.as_ref(), &publisher, task_id, project, goal, "No repo URL configured for project").await;
             return;
         }
         Err(e) => {
-            fail_task(&store, &publisher, task_id, project, goal, &format!("Failed to query project: {e}")).await;
+            fail_task(store.as_ref(), &publisher, task_id, project, goal, &format!("Failed to query project: {e}")).await;
             return;
         }
     };
@@ -260,7 +345,7 @@ async fn handle_execute(
     let repo_path_str = match git.ensure_repo(project, &repo_url).await {
         Ok(p) => p,
         Err(e) => {
-            fail_task(&store, &publisher, task_id, project, goal, &format!("Git clone failed: {e}")).await;
+            fail_task(store.as_ref(), &publisher, task_id, project, goal, &format!("Git clone failed: {e}")).await;
             return;
         }
     };
@@ -268,9 +353,28 @@ async fn handle_execute(
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
 
+    // Lifecycle hooks: fired by the runner (per-task) and below (run-level).
+    let hooks = {
+        let mut hs = swarm_orchestrator::hooks::HookSet::new();
+        hs.register(Arc::new(swarm_orchestrator::hooks::TracingHook));
+        if config.learning.enabled {
+            let memory = Arc::new(knowledge_base::MemoryStore::new(
+                Arc::clone(&store), Arc::clone(&ollama), config.defaults.embed_model.clone(),
+            ));
+            hs.register(Arc::new(crate::hooks::TrajectoryRecorder::new(
+                memory,
+                Arc::clone(&store),
+                Arc::clone(&router),
+                config.tiers.orchestrator.clone(),
+                config.learning.clone(),
+            )));
+        }
+        Arc::new(hs)
+    };
+
     // === PHASE TIMING ===
     let phase_start = std::time::Instant::now();
-    let mut embed_ms: u64;
+    let embed_ms: u64;
 
     // Phase 1: Embeddings
     let embed_model = config.defaults.embed_model.clone();
@@ -285,11 +389,11 @@ async fn handle_execute(
         } else {
             info!(duration_ms = embed_ms, "Phase 1: Embeddings (cached)");
         }
-        update_progress(&store, task_id, &format!("Phase 1: Embeddings done ({}ms)", embed_ms)).await;
+        update_progress(store.as_ref(), task_id, &format!("Phase 1: Embeddings done ({}ms)", embed_ms)).await;
     }
 
     // Helper: update progress on the running task
-    async fn update_progress(store: &KnowledgeStore, task_id: &str, msg: &str) {
+    async fn update_progress(store: &dyn KnowledgeBackend, task_id: &str, msg: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         let safe_msg = msg.replace('\'', "");
         let query = if task_id.contains(':') {
@@ -300,7 +404,7 @@ async fn handle_execute(
         let _ = store.db_query_raw(&query).await;
     }
 
-    update_progress(&store, task_id, "Planning goal decomposition...").await;
+    update_progress(store.as_ref(), task_id, "Planning goal decomposition...").await;
 
     // 4. Run the swarm orchestrator with retry loop (orchestrator tier fuel)
     let tier = &config.tiers.orchestrator;
@@ -314,6 +418,8 @@ async fn handle_execute(
     let mut iteration = 0;
     let mut last_errors = String::new();
     let mut final_result = None;
+    // Pattern ids injected into the approved plan's prompt (SONA signal).
+    let mut plan_pattern_ids: Vec<String> = Vec::new();
 
     loop {
         iteration += 1;
@@ -351,15 +457,20 @@ async fn handle_execute(
         } else {
             "Running agents...".to_string()
         };
-        update_progress(&store, task_id, &progress_msg).await;
+        update_progress(store.as_ref(), task_id, &progress_msg).await;
 
+        let wf_control = engine.control_for(task_id).await;
         let mut runner = swarm_orchestrator::SwarmRunner::new(Arc::clone(&router), Arc::clone(&ollama), &repo_path, project);
         runner = runner
             .with_store(Arc::clone(&store))
             .with_parent_run_id(task_id)
             .with_max_concurrent(config.resources.max_concurrent_agents)
             .with_planner_tier(config.tiers.orchestrator.clone())
-            .with_depth(config.resources.max_sub_plan_depth);
+            .with_depth(config.resources.max_sub_plan_depth)
+            .with_embed_model(config.defaults.embed_model.clone())
+            .with_hooks(Arc::clone(&hooks))
+            .with_control(wf_control)
+            .with_learning(config.learning.clone());
 
         // Zero-disk mode: opt-in via ZERO_DISK=1 (not just GITHUB_TOKEN)
         // GITHUB_TOKEN is used for PR creation regardless
@@ -385,9 +496,43 @@ async fn handle_execute(
         }
 
         let run_start = std::time::Instant::now();
-        update_progress(&store, task_id, "Phase 2: Planning + Agent execution...").await;
+        update_progress(store.as_ref(), task_id, "Phase 2: Planning + Agent execution...").await;
 
-        match runner.run(&augmented_goal).await {
+        // Workflow path: an approved plan with persisted steps executes through
+        // the workflow engine (resumable, replans on step failure — never
+        // re-plans from scratch). Legacy goals fall back to runner.run().
+        // NOTE: approval is recorded on agent_run.status (the approve route
+        // does not touch goal_plan.status) — a run reaching execution with a
+        // persisted plan means that plan IS the approved plan.
+        let approved_tasks: Option<Vec<swarm_orchestrator::SubTask>> = if iteration == 1 {
+            match store.get_latest_plan(task_id).await {
+                Ok(Some(plan)) if !plan.sub_tasks.is_empty() => {
+                    plan_pattern_ids = plan.retrieved_pattern_ids.clone();
+                    Some(plan.sub_tasks.iter().map(planned_to_subtask).collect())
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let exec_result = if let Some(tasks) = approved_tasks {
+            info!(task_id, steps = tasks.len(), "Executing via workflow engine (approved plan)");
+            match run_workflow(&engine, store.as_ref(), &runner, &router, config, task_id, project, goal, &repo_path, tasks).await {
+                Ok(Some(result)) => Ok(result),
+                Ok(None) => {
+                    // Paused or cancelled — workflow_run row is the durable
+                    // state; this task releases its locks and exits.
+                    info!(task_id, "Workflow paused/cancelled — exiting executor");
+                    return;
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            runner.run(&augmented_goal).await
+        };
+
+        match exec_result {
             Ok(result) => {
                 let run_ms = run_start.elapsed().as_millis() as u64;
                 let total_ms = phase_start.elapsed().as_millis() as u64;
@@ -407,7 +552,7 @@ async fn handle_execute(
 
                 if result.quality_passed {
                     let tasks_done = result.results.iter().filter(|r| r.agent_result.as_ref().is_some_and(|a| a.applied)).count();
-                    update_progress(&store, task_id, &format!(
+                    update_progress(store.as_ref(), task_id, &format!(
                         "Quality passed — {} tasks done, creating PR... [{}]",
                         tasks_done, pt.summary()
                     )).await;
@@ -694,6 +839,33 @@ async fn handle_execute(
 
             let _ = store.update_run(task_id, &final_run).await;
 
+            // Run-level hook: fired after the run record is persisted.
+            {
+                let plan_summary: String = result.results.iter()
+                    .map(|r| {
+                        let st = if r.error.is_some() { "failed" }
+                            else if r.agent_result.as_ref().is_some_and(|a| a.applied) { "passed" }
+                            else { "noop" };
+                        format!("[{}] {}: {}", st, r.task.id, r.task.description)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut pattern_ids = result.retrieved_pattern_ids.clone();
+                pattern_ids.extend(plan_pattern_ids.iter().cloned());
+                pattern_ids.dedup();
+                hooks.emit_run_complete(&swarm_orchestrator::hooks::RunCompleteCtx {
+                    run_id: task_id,
+                    project,
+                    goal,
+                    quality_passed: result.quality_passed,
+                    tasks_passed,
+                    tasks_failed,
+                    total_duration_ms: duration,
+                    retrieved_pattern_ids: &pattern_ids,
+                    plan_summary: &plan_summary,
+                }).await;
+            }
+
             // Lifecycle: on_agent_done — update embeddings for modified files only
             if !final_run.files_modified.is_empty() {
                 emb_manager.on_agent_done(project, &repo_path, &final_run.files_modified).await;
@@ -713,14 +885,76 @@ async fn handle_execute(
             }
         }
         None => {
-            fail_task_with_duration(&store, &publisher, task_id, project, goal,
+            fail_task_with_duration(store.as_ref(), &publisher, task_id, project, goal,
                 &format!("All {} iterations failed. Last error: {}", iteration, last_errors), duration).await;
         }
     }
 }
 
+/// Execute (or resume) a workflow run through the engine.
+/// Returns `Ok(Some(result))` on completion, `Ok(None)` when the run was
+/// paused/cancelled (agent_run status already updated), `Err` on failure.
+#[allow(clippy::too_many_arguments)]
+async fn run_workflow(
+    engine: &swarm_workflow::WorkflowEngine,
+    store: &dyn KnowledgeBackend,
+    runner: &swarm_orchestrator::SwarmRunner,
+    router: &InferenceRouter,
+    config: &SwarmConfig,
+    task_id: &str,
+    project: &str,
+    goal: &str,
+    repo_path: &std::path::Path,
+    tasks: Vec<swarm_orchestrator::SubTask>,
+) -> anyhow::Result<Option<swarm_orchestrator::SwarmResult>> {
+    use swarm_workflow::{EngineContext, EngineOutcome, WorkflowRun};
+
+    // Resume an existing non-terminal run, else create one from the plan.
+    let mut wf = match engine.repo().get_by_run_id(task_id).await? {
+        Some(existing) if !existing.state.is_terminal() => {
+            info!(task_id, state = ?existing.state, "Resuming persisted workflow run");
+            existing
+        }
+        _ => {
+            let wf = WorkflowRun::from_tasks(
+                project, goal, task_id, tasks,
+                chrono::Utc::now().to_rfc3339(),
+            );
+            engine.repo().create_run(&wf).await?;
+            wf
+        }
+    };
+
+    let ctx = EngineContext {
+        runner,
+        router,
+        planner_tier: &config.tiers.orchestrator,
+        repo_files: discover_source_files(repo_path),
+        repo_path: repo_path.to_path_buf(),
+    };
+
+    match engine.execute(&mut wf, &ctx).await? {
+        EngineOutcome::Completed(result) => Ok(Some(result)),
+        EngineOutcome::Failed { result: _, error } => Err(anyhow::anyhow!(error)),
+        EngineOutcome::Paused => {
+            let _ = store.db_query_raw(&format_update(
+                task_id,
+                "SET status = 'paused', progress_message = 'Workflow paused — awaiting resume'",
+            )).await;
+            Ok(None)
+        }
+        EngineOutcome::Cancelled => {
+            let _ = store.db_query_raw(&format_update(
+                task_id,
+                "SET status = 'failed', error_message = 'Workflow cancelled by user'",
+            )).await;
+            Ok(None)
+        }
+    }
+}
+
 async fn fail_task(
-    store: &KnowledgeStore,
+    store: &dyn KnowledgeBackend,
     publisher: &Option<Arc<EventPublisher>>,
     task_id: &str, project: &str, goal: &str, error: &str,
 ) {
@@ -728,7 +962,7 @@ async fn fail_task(
 }
 
 async fn fail_task_with_duration(
-    store: &KnowledgeStore,
+    store: &dyn KnowledgeBackend,
     publisher: &Option<Arc<EventPublisher>>,
     task_id: &str, project: &str, goal: &str, error_msg: &str, duration_ms: u64,
 ) {

@@ -1,19 +1,59 @@
 use anyhow::{Context, Result};
 use surrealdb::Surreal;
-use surrealdb::engine::remote::ws::{Client, Ws};
+use surrealdb::engine::any::Any;
 use tracing::info;
 
 use crate::schema::*;
 use crate::queries::SimilarRun;
 
+/// Knowledge store over SurrealDB. The connection is `engine::any`, so one
+/// type serves both modes: embedded `surrealkv://` (daemon = sole DB owner)
+/// and remote `ws://` (escape hatch while an external server exists).
 pub struct KnowledgeStore {
-    db: Surreal<Client>,
+    db: Surreal<Any>,
 }
 
 impl KnowledgeStore {
-    /// Connect to SurrealDB and initialize the schema.
+    /// Mode-aware constructor — the primary entry point.
+    /// `SurrealMode::Nats` is rejected here: bridge consumers use
+    /// `bridge_client::NatsDbClient`, not a `KnowledgeStore`.
+    pub async fn connect_with(cfg: &swarm_config::SurrealConfig) -> Result<Self> {
+        match cfg.mode {
+            swarm_config::SurrealMode::Embedded => {
+                Self::connect_embedded(&cfg.path, &cfg.namespace, &cfg.database).await
+            }
+            swarm_config::SurrealMode::Remote => {
+                Self::connect(&cfg.url, &cfg.namespace, &cfg.database).await
+            }
+            swarm_config::SurrealMode::Nats => anyhow::bail!(
+                "SurrealMode::Nats has no KnowledgeStore — use bridge_client::NatsDbClient"
+            ),
+        }
+    }
+
+    /// Open the embedded kv-surrealkv engine at `path` (no auth needed).
+    pub async fn connect_embedded(path: &str, namespace: &str, database: &str) -> Result<Self> {
+        let endpoint = format!("surrealkv://{path}");
+        let db = surrealdb::engine::any::connect(endpoint.as_str())
+            .await
+            .context("Failed to open embedded SurrealDB (surrealkv)")?;
+
+        db.use_ns(namespace).use_db(database)
+            .await
+            .context("Failed to select namespace/database")?;
+
+        let store = Self { db };
+        store.init_schema().await?;
+
+        info!(path, namespace, database, "Opened embedded SurrealDB (surrealkv)");
+        Ok(store)
+    }
+
+    /// Connect to an external SurrealDB server over WebSocket (legacy/remote
+    /// mode) and initialize the schema.
     pub async fn connect(url: &str, namespace: &str, database: &str) -> Result<Self> {
-        let db = Surreal::new::<Ws>(url)
+        let endpoint = if url.contains("://") { url.to_string() } else { format!("ws://{url}") };
+        let db = surrealdb::engine::any::connect(endpoint.as_str())
             .await
             .context("Failed to connect to SurrealDB")?;
 
@@ -46,10 +86,40 @@ impl KnowledgeStore {
              DEFINE TABLE IF NOT EXISTS file_embedding SCHEMALESS;
              DEFINE INDEX IF NOT EXISTS idx_file_project ON TABLE file_embedding FIELDS project, file_path;
              DEFINE TABLE IF NOT EXISTS project_index SCHEMALESS;
-             DEFINE INDEX IF NOT EXISTS idx_project_index ON TABLE project_index FIELDS project;"
+             DEFINE INDEX IF NOT EXISTS idx_project_index ON TABLE project_index FIELDS project;
+             DEFINE TABLE IF NOT EXISTS workflow_def SCHEMALESS;
+             DEFINE INDEX IF NOT EXISTS idx_wdef_name ON TABLE workflow_def FIELDS name, version;
+             DEFINE TABLE IF NOT EXISTS workflow_run SCHEMALESS;
+             DEFINE INDEX IF NOT EXISTS idx_wrun_runid ON TABLE workflow_run FIELDS run_id;
+             DEFINE INDEX IF NOT EXISTS idx_wrun_proj ON TABLE workflow_run FIELDS project, state;
+             DEFINE TABLE IF NOT EXISTS memory_entry SCHEMALESS;
+             DEFINE INDEX IF NOT EXISTS idx_mem_ns ON TABLE memory_entry FIELDS namespace, project;
+             DEFINE INDEX IF NOT EXISTS idx_mem_key ON TABLE memory_entry FIELDS namespace, project, key;
+             DEFINE TABLE IF NOT EXISTS pattern_effectiveness SCHEMALESS;
+             DEFINE INDEX IF NOT EXISTS idx_peff_project ON TABLE pattern_effectiveness FIELDS project;"
         )
         .await
         .context("Failed to initialize schema")?;
+
+        // HNSW vector indexes: each in its OWN query and fault-tolerant —
+        // unsupported syntax or a dimension mismatch degrades to full-scan
+        // cosine (already correct) instead of bricking startup. NO index on
+        // agent_run.embedding: legacy rows may carry mixed dimensions.
+        let hnsw_ddl = [
+            format!(
+                "DEFINE INDEX IF NOT EXISTS idx_mem_hnsw ON TABLE memory_entry \
+                 FIELDS embedding HNSW DIMENSION {EMBED_DIM} DIST COSINE;"
+            ),
+            format!(
+                "DEFINE INDEX IF NOT EXISTS idx_file_embed_hnsw ON TABLE file_embedding \
+                 FIELDS embedding HNSW DIMENSION {EMBED_DIM} DIST COSINE;"
+            ),
+        ];
+        for ddl in &hnsw_ddl {
+            if let Err(e) = self.db.query(ddl.as_str()).await {
+                tracing::warn!(error = %e, ddl, "HNSW index DDL failed — falling back to full-scan cosine");
+            }
+        }
 
         info!("Schema initialized");
         Ok(())
@@ -143,6 +213,25 @@ impl KnowledgeStore {
     pub async fn db_query_raw(&self, query: &str) -> Result<()> {
         self.db.query(query).await.context("Raw query failed")?;
         Ok(())
+    }
+
+    /// Execute a SurrealQL query with named JSON params and return the FIRST
+    /// statement's rows as JSON values. Shared primitive for typed CRUD layers
+    /// (workflow, memory) and the NATS DB bridge.
+    pub async fn query_json(
+        &self,
+        query: &str,
+        params: serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut q = self.db.query(query);
+        if let serde_json::Value::Object(map) = params {
+            for (key, value) in map {
+                q = q.bind((key, value));
+            }
+        }
+        let mut result = q.await.context("query_json failed")?;
+        let rows: Vec<serde_json::Value> = result.take(0).unwrap_or_default();
+        Ok(rows)
     }
 
     /// Get all pending tasks across all projects.

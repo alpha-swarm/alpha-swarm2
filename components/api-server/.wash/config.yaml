@@ -2,3 +2,12 @@ version: 2.0.1
 
 build:
   command: "cargo build --target wasm32-wasip2 --release && cp ../../target/wasm32-wasip2/release/api_server.wasm api-server.wasm"
+
+dev:
+  host_interfaces:
+    - namespace: wasmcloud
+      package: messaging
+      interfaces: [consumer]
+      name: wasmcloud-messaging
+      config:
+        url: nats://127.0.0.1:4223

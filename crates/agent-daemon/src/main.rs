@@ -7,6 +7,9 @@
 mod repo;
 mod executor;
 mod git_pr;
+mod hooks;
+mod db_bridge;
+mod http_bridge;
 pub mod resources;
 pub mod provider_client;
 
@@ -17,7 +20,7 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use inference_client::{ClaudeBackend, InferenceRouter, OllamaBackend};
-use knowledge_base::KnowledgeStore;
+use knowledge_base::{KnowledgeBackend, KnowledgeStore};
 use swarm_config::SwarmConfig;
 use swarm_events::{EventPublisher, NatsScheduler, scheduler::HostResources};
 
@@ -27,6 +30,8 @@ const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const RESOURCE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// How often to renew leases for running tasks.
 const LEASE_RENEWAL_INTERVAL: Duration = Duration::from_secs(120);
+/// Text used by the startup embedding-dimension probe.
+const EMBED_PROBE_TEXT: &str = "probe";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -72,23 +77,46 @@ async fn main() -> Result<()> {
     let router = Arc::new(router);
     let ollama = Arc::new(OllamaBackend::new(&config.ollama.url));
 
+    // Embedding-dimension probe: a wrong-dimension embed model corrupts every
+    // vector table and is rejected by the HNSW indexes — fail fast on mismatch.
+    // A transient Ollama outage only warns (model may load later).
+    match ollama.embed(&config.defaults.embed_model, EMBED_PROBE_TEXT).await {
+        Ok(v) if v.len() != knowledge_base::EMBED_DIM => {
+            anyhow::bail!(
+                "Embed model '{}' returns {}-dim vectors but EMBED_DIM is {} — configure a matching model (e.g. nomic-embed-text)",
+                config.defaults.embed_model, v.len(), knowledge_base::EMBED_DIM
+            );
+        }
+        Ok(_) => info!(model = %config.defaults.embed_model, dim = knowledge_base::EMBED_DIM, "Embed dimension probe OK"),
+        Err(e) => warn!(model = %config.defaults.embed_model, error = %e, "Embed probe skipped (Ollama unreachable)"),
+    }
+
     // Warm model into Ollama memory (background, non-blocking)
     {
         let model = config.tiers.agent.model.clone();
         let ollama_warm = Arc::clone(&ollama);
         tokio::spawn(async move {
             info!(model = %model, "Warming model into Ollama memory...");
-            match ollama_warm.embed(&model, "warmup").await {
+            // Chat-tier models don't implement the embeddings API — warm with
+            // a minimal chat round-trip instead.
+            let messages = vec![inference_client::ChatMessage::user(EMBED_PROBE_TEXT)];
+            let options = inference_client::InferenceOptions {
+                max_tokens: Some(1),
+                ..Default::default()
+            };
+            use inference_client::InferenceBackend;
+            match ollama_warm.chat(&model, &messages, &options).await {
                 Ok(_) => info!(model = %model, "Model warmed"),
                 Err(e) => warn!(model = %model, error = %e, "Model warmup failed (will load on first use)"),
             }
         });
     }
 
-    // Connect to SurrealDB (always needed for run storage)
-    let store = Arc::new(
-        KnowledgeStore::connect(&config.surrealdb.url, &config.surrealdb.namespace, &config.surrealdb.database).await?
-    );
+    // Open the DB (embedded surrealkv by default — this daemon is the sole
+    // owner; mode=remote is the external-server escape hatch). Held as the
+    // KnowledgeBackend trait so the storage tech stays swappable.
+    let store: Arc<dyn KnowledgeBackend> =
+        Arc::new(KnowledgeStore::connect_with(&config.surrealdb).await?);
 
     // Connect to NATS for events
     let publisher = match EventPublisher::connect(&config.nats.url).await {
@@ -114,6 +142,56 @@ async fn main() -> Result<()> {
         info!("Cleared stale execution locks");
     }
 
+    // Workflow engine: persisted DAG runs, pause/resume, adaptive replanning.
+    let wf_engine = Arc::new(swarm_workflow::WorkflowEngine::new(
+        swarm_workflow::WorkflowRepo::new(Arc::clone(&store)),
+        publisher.clone(),
+    ));
+    match swarm_workflow::seed_templates(wf_engine.repo()).await {
+        Ok(n) => info!(templates = n, "Workflow templates seeded"),
+        Err(e) => warn!("Workflow template seeding failed: {e}"),
+    }
+    // Crash recovery: workflows left 'running' resume through the normal task
+    // flow — their agent_run rows were just reset to 'pending' above, and the
+    // executor resumes the persisted workflow_run instead of re-planning.
+    match wf_engine.repo().list_active().await {
+        Ok(active) if !active.is_empty() => {
+            info!(count = active.len(), "Active workflow runs found (will resume via task flow)");
+        }
+        Ok(_) => {}
+        Err(e) => warn!("Workflow recovery scan failed: {e}"),
+    }
+
+    // HTTP /sql shim for WASM components in embedded mode (wash dev's
+    // messaging plugin is in-memory only; components fall back to this HTTP
+    // contract on the old SurrealDB address).
+    if config.surrealdb.mode == swarm_config::SurrealMode::Embedded {
+        tokio::spawn(http_bridge::serve(
+            config.surrealdb.url.clone(),
+            Arc::clone(&store),
+            Arc::clone(&wf_engine),
+        ));
+    }
+
+    // NATS DB bridge: the query surface for native consumers (TUI, eval,
+    // event-consumer, remote daemons).
+    match async_nats::connect(&config.nats.url).await {
+        Ok(bridge_client) => {
+            let memory = Arc::new(knowledge_base::MemoryStore::new(
+                Arc::clone(&store),
+                Arc::clone(&ollama),
+                config.defaults.embed_model.clone(),
+            ));
+            let bridge = db_bridge::DbBridge::new(
+                Arc::clone(&store),
+                Arc::clone(&wf_engine),
+                memory,
+            );
+            tokio::spawn(bridge.serve(bridge_client));
+        }
+        Err(e) => warn!("DB bridge NATS connect failed (bridge unavailable): {e}"),
+    }
+
     // Start resource heartbeat
     {
         let store = Arc::clone(&store);
@@ -124,19 +202,21 @@ async fn main() -> Result<()> {
             loop {
                 let snapshots = resources::check_all_hosts(&res_config).await;
 
-                // Write to SurrealDB (for web-ui dashboard)
-                let _ = store.db_query_raw("DELETE FROM resource_snapshot").await;
+                // Write to SurrealDB (for dashboard). DELETE + CREATEs run in one
+                // transaction so concurrent reads never observe an empty table.
+                let mut tx = String::from("BEGIN TRANSACTION; DELETE FROM resource_snapshot;");
                 for snap in &snapshots {
                     let models_json = serde_json::to_string(&snap.ollama_models).unwrap_or_else(|_| "[]".into());
-                    let query = format!(
-                        "CREATE resource_snapshot SET host='{}', host_type='{}', cpu_percent={:.1}, ram_total_mb={}, ram_used_mb={}, ram_percent={:.1}, disk_total_gb={:.1}, disk_free_gb={:.1}, disk_percent={:.1}, ollama_models={}, timestamp=time::now()",
+                    tx.push_str(&format!(
+                        " CREATE resource_snapshot SET host='{}', host_type='{}', cpu_percent={:.1}, ram_total_mb={}, ram_used_mb={}, ram_percent={:.1}, disk_total_gb={:.1}, disk_free_gb={:.1}, disk_percent={:.1}, ollama_models={}, timestamp=time::now();",
                         snap.host, snap.host_type,
                         snap.cpu_percent, snap.ram_total_mb, snap.ram_used_mb, snap.ram_percent,
                         snap.disk_total_gb, snap.disk_free_gb, snap.disk_percent,
                         models_json,
-                    );
-                    let _ = store.db_query_raw(&query).await;
+                    ));
                 }
+                tx.push_str(" COMMIT TRANSACTION;");
+                let _ = store.db_query_raw(&tx).await;
 
                 // Also publish to NATS KV (for distributed scheduling)
                 if let Some(sched) = &scheduler {
@@ -160,7 +240,7 @@ async fn main() -> Result<()> {
     }
 
     // Process initial pending tasks (first one only)
-    process_pending(&config, &router, &ollama, &store, &publisher, &scheduler).await;
+    process_pending(&config, &router, &ollama, &store, &publisher, &scheduler, &wf_engine).await;
 
     // Main loop: poll SurrealDB, run 1 goal at a time via NATS KV execution lock
     info!("Polling SurrealDB every {:?} (1 goal at a time via NATS KV lock)", FALLBACK_POLL_INTERVAL);
@@ -189,7 +269,7 @@ async fn main() -> Result<()> {
                     let project = task.project.clone();
                     let goal = task.task_description.clone();
                     let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
-                    spawn_task(config.clone(), Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), scheduler.clone(), id, project, goal, status);
+                    spawn_task(config.clone(), Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), scheduler.clone(), Arc::clone(&wf_engine), id, project, goal, status);
                 }
             }
         } else {
@@ -203,7 +283,7 @@ async fn main() -> Result<()> {
                     let project = task.project.clone();
                     let goal = task.task_description.clone();
                     // Run planning only (not execution)
-                    executor::handle_task(&config, Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), &id, &project, &goal, "planning").await;
+                    executor::handle_task(&config, Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), Arc::clone(&wf_engine), &id, &project, &goal, "planning").await;
                     break; // One at a time
                 }
             }
@@ -215,13 +295,15 @@ async fn main() -> Result<()> {
 }
 
 /// Process any tasks already pending in SurrealDB (first one only).
+#[allow(clippy::too_many_arguments)]
 async fn process_pending(
     config: &SwarmConfig,
     router: &Arc<InferenceRouter>,
     ollama: &Arc<OllamaBackend>,
-    store: &Arc<KnowledgeStore>,
+    store: &Arc<dyn KnowledgeBackend>,
     publisher: &Option<Arc<EventPublisher>>,
     scheduler: &Option<Arc<NatsScheduler>>,
+    wf_engine: &Arc<swarm_workflow::WorkflowEngine>,
 ) {
     match store.list_pending().await {
         Ok(pending) => {
@@ -247,7 +329,7 @@ async fn process_pending(
                 let goal = task.task_description.clone();
                 let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
 
-                spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), scheduler.clone(), id, project, goal, status);
+                spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), scheduler.clone(), Arc::clone(wf_engine), id, project, goal, status);
             }
         }
         Err(e) => warn!("Failed to query pending tasks: {e}"),
@@ -256,20 +338,22 @@ async fn process_pending(
 
 /// Primary mode: watch NATS KV for new tasks.
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 async fn run_nats_kv_loop(
     config: &SwarmConfig,
     router: &Arc<InferenceRouter>,
     ollama: &Arc<OllamaBackend>,
-    store: &Arc<KnowledgeStore>,
+    store: &Arc<dyn KnowledgeBackend>,
     publisher: &Option<Arc<EventPublisher>>,
     scheduler: &Arc<NatsScheduler>,
+    wf_engine: &Arc<swarm_workflow::WorkflowEngine>,
 ) {
 
     let watcher = match scheduler.watch_tasks().await {
         Ok(w) => w,
         Err(e) => {
             warn!("Failed to watch NATS KV tasks, falling back to polling: {e}");
-            run_surreal_poll_loop(config, router, ollama, store, publisher).await;
+            run_surreal_poll_loop(config, router, ollama, store, publisher, wf_engine).await;
             return;
         }
     };
@@ -306,7 +390,7 @@ async fn run_nats_kv_loop(
                         let goal = task.task_description.clone();
                         let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
 
-                        spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), Some(Arc::clone(scheduler)), id, project, goal, status);
+                        spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), Some(Arc::clone(scheduler)), Arc::clone(wf_engine), id, project, goal, status);
                     }
                 }
             }
@@ -320,8 +404,9 @@ async fn run_surreal_poll_loop(
     config: &SwarmConfig,
     router: &Arc<InferenceRouter>,
     ollama: &Arc<OllamaBackend>,
-    store: &Arc<KnowledgeStore>,
+    store: &Arc<dyn KnowledgeBackend>,
     publisher: &Option<Arc<EventPublisher>>,
+    wf_engine: &Arc<swarm_workflow::WorkflowEngine>,
 ) {
     loop {
         tokio::time::sleep(FALLBACK_POLL_INTERVAL).await;
@@ -335,7 +420,7 @@ async fn run_surreal_poll_loop(
                 let goal = task.task_description.clone();
                 let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
 
-                spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), None, id, project, goal, status);
+                spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), None, Arc::clone(wf_engine), id, project, goal, status);
             }
         }
     }
@@ -347,9 +432,10 @@ fn spawn_task(
     config: SwarmConfig,
     router: Arc<InferenceRouter>,
     ollama: Arc<OllamaBackend>,
-    store: Arc<KnowledgeStore>,
+    store: Arc<dyn KnowledgeBackend>,
     publisher: Option<Arc<EventPublisher>>,
     scheduler: Option<Arc<NatsScheduler>>,
+    wf_engine: Arc<swarm_workflow::WorkflowEngine>,
     id: String,
     project: String,
     goal: String,
@@ -374,7 +460,7 @@ fn spawn_task(
         };
 
         // Execute the task
-        executor::handle_task(&config, router, ollama, store, publisher, &id, &project, &goal, &status).await;
+        executor::handle_task(&config, router, ollama, store, publisher, wf_engine, &id, &project, &goal, &status).await;
 
         // Release execution lock + task lease
         if let Some(sched) = &scheduler {

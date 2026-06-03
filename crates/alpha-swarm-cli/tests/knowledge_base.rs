@@ -1,13 +1,17 @@
 /// Integration tests for knowledge-base crate.
-/// Requires SurrealDB running at 127.0.0.1:8000 with root/root.
+/// Runs against an embedded surrealkv store in a unique temp dir — no
+/// external SurrealDB server required.
 use knowledge_base::*;
 
 async fn test_store() -> KnowledgeStore {
-    // Use unique namespace per test run to avoid collisions
+    // Unique data dir per test to avoid single-process-owner collisions
+    let dir = std::env::temp_dir()
+        .join("alpha-swarm-kb-tests")
+        .join(uuid::Uuid::new_v4().to_string());
     let ns = format!("test_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
-    KnowledgeStore::connect("127.0.0.1:8000", &ns, "test")
+    KnowledgeStore::connect_embedded(dir.to_str().expect("utf8 temp path"), &ns, "test")
         .await
-        .expect("Failed to connect to SurrealDB")
+        .expect("Failed to open embedded SurrealDB")
 }
 
 #[tokio::test]
