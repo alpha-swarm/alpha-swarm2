@@ -96,7 +96,9 @@ impl KnowledgeStore {
              DEFINE INDEX IF NOT EXISTS idx_mem_ns ON TABLE memory_entry FIELDS namespace, project;
              DEFINE INDEX IF NOT EXISTS idx_mem_key ON TABLE memory_entry FIELDS namespace, project, key;
              DEFINE TABLE IF NOT EXISTS pattern_effectiveness SCHEMALESS;
-             DEFINE INDEX IF NOT EXISTS idx_peff_project ON TABLE pattern_effectiveness FIELDS project;"
+             DEFINE INDEX IF NOT EXISTS idx_peff_project ON TABLE pattern_effectiveness FIELDS project;
+             DEFINE TABLE IF NOT EXISTS autopilot_goal SCHEMALESS;
+             DEFINE INDEX IF NOT EXISTS idx_apg_status ON TABLE autopilot_goal FIELDS status;"
         )
         .await
         .context("Failed to initialize schema")?;

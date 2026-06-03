@@ -193,9 +193,10 @@ async fn handle_planning(
     }
 
     // Retrieve past proven plans for similar goals and inject as guidance.
+    // Weighted by closed-loop effectiveness — proven patterns rank higher.
     let (past_plans_block, retrieved_pattern_ids) = if let Some(memory) = &memory {
         let namespaces = [knowledge_base::MEM_NS_PATTERNS, knowledge_base::MEM_NS_SOLUTIONS];
-        match memory.search_text(&namespaces, project, goal, config.learning.max_proven_plans).await {
+        match memory.search_text_weighted(&namespaces, project, goal, config.learning.max_proven_plans).await {
             Ok(hits) if !hits.is_empty() => {
                 let mut block = String::new();
                 let mut ids = Vec::new();

@@ -10,6 +10,7 @@ mod git_pr;
 mod hooks;
 mod db_bridge;
 mod http_bridge;
+mod autopilot;
 pub mod resources;
 pub mod provider_client;
 
@@ -63,11 +64,28 @@ async fn main() -> Result<()> {
                     info!(url = %provider.url, priority = provider.priority, "Adding Ollama provider");
                     router = router.add_backend(OllamaBackend::new(&provider.url));
                 }
-                "openai" => {
-                    info!(url = %provider.url, model = %provider.model, "Adding OpenAI-compatible cloud provider");
+                // Any OpenAI-compatible endpoint: openai, groq, together, vllm,
+                // lmstudio, deepinfra, etc. — set `url` to the provider's base.
+                "openai" | "openai-compat" | "groq" | "together" | "vllm" | "lmstudio" => {
+                    info!(url = %provider.url, model = %provider.model, kind = %provider.provider_type, "Adding OpenAI-compatible provider");
                     router = router.add_backend(inference_client::OpenAICompatBackend::new(
                         &provider.url, &provider.api_key, &provider.model,
                     ));
+                }
+                // Gemini via its OpenAI-compatible surface. Default endpoint
+                // when `url` is omitted.
+                "gemini" | "google" => {
+                    let url = if provider.url.is_empty() {
+                        "https://generativelanguage.googleapis.com/v1beta/openai"
+                    } else { provider.url.as_str() };
+                    info!(url, model = %provider.model, "Adding Gemini (OpenAI-compat) provider");
+                    router = router.add_backend(inference_client::OpenAICompatBackend::new(
+                        url, &provider.api_key, &provider.model,
+                    ));
+                }
+                "claude" | "anthropic" => {
+                    info!(model = %provider.model, "Adding Claude provider");
+                    router = router.add_backend(ClaudeBackend::new(&provider.api_key).with_model(&provider.model));
                 }
                 other => { warn!(provider_type = other, "Unknown provider type, skipping"); }
             }
@@ -229,6 +247,10 @@ async fn main() -> Result<()> {
             }
         });
     }
+
+    // Autonomous operation (opt-in; OFF by default). Drains the autopilot_goal
+    // backlog when idle + under the daily cap.
+    autopilot::spawn(config.autopilot.clone(), Arc::clone(&store), scheduler.clone());
 
     // Start resource heartbeat
     {

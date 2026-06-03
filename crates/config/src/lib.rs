@@ -20,6 +20,8 @@ pub struct SwarmConfig {
     pub resources: ResourceConfig,
     /// SONA learning loop (trajectory distillation + retrieval-augmented planning).
     pub learning: LearningConfig,
+    /// Autonomous operation (OFF by default).
+    pub autopilot: AutopilotConfig,
     /// Inference providers (multiple Ollama hosts, etc.)
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
@@ -56,6 +58,38 @@ impl Default for LearningConfig {
             max_proven_plans: DEFAULT_MAX_PROVEN_PLANS,
             min_similarity: DEFAULT_LEARNING_MIN_SIMILARITY,
             proven_plans_char_budget: DEFAULT_PROVEN_PLANS_CHAR_BUDGET,
+        }
+    }
+}
+
+/// Default autopilot tick interval.
+pub const DEFAULT_AUTOPILOT_TICK_SECS: u64 = 300;
+/// Default hard cap on autonomous runs per day (cost guardrail).
+pub const DEFAULT_AUTOPILOT_MAX_RUNS_PER_DAY: u32 = 5;
+
+/// Autonomous operation. OFF by default — autonomy is opt-in, and the daily
+/// cap is a hard cost ceiling (local-LLMs-only, no-runaway-costs).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AutopilotConfig {
+    /// Master switch. Default false — nothing runs autonomously unless enabled.
+    pub enabled: bool,
+    /// How often the autopilot driver wakes.
+    pub tick_secs: u64,
+    /// Hard ceiling on autonomous runs started per calendar day.
+    pub max_runs_per_day: u32,
+    /// Auto-approve autonomous (`agent_id = autopilot`) planned runs. Human-
+    /// submitted runs always require manual approval regardless.
+    pub auto_approve: bool,
+}
+
+impl Default for AutopilotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tick_secs: DEFAULT_AUTOPILOT_TICK_SECS,
+            max_runs_per_day: DEFAULT_AUTOPILOT_MAX_RUNS_PER_DAY,
+            auto_approve: true,
         }
     }
 }
@@ -457,6 +491,9 @@ impl SwarmConfig {
         if let Ok(v) = std::env::var("ALPHA_SWARM_EMBED_MODEL") { self.defaults.embed_model = v; }
         if let Ok(v) = std::env::var("ALPHA_SWARM_LEARNING") {
             self.learning.enabled = matches!(v.to_lowercase().as_str(), "1" | "true" | "on");
+        }
+        if let Ok(v) = std::env::var("ALPHA_SWARM_AUTOPILOT") {
+            self.autopilot.enabled = matches!(v.to_lowercase().as_str(), "1" | "true" | "on");
         }
     }
 

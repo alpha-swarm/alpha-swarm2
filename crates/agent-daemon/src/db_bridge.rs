@@ -147,7 +147,42 @@ impl DbBridge {
             s if s.starts_with("swarm.db.memory.") => {
                 self.handle_memory(s.trim_start_matches("swarm.db.memory."), payload).await
             }
+            s if s.starts_with("swarm.db.autopilot.") => {
+                self.handle_autopilot(s.trim_start_matches("swarm.db.autopilot."), payload).await
+            }
             other => DbResponse::err(format!("unknown bridge subject: {other}")),
+        }
+    }
+
+    /// Autopilot backlog ops: `queue` (enqueue a goal), `list` (show backlog).
+    async fn handle_autopilot(&self, op: &str, payload: &[u8]) -> DbResponse {
+        let body: serde_json::Value = serde_json::from_slice(payload).unwrap_or(serde_json::Value::Null);
+        match op {
+            "queue" => {
+                let project = body.get("project").and_then(|v| v.as_str()).unwrap_or("");
+                let goal = body.get("goal").and_then(|v| v.as_str()).unwrap_or("");
+                if project.is_empty() || goal.is_empty() {
+                    return DbResponse::err("project, goal required");
+                }
+                let q = "CREATE autopilot_goal CONTENT $data RETURN id";
+                match self.store.query_json(q, serde_json::json!({
+                    "data": { "project": project, "goal": goal, "status": "queued",
+                              "created_at": chrono::Utc::now().to_rfc3339() }
+                })).await {
+                    Ok(rows) => DbResponse::ok(rows),
+                    Err(e) => DbResponse::err(e.to_string()),
+                }
+            }
+            "list" => {
+                match self.store.query_json(
+                    "SELECT * FROM autopilot_goal ORDER BY created_at DESC LIMIT 50",
+                    serde_json::Value::Null,
+                ).await {
+                    Ok(rows) => DbResponse::ok(rows),
+                    Err(e) => DbResponse::err(e.to_string()),
+                }
+            }
+            other => DbResponse::err(format!("unknown autopilot op: {other}")),
         }
     }
 

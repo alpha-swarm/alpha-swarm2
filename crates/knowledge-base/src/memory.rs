@@ -7,6 +7,7 @@
 //! query degrades to a full scan when not.
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -22,6 +23,13 @@ pub const MIN_SIMILARITY: f32 = 0.5;
 pub const DECAY_MIN_USE_COUNT: u32 = 2;
 /// Entries not used for this many days are decay candidates.
 pub const DECAY_STALE_DAYS: i64 = 30;
+/// Closed-loop reranking: floor on the similarity multiplier (a 0%-success
+/// pattern keeps this fraction of its semantic similarity).
+const EFFECTIVENESS_FLOOR: f32 = 0.5;
+/// Weight given to a pattern with no recorded effectiveness yet.
+const NEUTRAL_PATTERN_WEIGHT: f32 = 0.75;
+/// Overfetch factor before effectiveness reranking.
+const EFFECTIVENESS_OVERFETCH: usize = 3;
 
 /// Namespaced semantic memory store. Reuses the daemon's existing Ollama
 /// client + embed model — never creates a second embedding path.
@@ -209,6 +217,53 @@ impl MemoryStore {
         let embedding = self.ollama.embed(&self.embed_model, query_text).await
             .context("memory query embed failed")?;
         self.search(namespaces, project, &embedding, top_k).await
+    }
+
+    /// Like `search_text`, but reranks by closed-loop effectiveness: a hit's
+    /// semantic similarity is scaled by how often that pattern led to a
+    /// successful run (from `pattern_effectiveness`). Proven patterns rise;
+    /// patterns that consistently precede failures sink. Patterns with no
+    /// history get a neutral weight. Pure stats — non-neural, honest.
+    pub async fn search_text_weighted(
+        &self,
+        namespaces: &[&str],
+        project: &str,
+        query_text: &str,
+        top_k: usize,
+    ) -> Result<Vec<MemorySearchHit>> {
+        let embedding = self.ollama.embed(&self.embed_model, query_text).await
+            .context("memory query embed failed")?;
+        // Overfetch so reranking can promote a lower-similarity-but-proven hit.
+        let mut hits = self.search(namespaces, project, &embedding, top_k.saturating_mul(EFFECTIVENESS_OVERFETCH)).await?;
+        let weights = self.pattern_weights(project).await.unwrap_or_default();
+        for h in &mut hits {
+            let w = h.entry.id.as_deref()
+                .and_then(|id| weights.get(id).copied())
+                .unwrap_or(NEUTRAL_PATTERN_WEIGHT);
+            // Floor keeps a 0%-success pattern at EFFECTIVENESS_FLOOR of its
+            // similarity (semantic relevance still counts); 100% → full.
+            h.similarity *= EFFECTIVENESS_FLOOR + (1.0 - EFFECTIVENESS_FLOOR) * w;
+        }
+        hits.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(top_k);
+        Ok(hits)
+    }
+
+    /// Per-pattern success rate (succeeded / total) from `pattern_effectiveness`.
+    pub async fn pattern_weights(&self, project: &str) -> Result<HashMap<String, f32>> {
+        let rows = self.store.query_json(
+            "SELECT pattern_id, run_succeeded FROM pattern_effectiveness WHERE project = $project",
+            serde_json::json!({ "project": project }),
+        ).await.context("pattern_weights query failed")?;
+        let mut tally: HashMap<String, (u32, u32)> = HashMap::new(); // id -> (succ, total)
+        for row in &rows {
+            let Some(id) = row.get("pattern_id").and_then(|v| v.as_str()) else { continue };
+            let ok = row.get("run_succeeded").and_then(|v| v.as_bool()).unwrap_or(false);
+            let e = tally.entry(id.to_string()).or_insert((0, 0));
+            e.1 += 1;
+            if ok { e.0 += 1; }
+        }
+        Ok(tally.into_iter().map(|(id, (s, t))| (id, if t > 0 { s as f32 / t as f32 } else { NEUTRAL_PATTERN_WEIGHT })).collect())
     }
 
     /// Exact-key lookup (no vector math).

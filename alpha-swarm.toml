@@ -79,9 +79,58 @@ name = "csatapaci"
 type = "ollama"
 ollama_url = "http://100.81.10.8:11434"
 
-# --- Inference Provider ---
-# Single Ollama on csatapaci for everything (embeddings + planning + agent)
+# --- Inference Providers ---
+# Multiple providers may be listed; lower `priority` is preferred, with
+# failover to the next. Mix local + cloud freely.
+#
+# Supported `type`s:
+#   ollama                         — local (native); url = Ollama host
+#   claude | anthropic             — Anthropic (native); api_key + model
+#   gemini | google               — Google Gemini via OpenAI-compat; url
+#                                    optional (defaults to the Gemini endpoint)
+#   openai | groq | together | vllm | lmstudio | openai-compat
+#                                    — any OpenAI-compatible endpoint; set url
+#                                      to its base (e.g. https://api.openai.com)
+
+# Default: Ollama on csatapaci for everything (embeddings + planning + agent).
 [[providers]]
 type = "ollama"
 url = "http://100.81.10.8:11434"   # csatapaci M2 Max 96GB
 priority = 1
+
+# --- Cloud examples (uncomment + set api_key to use; keys via env preferred) ---
+# [[providers]]
+# type = "gemini"                  # url omitted → uses the Gemini OpenAI-compat endpoint
+# api_key = "..."                  # or export GEMINI_API_KEY and reference it
+# model = "gemini-2.5-flash"
+# priority = 2
+#
+# [[providers]]
+# type = "openai"
+# url = "https://api.openai.com"
+# api_key = "..."
+# model = "gpt-4o-mini"
+# priority = 3
+#
+# [[providers]]
+# type = "claude"
+# api_key = "..."                  # or ANTHROPIC_API_KEY
+# model = "claude-sonnet-4-20250514"
+# priority = 4
+#
+# [[providers]]
+# type = "groq"
+# url = "https://api.groq.com/openai"
+# api_key = "..."
+# model = "llama-3.3-70b-versatile"
+# priority = 5
+
+# --- Autonomous operation (OFF by default) ---
+# When enabled, the daemon drains the autopilot_goal backlog on its own:
+# idle-gated, one run at a time, hard daily cap. Queue goals via the bridge
+# subject `swarm.db.autopilot.queue` ({project, goal}).
+[autopilot]
+enabled = false
+tick_secs = 300
+max_runs_per_day = 5
+auto_approve = true

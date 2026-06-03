@@ -29,6 +29,22 @@ impl OpenAICompatBackend {
             default_model: default_model.to_string(),
         }
     }
+
+    /// Build the chat-completions URL. Handles the version-prefix variation
+    /// across providers: OpenAI/Groq/Together expect `{base}/v1/chat/completions`
+    /// while Gemini's OpenAI-compat path is `{base}/v1beta/openai/chat/completions`.
+    /// A base that already carries the version prefix (`/v1`, `/openai`,
+    /// `/v1beta/...`) or a full endpoint is used as-is.
+    fn chat_url(&self) -> String {
+        let b = &self.base_url;
+        if b.ends_with("/chat/completions") {
+            b.clone()
+        } else if b.ends_with("/v1") || b.ends_with("/openai") || b.contains("/v1beta/") {
+            format!("{b}/chat/completions")
+        } else {
+            format!("{b}/v1/chat/completions")
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -104,7 +120,7 @@ impl InferenceBackend for OpenAICompatBackend {
 
         let start = Instant::now();
         let response = self.client
-            .post(format!("{}/v1/chat/completions", self.base_url))
+            .post(self.chat_url())
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&request)
             .send().await
@@ -137,4 +153,31 @@ impl InferenceBackend for OpenAICompatBackend {
         })
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url_for(base: &str) -> String {
+        OpenAICompatBackend::new(base, "k", "m").chat_url()
+    }
+
+    #[test]
+    fn chat_url_per_provider() {
+        // OpenAI / Together / generic base → add /v1/chat/completions
+        assert_eq!(url_for("https://api.openai.com"), "https://api.openai.com/v1/chat/completions");
+        assert_eq!(url_for("https://api.together.xyz/"), "https://api.together.xyz/v1/chat/completions");
+        // Groq base ends with /openai → just add /chat/completions
+        assert_eq!(url_for("https://api.groq.com/openai"), "https://api.groq.com/openai/chat/completions");
+        // Gemini OpenAI-compat path (/v1beta/openai) → no doubled /v1
+        assert_eq!(
+            url_for("https://generativelanguage.googleapis.com/v1beta/openai"),
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        );
+        // Base already carrying /v1 → no double
+        assert_eq!(url_for("http://localhost:8000/v1"), "http://localhost:8000/v1/chat/completions");
+        // Full endpoint passed through
+        assert_eq!(url_for("http://x/v1/chat/completions"), "http://x/v1/chat/completions");
+    }
 }
