@@ -19,8 +19,12 @@ use knowledge_base::KnowledgeBackend;
 use swarm_config::AutopilotConfig;
 use swarm_events::NatsScheduler;
 
-/// agent_id tag marking autonomously-created runs.
+/// agent_id stamped at creation (cosmetic; the planner reassigns it).
 pub const AUTOPILOT_AGENT_ID: &str = "autopilot";
+/// Durable tag on autonomous runs. Unlike agent_id (which the lifecycle
+/// rewrites to 'planner'/'daemon'), `source` is set once and never touched,
+/// so auto-approve + the daily cap can reliably find autonomous runs.
+pub const AUTOPILOT_SOURCE: &str = "autopilot";
 
 /// Spawn the autopilot driver loop. No-op (returns immediately) when disabled.
 pub fn spawn(
@@ -59,8 +63,8 @@ async fn tick(
         let approved = store.query_json(
             "UPDATE agent_run SET status = 'approved', \
                  progress_message = 'Autopilot auto-approved' \
-             WHERE agent_id = $aid AND status = 'planned' RETURN id",
-            serde_json::json!({ "aid": AUTOPILOT_AGENT_ID }),
+             WHERE source = $src AND status = 'planned' RETURN id",
+            serde_json::json!({ "src": AUTOPILOT_SOURCE }),
         ).await?;
         if !approved.is_empty() {
             info!(count = approved.len(), "autopilot auto-approved planned runs");
@@ -108,23 +112,24 @@ async fn tick(
 
     let create = format!(
         "CREATE agent_run SET project = '{}', task_description = '{}', status = 'planning', \
-             agent_id = '{}', model_used = 'auto', created_at = time::now(), \
+             agent_id = '{}', source = '{}', model_used = 'auto', created_at = time::now(), \
              files_modified = [], tokens_input = 0, tokens_output = 0, duration_ms = 0",
         project.replace('\'', ""),
         goal.replace('\'', ""),
         AUTOPILOT_AGENT_ID,
+        AUTOPILOT_SOURCE,
     );
     store.db_query_raw(&create).await?;
     info!(project = %project, goal = %goal, today = today_count + 1, "autopilot started autonomous goal");
     Ok(())
 }
 
-/// Count autonomous runs created since local midnight (UTC day boundary).
+/// Count autonomous runs created since the start of the current UTC day.
 async fn autonomous_runs_today(store: &dyn KnowledgeBackend) -> anyhow::Result<i64> {
     let rows = store.query_json(
         "SELECT count() AS c FROM agent_run \
-         WHERE agent_id = $aid AND created_at > time::floor(time::now(), 1d) GROUP ALL",
-        serde_json::json!({ "aid": AUTOPILOT_AGENT_ID }),
+         WHERE source = $src AND created_at > time::floor(time::now(), 1d) GROUP ALL",
+        serde_json::json!({ "src": AUTOPILOT_SOURCE }),
     ).await?;
     Ok(rows.first().and_then(|v| v.get("c")).and_then(|c| c.as_i64()).unwrap_or(0))
 }

@@ -138,9 +138,37 @@ impl MemoryStore {
         query_embedding: &[f32],
         top_k: usize,
     ) -> Result<Vec<MemorySearchHit>> {
-        // Fast path: embedded ruvector ANN index.
+        self.search_inner(namespaces, project, None, query_embedding, top_k).await
+    }
+
+    /// Hybrid (dense + keyword) variant — pass the query text so the embedded
+    /// index can fuse a sparse BM25-lite ranking with the dense HNSW one.
+    pub async fn search_hybrid(
+        &self,
+        namespaces: &[&str],
+        project: &str,
+        query_text: &str,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<MemorySearchHit>> {
+        self.search_inner(namespaces, project, Some(query_text), query_embedding, top_k).await
+    }
+
+    async fn search_inner(
+        &self,
+        namespaces: &[&str],
+        project: &str,
+        query_text: Option<&str>,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<MemorySearchHit>> {
+        // Fast path: embedded ruvector ANN index (hybrid when query text given).
         if let Some(idx) = crate::rvindex::RvIndex::global() {
-            match idx.search(namespaces, project, query_embedding, top_k) {
+            let rv = match query_text {
+                Some(qt) => idx.search_hybrid(namespaces, project, qt, query_embedding, top_k),
+                None => idx.search(namespaces, project, query_embedding, top_k),
+            };
+            match rv {
                 Ok(rv_hits) => {
                     let mut hits = Vec::new();
                     for h in rv_hits {
@@ -216,7 +244,7 @@ impl MemoryStore {
     ) -> Result<Vec<MemorySearchHit>> {
         let embedding = self.ollama.embed(&self.embed_model, query_text).await
             .context("memory query embed failed")?;
-        self.search(namespaces, project, &embedding, top_k).await
+        self.search_hybrid(namespaces, project, query_text, &embedding, top_k).await
     }
 
     /// Like `search_text`, but reranks by closed-loop effectiveness: a hit's
@@ -233,8 +261,9 @@ impl MemoryStore {
     ) -> Result<Vec<MemorySearchHit>> {
         let embedding = self.ollama.embed(&self.embed_model, query_text).await
             .context("memory query embed failed")?;
-        // Overfetch so reranking can promote a lower-similarity-but-proven hit.
-        let mut hits = self.search(namespaces, project, &embedding, top_k.saturating_mul(EFFECTIVENESS_OVERFETCH)).await?;
+        // Overfetch (hybrid: dense+keyword) so reranking can promote a
+        // lower-similarity-but-proven hit.
+        let mut hits = self.search_hybrid(namespaces, project, query_text, &embedding, top_k.saturating_mul(EFFECTIVENESS_OVERFETCH)).await?;
         let weights = self.pattern_weights(project).await.unwrap_or_default();
         for h in &mut hits {
             let w = h.entry.id.as_deref()
