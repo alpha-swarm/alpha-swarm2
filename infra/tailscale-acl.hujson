@@ -1,0 +1,53 @@
+// alpha-swarm Tailscale ACL.
+//
+// Goal: only the three lattice nodes may reach the NATS ports; every other
+// tailnet device (phones, other laptops) keeps full access to everything
+// else (SSH, the API on :8000, Ollama on :11434, etc.).
+//
+// Tailscale ACLs are accept-only — there is no deny rule. So the "everyone
+// can reach everything" baseline is expressed as the PORT-RANGE COMPLEMENT of
+// the NATS ports, and a second rule re-grants the NATS ports to lattice nodes
+// only. Anything not matched by an accept rule is denied by default.
+//
+// NATS ports locked to lattice: 4222 (csatapaci client), 4223 (picur client),
+// 4225 (websocket), 4248 (picur cluster), 6222 (csatapaci/malna cluster),
+// 8222/8223 (monitoring).
+//
+// Apply: paste into https://login.tailscale.com/admin/acls, use Preview to
+// confirm no device loses needed access, then Save. Revert = restore the
+// previous policy (the admin console keeps version history).
+{
+  "hosts": {
+    "picur":     "100.79.38.122",
+    "csatapaci": "100.81.10.8",
+    "malna":     "100.111.200.86"
+  },
+
+  "acls": [
+    // 1. Everyone → everyone on every port EXCEPT the NATS ports
+    //    (complement of {4222,4223,4225,4248,6222,8222,8223}).
+    {
+      "action": "accept",
+      "src": ["*"],
+      "dst": [
+        "*:1-4221",
+        "*:4224",
+        "*:4226-4247",
+        "*:4249-6221",
+        "*:6223-8221",
+        "*:8224-65535"
+      ]
+    },
+
+    // 2. NATS ports: lattice nodes only.
+    {
+      "action": "accept",
+      "src": ["picur", "csatapaci", "malna"],
+      "dst": [
+        "picur:4222,4223,4225,4248,6222,8222,8223",
+        "csatapaci:4222,4223,4225,4248,6222,8222,8223",
+        "malna:4222,4223,4225,4248,6222,8222,8223"
+      ]
+    }
+  ]
+}
