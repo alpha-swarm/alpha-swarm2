@@ -17,6 +17,8 @@ pub mod memory;
 pub mod bridge_client;
 #[cfg(feature = "native")]
 pub mod backend;
+#[cfg(feature = "native")]
+pub mod rvindex;
 
 #[cfg(feature = "native")]
 pub use store::KnowledgeStore;

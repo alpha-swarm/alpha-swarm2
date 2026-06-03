@@ -75,13 +75,54 @@ impl MemoryStore {
             }),
         ).await.context("memory store failed")?;
 
+        // Mirror into the embedded ruvector ANN index (rebuildable accelerator;
+        // SurrealDB row above is authoritative). Keyed by ns:project:key so
+        // re-stores replace in place. Best-effort — never fails the store.
+        if let Some(idx) = crate::rvindex::RvIndex::global() {
+            let id = Self::rv_id(&entry.namespace, &entry.project, &entry.key);
+            if let Err(e) = idx.insert(&id, &entry.namespace, &entry.project, &entry.key, &entry.content, entry.embedding.clone()) {
+                warn!(error = %e, "ruvector index insert failed (degraded to SurrealDB search)");
+            }
+        }
+
         Ok(rows.first()
             .and_then(|v| v.get("id").map(|id| id.to_string().trim_matches('"').to_string()))
             .unwrap_or_else(|| "unknown".into()))
     }
 
+    /// Stable ruvector id for a logical memory entry.
+    fn rv_id(namespace: &str, project: &str, key: &str) -> String {
+        format!("{namespace}:{project}:{key}")
+    }
+
+    /// Rebuild the global ruvector index from all `memory_entry` rows.
+    /// Called once at daemon startup (the index is an ephemeral cache).
+    pub async fn rebuild_index(&self) -> Result<usize> {
+        let Some(idx) = crate::rvindex::RvIndex::global() else { return Ok(0) };
+        let rows = self.store.query_json(
+            "SELECT id, namespace, project, key, content, embedding FROM memory_entry WHERE embedding IS NOT NONE",
+            serde_json::Value::Null,
+        ).await.context("rebuild_index query failed")?;
+        let mut n = 0;
+        for row in rows {
+            let ns = row.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+            let project = row.get("project").and_then(|v| v.as_str()).unwrap_or("");
+            let key = row.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            let content = row.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let embedding: Vec<f32> = row.get("embedding")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            if embedding.is_empty() || ns.is_empty() { continue; }
+            let id = Self::rv_id(ns, project, key);
+            if idx.insert(&id, ns, project, key, content, embedding).is_ok() { n += 1; }
+        }
+        Ok(n)
+    }
+
     /// Namespace-scoped semantic search by a pre-computed query embedding.
-    /// Hits get a fire-and-forget `touch` (use_count + recency bump).
+    /// Uses the embedded ruvector HNSW index when available (O(log n)),
+    /// falling back to a SurrealDB cosine scan otherwise. Hits get a
+    /// fire-and-forget `touch` (use_count + recency bump).
     pub async fn search(
         &self,
         namespaces: &[&str],
@@ -89,6 +130,39 @@ impl MemoryStore {
         query_embedding: &[f32],
         top_k: usize,
     ) -> Result<Vec<MemorySearchHit>> {
+        // Fast path: embedded ruvector ANN index.
+        if let Some(idx) = crate::rvindex::RvIndex::global() {
+            match idx.search(namespaces, project, query_embedding, top_k) {
+                Ok(rv_hits) => {
+                    let mut hits = Vec::new();
+                    for h in rv_hits {
+                        if h.similarity < MIN_SIMILARITY { continue; }
+                        self.touch_by_key(&h.namespace, project, &h.key).await;
+                        hits.push(MemorySearchHit {
+                            entry: MemoryEntry {
+                                id: Some(h.id),
+                                namespace: h.namespace,
+                                key: h.key,
+                                content: h.content,
+                                embedding: Vec::new(),
+                                metadata: serde_json::Value::Null,
+                                project: project.to_string(),
+                                created_at: String::new(),
+                                last_used_at: String::new(),
+                                use_count: 0,
+                                ttl_secs: None,
+                            },
+                            similarity: h.similarity,
+                        });
+                    }
+                    debug!(hits = hits.len(), "memory search (ruvector)");
+                    return Ok(hits);
+                }
+                Err(e) => warn!(error = %e, "ruvector search failed — falling back to cosine scan"),
+            }
+        }
+
+        // Fallback: SurrealDB cosine scan.
         let rows = self.store.query_json(
             "SELECT *, vector::similarity::cosine(embedding, $embedding) AS similarity
              FROM memory_entry
@@ -144,6 +218,18 @@ impl MemoryStore {
             serde_json::json!({ "ns": namespace, "project": project, "key": key }),
         ).await.context("memory recall failed")?;
         Ok(rows.into_iter().next().and_then(|v| serde_json::from_value(v).ok()))
+    }
+
+    /// Bump usage stats by logical key (used by the ruvector search path,
+    /// whose hit ids are ns:project:key, not SurrealDB record ids).
+    pub async fn touch_by_key(&self, namespace: &str, project: &str, key: &str) {
+        let q = "UPDATE memory_entry SET use_count += 1, last_used_at = time::now() \
+                 WHERE namespace = $ns AND project = $project AND key = $key";
+        if let Err(e) = self.store.query_json(q, serde_json::json!({
+            "ns": namespace, "project": project, "key": key,
+        })).await {
+            warn!(key, error = %e, "memory touch_by_key failed");
+        }
     }
 
     /// Bump usage stats; best-effort.
@@ -214,6 +300,17 @@ impl MemoryStore {
              RETURN BEFORE",
             serde_json::json!({ "project": project }),
         ).await.context("memory decay (ttl) failed")?;
+
+        // Evict the pruned entries from the ANN index too (keep it in sync).
+        if let Some(idx) = crate::rvindex::RvIndex::global() {
+            for row in stale_rows.iter().chain(ttl_rows.iter()) {
+                let ns = row.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+                let key = row.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                if !ns.is_empty() {
+                    let _ = idx.delete(&Self::rv_id(ns, project, key));
+                }
+            }
+        }
 
         Ok(stale_rows.len() + ttl_rows.len())
     }

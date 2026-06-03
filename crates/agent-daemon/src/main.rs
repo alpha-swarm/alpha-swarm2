@@ -181,6 +181,18 @@ async fn main() -> Result<()> {
         config.defaults.embed_model.clone(),
     ));
 
+    // Embedded ruvector ANN index (HNSW + SIMD, pure-Rust) for memory
+    // retrieval. Ephemeral cache — rebuilt from SurrealDB (authoritative) here.
+    if config.learning.enabled {
+        match knowledge_base::rvindex::RvIndex::init(&config.surrealdb.ruvector_path, knowledge_base::EMBED_DIM) {
+            Ok(()) => match memory.rebuild_index().await {
+                Ok(n) => info!(indexed = n, "ruvector ANN index ready"),
+                Err(e) => warn!(error = %e, "ruvector rebuild failed (degraded to cosine scan)"),
+            },
+            Err(e) => warn!(error = %e, "ruvector init failed (degraded to cosine scan)"),
+        }
+    }
+
     // NATS DB bridge: the query surface for native consumers (TUI, eval,
     // event-consumer, remote daemons).
     match async_nats::connect(&config.nats.url).await {

@@ -165,6 +165,9 @@ pub struct OllamaConfig {
 /// NOTE: under /tmp for consistency with the existing DATA_DIR convention —
 /// move off /tmp for reboot durability once validated.
 pub const DEFAULT_SURREAL_PATH: &str = "/tmp/alpha-swarm/surrealdb/embedded";
+/// Embedded ruvector ANN index path. Ephemeral cache — rebuilt from SurrealDB
+/// (the system-of-record) on every daemon start, so /tmp is correct.
+pub const DEFAULT_RUVECTOR_PATH: &str = "/tmp/alpha-swarm/ruvector/index";
 /// Default request-reply timeout for the NATS DB bridge.
 pub const DEFAULT_BRIDGE_TIMEOUT_SECS: u64 = 30;
 
@@ -196,6 +199,8 @@ pub struct SurrealConfig {
     pub password: String,
     /// NATS bridge request timeout (mode = nats consumers).
     pub bridge_timeout_secs: u64,
+    /// Embedded ruvector ANN index path (ephemeral cache, rebuilt on startup).
+    pub ruvector_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -358,6 +363,7 @@ impl Default for SurrealConfig {
             username: "root".into(),
             password: "root".into(),
             bridge_timeout_secs: DEFAULT_BRIDGE_TIMEOUT_SECS,
+            ruvector_path: DEFAULT_RUVECTOR_PATH.into(),
         }
     }
 }

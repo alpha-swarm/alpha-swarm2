@@ -20,7 +20,8 @@ uuid = { version = "1", features = ["v4"], optional = true }
 sha2 = { version = "0.10", optional = true }
 async-nats = { version = "0.38", optional = true }
 async-trait = { workspace = true, optional = true }
+ruvector-core = { version = "2.2.0", default-features = false, features = ["hnsw", "simd", "storage", "parallel"], optional = true }
 
 [features]
 default = ["native"]
-native = ["inference-client/native", "tokio", "tracing", "surrealdb", "chrono", "uuid", "sha2", "async-nats", "async-trait"]
+native = ["inference-client/native", "tokio", "tracing", "surrealdb", "chrono", "uuid", "sha2", "async-nats", "async-trait", "ruvector-core"]
