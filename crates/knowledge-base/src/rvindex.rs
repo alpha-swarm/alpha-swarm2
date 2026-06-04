@@ -29,7 +29,7 @@ const RRF_K: f32 = 60.0;
 fn tokenize_sparse(text: &str) -> SparseVector {
     let mut tf: HashMap<u32, f32> = HashMap::new();
     let mut tok = String::new();
-    let mut flush = |t: &mut String, tf: &mut HashMap<u32, f32>| {
+    let flush = |t: &mut String, tf: &mut HashMap<u32, f32>| {
         if t.len() >= 2 {
             *tf.entry(fnv1a32(t)).or_insert(0.0) += 1.0;
         }
