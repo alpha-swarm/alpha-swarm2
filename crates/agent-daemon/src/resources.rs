@@ -121,6 +121,34 @@ async fn check_ollama(name: &str, ollama_url: &str) -> ResourceSnapshot {
     snap
 }
 
+/// Estimated local RAM headroom (% of total) one parallel run+gate consumes.
+/// Used to derive how many runs fit under `max_ram_percent`.
+const PER_RUN_RAM_PERCENT: f64 = 25.0;
+
+/// Effective concurrent-run cap from LIVE local resources, bounded by
+/// `max_concurrent_runs` (never above it). Opt-in via `dynamic_slots`; off →
+/// the static cap. Counts how many `PER_RUN_RAM_PERCENT` chunks fit in the
+/// headroom below `max_ram_percent`, clamped to `[1, max_concurrent_runs]` — so
+/// it only ever LOWERS concurrency under memory pressure, never raises it.
+pub fn effective_slots(config: &ResourceConfig) -> usize {
+    let max = config.max_concurrent_runs.max(1);
+    if !config.dynamic_slots {
+        return max;
+    }
+    let snap = check_local("local");
+    let headroom = (config.max_ram_percent - snap.ram_percent).max(0.0);
+    let fit = (headroom / PER_RUN_RAM_PERCENT).floor() as usize;
+    let slots = fit.clamp(1, max);
+    if slots < max {
+        warn!(
+            ram = format!("{:.1}%", snap.ram_percent),
+            cap = format!("{:.1}%", config.max_ram_percent),
+            slots, max, "dynamic admission: lowering concurrent-run slots"
+        );
+    }
+    slots
+}
+
 /// Check if LOCAL resources are available to run a new task.
 pub fn can_schedule(config: &ResourceConfig) -> bool {
     let snap = check_local("local");

@@ -218,6 +218,11 @@ pub struct ResourceConfig {
     /// work. 1 = strictly serial.
     #[serde(default = "default_max_concurrent_runs")]
     pub max_concurrent_runs: usize,
+    /// Resource-aware admission: derive the EFFECTIVE concurrent-run cap from
+    /// live local RAM headroom (bounded by max_concurrent_runs, never above it).
+    /// OFF by default → the static cap. ON → fewer slots under memory pressure.
+    #[serde(default)]
+    pub dynamic_slots: bool,
     /// Maximum depth for recursive sub-plan decomposition.
     #[serde(default = "default_max_sub_plan_depth")]
     pub max_sub_plan_depth: u32,
@@ -415,6 +420,7 @@ impl Default for ResourceConfig {
             check_interval_secs: 10,
             max_concurrent_agents: default_max_concurrent_agents(),
             max_concurrent_runs: default_max_concurrent_runs(),
+            dynamic_slots: false,
             max_sub_plan_depth: default_max_sub_plan_depth(),
             max_graph_retries: default_max_graph_retries(),
             hosts: default_hosts(),
