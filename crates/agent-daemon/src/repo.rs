@@ -10,6 +10,13 @@ const REPOS_BASE: &str = "/tmp/alpha-swarm/repos";
 
 /// Ensure a project's repo is cloned and up-to-date.
 /// Returns the local path to the repo.
+/// Ensures that a project's repository is cloned and up-to-date.
+///
+/// This function checks if the repository already exists locally. If it does,
+/// it attempts to pull the latest changes from the remote repository using `git pull --ff-only`.
+/// If the repository doesn't exist, it clones it using `git clone`.
+///
+/// Returns the local path to the cloned repository.
 pub fn ensure_repo(project: &str, repo_url: &str) -> Result<PathBuf> {
     let base = PathBuf::from(REPOS_BASE);
     std::fs::create_dir_all(&base).context("Failed to create repos directory")?;
