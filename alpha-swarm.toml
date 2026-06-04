@@ -35,7 +35,7 @@ model = "claude-sonnet-4-20250514"
 
 [defaults]
 embed_model = "nomic-embed-text"    # 768-dim; must match knowledge_base::EMBED_DIM
-simple_model = "qwen2.5-coder:7b"
+simple_model = "qwen2.5-coder:14b"  # use a model present on csatapaci (7b not pulled)
 project = "default"
 
 # --- Agent Tiers ---
@@ -59,7 +59,7 @@ max_backoff_secs = 30
 max_context_files = 50
 
 [tiers.worker]
-model = "qwen2.5-coder:7b"
+model = "qwen2.5-coder:14b"     # 7b not pulled on csatapaci; 14b is present + warm
 context_window = 8192
 time_limit_secs = 300           # 5 min
 token_limit = 100000            # 100K tokens
