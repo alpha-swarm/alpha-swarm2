@@ -78,6 +78,10 @@ pub struct LearningConfig {
     pub min_similarity: f32,
     /// Char budget for the injected past-plans block.
     pub proven_plans_char_budget: usize,
+    /// Adversarial verify: after the cargo gate passes, run a 2nd-model semantic
+    /// critique of (goal, diff) that can DOWNGRADE the run to Failed (never
+    /// upgrade). Costs one extra inference (serializes on Ollama) — OFF by default.
+    pub verify_diffs: bool,
 }
 
 impl Default for LearningConfig {
@@ -88,6 +92,7 @@ impl Default for LearningConfig {
             max_proven_plans: DEFAULT_MAX_PROVEN_PLANS,
             min_similarity: DEFAULT_LEARNING_MIN_SIMILARITY,
             proven_plans_char_budget: DEFAULT_PROVEN_PLANS_CHAR_BUDGET,
+            verify_diffs: false,
         }
     }
 }

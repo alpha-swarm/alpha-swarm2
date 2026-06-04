@@ -132,6 +132,61 @@ async fn record_routing(store: &dyn KnowledgeBackend, project: &str, shape: &str
 }
 use swarm_events::{EventPublisher, SwarmEvent};
 
+// --- Adversarial verify (2nd-model semantic review of a passed diff) ---
+/// Max chars of the diff fed to the verifier (keeps the prompt bounded).
+const VERIFY_DIFF_MAX_CHARS: usize = 4000;
+/// Max tokens for the verifier's verdict line.
+const VERIFY_MAX_TOKENS: u32 = 256;
+/// Max chars of the reject reason carried into the run record.
+const VERIFY_REASON_MAX_CHARS: usize = 200;
+const VERIFY_SYSTEM: &str = "You are a strict code reviewer. You are given a GOAL and a unified DIFF that already compiles and passes existing tests. Judge ONLY whether the diff correctly and completely satisfies the goal without deleting needed logic, weakening checks/validation, or introducing obvious bugs. Be conservative: a diff that compiles and is plausibly correct should be ACCEPTED. Reply with EXACTLY ONE line: 'VERDICT: ACCEPT' or 'VERDICT: REJECT <one short reason>'.";
+
+enum VerifyVerdict {
+    Accept,
+    Reject(String),
+}
+
+/// Run a 2nd-model semantic critique of a gate-passed diff. Can only flag a
+/// rejection; on any inference error or ambiguous output it ACCEPTS (the cargo
+/// gate already passed — never block on a flaky second opinion). Uses the agent
+/// tier (cheaper than the 70b orchestrator).
+async fn adversarial_verify(router: &InferenceRouter, config: &SwarmConfig, goal: &str, diff: &str) -> VerifyVerdict {
+    if diff.trim().is_empty() {
+        return VerifyVerdict::Accept;
+    }
+    let diff_snippet: String = diff.chars().take(VERIFY_DIFF_MAX_CHARS).collect();
+    let user = format!("GOAL: {goal}\n\nDIFF:\n{diff_snippet}");
+    let messages = vec![
+        inference_client::ChatMessage::system(VERIFY_SYSTEM),
+        inference_client::ChatMessage::user(user),
+    ];
+    let options = inference_client::InferenceOptions {
+        max_tokens: Some(VERIFY_MAX_TOKENS),
+        preferred_model: Some(config.tiers.agent.model.clone()),
+        preferred_backend: Some(inference_client::BackendKind::Ollama),
+        ..Default::default()
+    };
+    match router.chat(&messages, inference_client::Complexity::Medium, &options).await {
+        Ok(resp) => {
+            let upper = resp.content.to_uppercase();
+            // Reject ONLY on an explicit REJECT verdict; anything else accepts.
+            if upper.contains("VERDICT: REJECT") || upper.contains("VERDICT:REJECT") {
+                let reason: String = resp.content.lines()
+                    .find(|l| l.to_uppercase().contains("REJECT"))
+                    .unwrap_or("semantic verify rejected")
+                    .chars().take(VERIFY_REASON_MAX_CHARS).collect();
+                VerifyVerdict::Reject(reason)
+            } else {
+                VerifyVerdict::Accept
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "adversarial verify inference failed — accepting (gate already passed)");
+            VerifyVerdict::Accept
+        }
+    }
+}
+
 fn format_update(task_id: &str, set_clause: &str) -> String {
     if task_id.contains(':') {
         format!("UPDATE {} {}", task_id, set_clause)
@@ -944,6 +999,21 @@ async fn handle_execute(
             // this into learning + events so distillation/effectiveness are gated on
             // "compiled + tests passed", not "an edit applied".
             let gate_passed = matches!(status, RunStatus::Passed);
+
+            // Adversarial verify (opt-in): a 2nd-model semantic critique that can
+            // only DOWNGRADE a passed run to Failed (never upgrade a failed gate),
+            // so it strictly raises the bar; the cargo gate stays the backstop.
+            let (status, gate_passed) = if gate_passed && config.learning.verify_diffs {
+                match adversarial_verify(&router, config, goal, result.merged_diff.as_deref().unwrap_or("")).await {
+                    VerifyVerdict::Reject(reason) => {
+                        warn!(task_id, reason = %reason, "adversarial verify REJECTED — downgrading to Failed");
+                        (RunStatus::Failed, false)
+                    }
+                    VerifyVerdict::Accept => (status, gate_passed),
+                }
+            } else {
+                (status, gate_passed)
+            };
 
             // Land verified changes onto swarm/auto (+ push + PR) for review/merge.
             if matches!(status, RunStatus::Passed) {
