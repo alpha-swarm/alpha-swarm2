@@ -243,6 +243,7 @@ pub struct TierConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct OllamaConfig {
+    /// Base URL for the Ollama service.
     pub url: String,
     /// Ollama `keep_alive` for every request. "-1" keeps models resident
     /// (no idle unload), so queue gaps don't cause cold reloads. "" disables
