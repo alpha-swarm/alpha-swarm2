@@ -39,9 +39,10 @@ simple_model = "qwen2.5-coder:14b"  # use a model present on csatapaci (7b not p
 project = "default"
 
 # --- Agent Tiers ---
-# All inference on csatapaci. Orchestrator uses 14b (fast), agent uses 32b (quality).
+# All inference on csatapaci. Orchestrator = llama3.3:70b (planning reasoning),
+# agent = qwen2.5-coder:32b (code execution), worker = qwen2.5-coder:14b.
 [tiers.orchestrator]
-model = "qwen2.5-coder:14b"
+model = "llama3.3:70b"
 context_window = 16384
 time_limit_secs = 14400         # 4 hours
 token_limit = 1000000           # 1M tokens
@@ -50,7 +51,7 @@ max_backoff_secs = 60
 max_context_files = 100
 
 [tiers.agent]
-model = "qwen3:32b"
+model = "qwen2.5-coder:32b"
 context_window = 16384
 time_limit_secs = 1800          # 30 min
 token_limit = 300000            # 300K tokens
