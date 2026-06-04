@@ -24,9 +24,37 @@ pub struct SwarmConfig {
     pub autopilot: AutopilotConfig,
     /// Embedded Wassette WASM tool host (OFF by default).
     pub wassette: WassetteConfig,
+    /// Pre-land security scan (final quality-gate tier; rule pass ON by default).
+    #[serde(default)]
+    pub security: SecurityConfig,
     /// Inference providers (multiple Ollama hosts, etc.)
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+}
+
+/// Default severity at/above which a security finding fails the run.
+pub const DEFAULT_SECURITY_FAIL_SEVERITY: &str = "high";
+
+/// Pre-land security scan configuration. The rule pass is cheap (regex over
+/// added lines) and ON by default; it can only fail a run, never let one
+/// through that the cargo tiers rejected.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// Run the deterministic rule scan as the final gate tier.
+    pub rules_enabled: bool,
+    /// Severity threshold ("low"|"medium"|"high"|"critical") at/above which a
+    /// finding fails the run; below only logs. Unknown → "high" (fail-safe).
+    pub fail_severity: String,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            rules_enabled: true,
+            fail_severity: DEFAULT_SECURITY_FAIL_SEVERITY.into(),
+        }
+    }
 }
 
 /// Default number of past proven plans injected into the planner prompt.
