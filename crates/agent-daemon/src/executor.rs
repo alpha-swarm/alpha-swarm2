@@ -8,8 +8,6 @@ use swarm_config::SwarmConfig;
 
 /// Max chars for attempt preview fields
 const ATTEMPT_PREVIEW_CHARS: usize = 500;
-/// Throwaway git worktree where the quality gate materializes + tests changes.
-const GATE_WORKTREE: &str = "/tmp/alpha-swarm/gate";
 /// Persistent cargo target dir kept warm across gate runs (incremental builds).
 const GATE_TARGET_DIR: &str = "/tmp/alpha-swarm/gate-target";
 /// Keywords marking an edit-shaped, low-reasoning goal that the agent tier can
@@ -55,12 +53,11 @@ fn format_update_where(task_id: &str, set_clause: &str, where_clause: &str) -> S
 /// `cargo test` on the changed crates. Returns Ok(()) only if all pass. This
 /// is the gate the runner's disk-mode path stubs out (always-true) — without
 /// it the loop merges unverified (even non-compiling) code.
-fn run_quality_gate(repo_path: &std::path::Path, files: &[(String, Vec<u8>)]) -> Result<(), String> {
+fn run_quality_gate(repo_path: &std::path::Path, gate: &std::path::Path, files: &[(String, Vec<u8>)]) -> Result<(), String> {
     use std::process::Command;
     if files.is_empty() {
         return Ok(());
     }
-    let gate = std::path::PathBuf::from(GATE_WORKTREE);
     let g = gate.to_string_lossy().to_string();
     let git = |args: &[&str]| Command::new("git").args(args).current_dir(repo_path).output()
         .map(|o| o.status.success()).unwrap_or(false);
@@ -310,13 +307,16 @@ async fn handle_planning(
     };
 
     let git = crate::provider_client::GitProviderClient::new(&config.nats.url).await;
-    let repo_path = match git.ensure_repo(project, &repo_url).await {
+    let base_path = match git.ensure_repo(project, &repo_url).await {
         Ok(p) => std::path::PathBuf::from(p),
         Err(e) => {
             let _ = store.db_query_raw(&format_update(task_id, &format!("SET status = 'failed', error_message = 'Git clone failed: {}'", e.replace('\'', "")))).await;
             return;
         }
     };
+    // Per-run isolated workspace (reused by this run's later execution) so
+    // concurrent planning never races on the shared base clone.
+    let repo_path = crate::repo::isolate_run_workspace(&base_path, task_id, &repo_url).unwrap_or(base_path);
     sync_repo_to_branch(store.as_ref(), project, &repo_path).await;
 
     // Discover files and plan
@@ -568,7 +568,15 @@ async fn handle_execute(
             return;
         }
     };
-    let repo_path = std::path::PathBuf::from(&repo_path_str);
+    // Per-run isolated working copy (git clone --local off the shared base) so
+    // parallel runs never share mutable git state (sync/reset/edit). Falls back
+    // to the shared base if isolation fails.
+    let base_path = std::path::PathBuf::from(&repo_path_str);
+    let repo_path = crate::repo::isolate_run_workspace(&base_path, task_id, &repo_url)
+        .unwrap_or_else(|e| {
+            warn!(task_id, error = %e, "run workspace isolation failed — using shared base");
+            base_path
+        });
     sync_repo_to_branch(store.as_ref(), project, &repo_path).await;
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
@@ -821,7 +829,7 @@ async fn handle_execute(
             // quality_passed is a stub (always true), so the actual verification
             // happens HERE before anything lands.
             let gate = if any_work_done {
-                run_quality_gate(&repo_path, &result.modified_files)
+                run_quality_gate(&repo_path, &crate::repo::run_gate_path(task_id), &result.modified_files)
             } else {
                 Err("no changes produced".to_string())
             };
@@ -1130,6 +1138,10 @@ async fn handle_execute(
                 &format!("All {} iterations failed. Last error: {}", iteration, last_errors), duration).await;
         }
     }
+
+    // Drop the run's isolated workspace (best-effort; /tmp is wiped on reboot
+    // anyway). The verified changes already landed via land_to_branch.
+    crate::repo::cleanup_run_workspace(task_id);
 }
 
 /// Execute (or resume) a workflow run through the engine.

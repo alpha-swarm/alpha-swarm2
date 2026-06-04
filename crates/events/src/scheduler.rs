@@ -241,6 +241,44 @@ impl NatsScheduler {
         matches!(self.leases.get(&key).await, Ok(None) | Err(_))
     }
 
+    /// Acquire any free execution slot in `[0, slots)`, returning its index.
+    /// Slots are independent KV keys with atomic `create()`, so two pollers (or
+    /// daemons) never grab the same slot — the cap on concurrent executions.
+    /// Backed by the leases bucket (TTL), so a dead daemon's slot auto-frees.
+    pub async fn try_acquire_execution_slot(&self, run_id: &str, slots: usize) -> Result<Option<usize>> {
+        for i in 0..slots.max(1) {
+            let key = format!("{EXECUTION_LOCK_KEY}.slot-{i}");
+            let value = serde_json::to_vec(&serde_json::json!({
+                "daemon_id": self.daemon_id, "run_id": run_id,
+                "acquired_at": chrono::Utc::now().to_rfc3339(),
+            }))?;
+            if self.leases.create(&key, value.into()).await.is_ok() {
+                info!(run_id, slot = i, daemon = %self.daemon_id, "Acquired execution slot");
+                return Ok(Some(i));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Release a previously-acquired execution slot.
+    pub async fn release_execution_slot(&self, slot: usize) -> Result<()> {
+        let key = format!("{EXECUTION_LOCK_KEY}.slot-{slot}");
+        let _ = self.leases.purge(&key).await;
+        debug!(slot, daemon = %self.daemon_id, "Released execution slot");
+        Ok(())
+    }
+
+    /// Renew an execution slot (heartbeat so it doesn't TTL-expire mid-run).
+    pub async fn renew_execution_slot(&self, slot: usize, run_id: &str) -> Result<()> {
+        let key = format!("{EXECUTION_LOCK_KEY}.slot-{slot}");
+        let value = serde_json::to_vec(&serde_json::json!({
+            "daemon_id": self.daemon_id, "run_id": run_id,
+            "acquired_at": chrono::Utc::now().to_rfc3339(),
+        }))?;
+        self.leases.put(&key, value.into()).await.context("Failed to renew execution slot")?;
+        Ok(())
+    }
+
     pub fn daemon_id(&self) -> &str {
         &self.daemon_id
     }

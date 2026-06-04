@@ -284,7 +284,7 @@ async fn main() -> Result<()> {
 
     // Autonomous operation (opt-in; OFF by default). Drains the autopilot_goal
     // backlog when idle + under the daily cap.
-    autopilot::spawn(config.autopilot.clone(), Arc::clone(&store), scheduler.clone());
+    autopilot::spawn(config.autopilot.clone(), Arc::clone(&store), scheduler.clone(), config.resources.max_concurrent_runs);
 
     // Start resource heartbeat
     {
@@ -341,44 +341,41 @@ async fn main() -> Result<()> {
     loop {
         tokio::time::sleep(FALLBACK_POLL_INTERVAL).await;
         if !resources::can_schedule(&config.resources) { continue; }
+        let max_runs = config.resources.max_concurrent_runs;
 
-        let lock_free = match &scheduler {
-            Some(sched) => sched.is_execution_lock_free().await,
-            None => true,
-        };
+        // Fill free execution slots with pending tasks (planning OR execution).
+        // Every run gets an isolated workspace + its own gate, so concurrent runs
+        // cannot corrupt each other; the slot count caps real concurrency and the
+        // per-task lease (try_claim) dedups so a task is never spawned twice. When
+        // all slots are busy we stop and retry next poll.
+        let Ok(pending) = store.list_pending().await else { continue };
+        for task in pending {
+            if !resources::can_schedule(&config.resources) { break; }
+            let id = task.id.clone().unwrap_or_default();
+            if id.is_empty() { continue; }
+            let project = task.project.clone();
+            let goal = task.task_description.clone();
+            let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
 
-        if lock_free {
-            // Execute first approved/pending task
-            if let Ok(pending) = store.list_pending().await {
-                if let Some(task) = pending.into_iter().next() {
-                    let id = task.id.clone().unwrap_or_default();
-                    if let Some(sched) = &scheduler {
-                        match sched.try_acquire_execution_lock(&id).await {
-                            Ok(true) => { info!(id = %id, "Acquired execution lock"); }
-                            Ok(false) => { continue; }
-                            Err(_) => { continue; }
+            match &scheduler {
+                Some(sched) => {
+                    // Per-task claim (atomic dedup) — skip tasks already in-flight.
+                    if !matches!(sched.try_claim(&id).await, Ok(true)) { continue; }
+                    match sched.try_acquire_execution_slot(&id, max_runs).await {
+                        Ok(Some(slot)) => {
+                            spawn_task(config.clone(), Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), scheduler.clone(), Arc::clone(&wf_engine), id, project, goal, status, Some(slot));
                         }
-                        let _ = sched.try_claim(&id).await;
+                        _ => {
+                            // No free slot — release the claim so it's re-picked next poll.
+                            let _ = sched.release_lease(&id).await;
+                            break;
+                        }
                     }
-                    let project = task.project.clone();
-                    let goal = task.task_description.clone();
-                    let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
-                    spawn_task(config.clone(), Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), scheduler.clone(), Arc::clone(&wf_engine), id, project, goal, status);
                 }
-            }
-        } else {
-            // Execution lock held — pre-plan queued tasks instead of waiting
-            if let Ok(all) = store.list_pending().await {
-                for task in all {
-                    let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
-                    if status != "planning" { continue; }
-                    let id = task.id.clone().unwrap_or_default();
-                    info!(id = %id, "Pre-planning queued task while execution lock is held");
-                    let project = task.project.clone();
-                    let goal = task.task_description.clone();
-                    // Run planning only (not execution)
-                    executor::handle_task(&config, Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), Arc::clone(&wf_engine), &id, &project, &goal, "planning").await;
-                    break; // One at a time
+                None => {
+                    // No scheduler: strictly serial — one per poll.
+                    spawn_task(config.clone(), Arc::clone(&router), Arc::clone(&ollama), Arc::clone(&store), publisher.clone(), None, Arc::clone(&wf_engine), id, project, goal, status, None);
+                    break;
                 }
             }
         }
@@ -410,20 +407,22 @@ async fn process_pending(
 
                 let id = task.id.clone().unwrap_or_default();
 
-                if let Some(sched) = scheduler {
-                    match sched.try_acquire_execution_lock(&id).await {
-                        Ok(true) => { info!(id = %id, "Acquired execution lock"); }
-                        Ok(false) => { info!(id = %id, "Execution lock held, deferring"); return; }
-                        Err(e) => { warn!(id = %id, error = %e, "Execution lock error"); return; }
+                let slot = if let Some(sched) = scheduler {
+                    if !matches!(sched.try_claim(&id).await, Ok(true)) {
+                        info!(id = %id, "Already claimed, deferring");
+                        return;
                     }
-                    let _ = sched.try_claim(&id).await;
-                }
+                    match sched.try_acquire_execution_slot(&id, config.resources.max_concurrent_runs).await {
+                        Ok(Some(s)) => Some(s),
+                        _ => { let _ = sched.release_lease(&id).await; info!(id = %id, "No free slot, deferring"); return; }
+                    }
+                } else { None };
 
                 let project = task.project.clone();
                 let goal = task.task_description.clone();
                 let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
 
-                spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), scheduler.clone(), Arc::clone(wf_engine), id, project, goal, status);
+                spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), scheduler.clone(), Arc::clone(wf_engine), id, project, goal, status, slot);
             }
         }
         Err(e) => warn!("Failed to query pending tasks: {e}"),
@@ -484,7 +483,7 @@ async fn run_nats_kv_loop(
                         let goal = task.task_description.clone();
                         let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
 
-                        spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), Some(Arc::clone(scheduler)), Arc::clone(wf_engine), id, project, goal, status);
+                        spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), Some(Arc::clone(scheduler)), Arc::clone(wf_engine), id, project, goal, status, None);
                     }
                 }
             }
@@ -514,7 +513,7 @@ async fn run_surreal_poll_loop(
                 let goal = task.task_description.clone();
                 let status = serde_json::to_string(&task.status).unwrap_or_default().trim_matches('"').to_string();
 
-                spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), None, Arc::clone(wf_engine), id, project, goal, status);
+                spawn_task(config.clone(), Arc::clone(router), Arc::clone(ollama), Arc::clone(store), publisher.clone(), None, Arc::clone(wf_engine), id, project, goal, status, None);
             }
         }
     }
@@ -534,11 +533,14 @@ fn spawn_task(
     project: String,
     goal: String,
     status: String,
+    // Execution slot held for this run (None = no scheduler / legacy global lock).
+    // Released on completion; renewed by the heartbeat so it doesn't TTL-expire.
+    slot: Option<usize>,
 ) {
     tokio::spawn(async move {
-        info!(id = %id, "Goal starting execution");
+        info!(id = %id, slot = ?slot, "Goal starting execution");
 
-        // Start lease + execution lock renewal heartbeat
+        // Start lease + execution slot renewal heartbeat
         let lease_handle = if let Some(sched) = &scheduler {
             let sched = Arc::clone(sched);
             let id = id.clone();
@@ -546,7 +548,10 @@ fn spawn_task(
                 loop {
                     tokio::time::sleep(LEASE_RENEWAL_INTERVAL).await;
                     let _ = sched.renew_lease(&id).await;
-                    let _ = sched.renew_execution_lock(&id).await;
+                    match slot {
+                        Some(s) => { let _ = sched.renew_execution_slot(s, &id).await; }
+                        None => { let _ = sched.renew_execution_lock(&id).await; }
+                    }
                 }
             }))
         } else {
@@ -556,9 +561,12 @@ fn spawn_task(
         // Execute the task
         executor::handle_task(&config, router, ollama, store, publisher, wf_engine, &id, &project, &goal, &status).await;
 
-        // Release execution lock + task lease
+        // Release execution slot/lock + task lease
         if let Some(sched) = &scheduler {
-            let _ = sched.release_execution_lock().await;
+            match slot {
+                Some(s) => { let _ = sched.release_execution_slot(s).await; }
+                None => { let _ = sched.release_execution_lock().await; }
+            }
             let _ = sched.release_lease(&id).await;
         }
         if let Some(handle) = lease_handle {

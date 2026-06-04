@@ -43,7 +43,8 @@ pub const AUTOPILOT_SOURCE: &str = "autopilot";
 pub fn spawn(
     cfg: AutopilotConfig,
     store: Arc<dyn KnowledgeBackend>,
-    scheduler: Option<Arc<NatsScheduler>>,
+    _scheduler: Option<Arc<NatsScheduler>>,
+    max_runs: usize,
 ) {
     if !cfg.enabled {
         info!("Autopilot disabled (set [autopilot] enabled = true to opt in)");
@@ -69,7 +70,7 @@ pub fn spawn(
                 _ = tokio::time::sleep(interval) => {}
                 _ = pickup().notified() => {}
             }
-            if let Err(e) = tick(&cfg, store.as_ref(), scheduler.as_deref()).await {
+            if let Err(e) = tick(&cfg, store.as_ref(), max_runs).await {
                 warn!(error = %e, "autopilot tick failed");
             }
         }
@@ -79,7 +80,7 @@ pub fn spawn(
 async fn tick(
     cfg: &AutopilotConfig,
     store: &dyn KnowledgeBackend,
-    scheduler: Option<&NatsScheduler>,
+    max_runs: usize,
 ) -> anyhow::Result<()> {
     // 1. Auto-approve autonomous planned runs so they execute hands-free.
     if cfg.auto_approve {
@@ -94,17 +95,12 @@ async fn tick(
         }
     }
 
-    // 2. Only start new work when idle (one autonomous run at a time).
-    let lock_free = match scheduler {
-        Some(s) => s.is_execution_lock_free().await,
-        None => true,
-    };
-    if !lock_free {
-        return Ok(());
-    }
-    // Anything (human or autopilot) already pending/in-flight? defer.
-    let pending = store.list_pending().await.unwrap_or_default();
-    if !pending.is_empty() {
+    // 2. Fill the run pipeline up to `max_runs` (parallel goals). Each run is
+    //    workspace-isolated and the main loop's execution slots cap real
+    //    concurrency, so this just keeps the backlog feeding the slots without
+    //    unbounded fan-out. Counts every non-terminal run (human or autopilot);
+    //    the executing run is included, so at most `max_runs` are ever in flight.
+    if active_run_count(store).await? >= max_runs.max(1) as i64 {
         return Ok(());
     }
 
@@ -148,6 +144,17 @@ async fn tick(
     store.db_query_raw(&create).await?;
     info!(project = %project, goal = %goal, continuous = cfg.continuous, "autopilot started autonomous goal");
     Ok(())
+}
+
+/// Count non-terminal runs (any source) — the live pipeline depth. Used to cap
+/// how many runs are queued/in-flight at once (parallel-run fan-out guard).
+async fn active_run_count(store: &dyn KnowledgeBackend) -> anyhow::Result<i64> {
+    let rows = store.query_json(
+        "SELECT count() AS c FROM agent_run \
+         WHERE status IN ['pending', 'planning', 'planned', 'approved', 'running'] GROUP ALL",
+        serde_json::Value::Null,
+    ).await?;
+    Ok(rows.first().and_then(|v| v.get("c")).and_then(|c| c.as_i64()).unwrap_or(0))
 }
 
 /// Count autonomous runs created since the start of the current UTC day.
