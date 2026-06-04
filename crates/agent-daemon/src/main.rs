@@ -35,6 +35,10 @@ const LEASE_RENEWAL_INTERVAL: Duration = Duration::from_secs(120);
 const EMBED_PROBE_TEXT: &str = "probe";
 /// How often unused stale memory entries are pruned (per project).
 const MEMORY_DECAY_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often to re-ping models to keep them resident in Ollama. Under Ollama's
+/// 5-minute default idle-unload window; with keep_alive=-1 this is a safety net
+/// (also re-warms after an Ollama restart).
+const WARM_INTERVAL: Duration = Duration::from_secs(240);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -54,6 +58,9 @@ async fn main() -> Result<()> {
         router = router.add_backend(ClaudeBackend::new(&config.claude.api_key).with_model(&config.claude.model));
     }
 
+    // Ollama keep_alive (empty string → None → Ollama's 5m default).
+    let keep_alive = (!config.ollama.keep_alive.is_empty()).then(|| config.ollama.keep_alive.clone());
+
     // Register Ollama backends from providers config (if any)
     if !config.providers.is_empty() {
         let mut sorted = config.providers.clone();
@@ -62,7 +69,7 @@ async fn main() -> Result<()> {
             match provider.provider_type.as_str() {
                 "ollama" => {
                     info!(url = %provider.url, priority = provider.priority, "Adding Ollama provider");
-                    router = router.add_backend(OllamaBackend::new(&provider.url));
+                    router = router.add_backend(OllamaBackend::with_keep_alive(&provider.url, keep_alive.clone()));
                 }
                 // Any OpenAI-compatible endpoint: openai, groq, together, vllm,
                 // lmstudio, deepinfra, etc. — set `url` to the provider's base.
@@ -92,10 +99,10 @@ async fn main() -> Result<()> {
         }
     } else {
         // Fallback: use single [ollama] config
-        router = router.add_backend(OllamaBackend::new(&config.ollama.url));
+        router = router.add_backend(OllamaBackend::with_keep_alive(&config.ollama.url, keep_alive.clone()));
     }
     let router = Arc::new(router);
-    let ollama = Arc::new(OllamaBackend::new(&config.ollama.url));
+    let ollama = Arc::new(OllamaBackend::with_keep_alive(&config.ollama.url, keep_alive.clone()));
 
     // Embedding-dimension probe: a wrong-dimension embed model corrupts every
     // vector table and is rejected by the HNSW indexes — fail fast on mismatch.
@@ -111,23 +118,41 @@ async fn main() -> Result<()> {
         Err(e) => warn!(model = %config.defaults.embed_model, error = %e, "Embed probe skipped (Ollama unreachable)"),
     }
 
-    // Warm model into Ollama memory (background, non-blocking)
+    // Keep the pipeline's models resident in Ollama. keep_alive=-1 on every
+    // request already prevents idle-unload; this also PRE-warms on startup and
+    // re-pings under the 5-minute window so the model is hot before the first /
+    // next queue item (no cold reload between back-to-back jobs) and recovers
+    // after an Ollama restart. Warms every distinct chat tier + the embed model.
     {
-        let model = config.tiers.agent.model.clone();
         let ollama_warm = Arc::clone(&ollama);
+        // Each tier PINS its own model (preferred_model = tier.model in
+        // agent.rs / planner.rs), so a run touches all of them — keep every
+        // distinct tier model co-resident, not just the router's fallback pick.
+        // (Set OLLAMA_MAX_LOADED_MODELS >= number of distinct models on the host.)
+        let mut chat_models = vec![
+            config.tiers.orchestrator.model.clone(),
+            config.tiers.agent.model.clone(),
+            config.tiers.worker.model.clone(),
+        ];
+        chat_models.sort();
+        chat_models.dedup();
+        chat_models.retain(|m| !m.is_empty());
+        let embed_model = config.defaults.embed_model.clone();
         tokio::spawn(async move {
-            info!(model = %model, "Warming model into Ollama memory...");
-            // Chat-tier models don't implement the embeddings API — warm with
-            // a minimal chat round-trip instead.
-            let messages = vec![inference_client::ChatMessage::user(EMBED_PROBE_TEXT)];
-            let options = inference_client::InferenceOptions {
-                max_tokens: Some(1),
-                ..Default::default()
-            };
             use inference_client::InferenceBackend;
-            match ollama_warm.chat(&model, &messages, &options).await {
-                Ok(_) => info!(model = %model, "Model warmed"),
-                Err(e) => warn!(model = %model, error = %e, "Model warmup failed (will load on first use)"),
+            let opts = inference_client::InferenceOptions { max_tokens: Some(1), ..Default::default() };
+            info!(chat = ?chat_models, embed = %embed_model, "Warming tier models into Ollama memory (keep_alive)");
+            loop {
+                let messages = vec![inference_client::ChatMessage::user("warm")];
+                for m in &chat_models {
+                    if let Err(e) = ollama_warm.chat(m, &messages, &opts).await {
+                        warn!(model = %m, error = %e, "warm ping failed (will load on first use)");
+                    }
+                }
+                if !embed_model.is_empty() {
+                    let _ = ollama_warm.embed(&embed_model, "warm").await;
+                }
+                tokio::time::sleep(WARM_INTERVAL).await;
             }
         });
     }
@@ -198,6 +223,15 @@ async fn main() -> Result<()> {
         Arc::clone(&ollama),
         config.defaults.embed_model.clone(),
     ));
+
+    // Embedded Wassette WASM tool host: load configured tool components, grant
+    // their capabilities, and install the process-global tool set so agent runs
+    // surface them as ordinary tools (no-op when [wassette] enabled = false).
+    match tool_host::install_from_config(&config.wassette).await {
+        Ok(0) => {}
+        Ok(n) => info!(tools = n, "WASM tool host ready"),
+        Err(e) => warn!(error = %e, "WASM tool host init failed (agents run without WASM tools)"),
+    }
 
     // Embedded ruvector ANN index (HNSW + SIMD, pure-Rust) for memory
     // retrieval. Ephemeral cache — rebuilt from SurrealDB (authoritative) here.
@@ -530,6 +564,9 @@ fn spawn_task(
         if let Some(handle) = lease_handle {
             handle.abort();
         }
+        // Wake the autopilot to pick up the next backlog goal immediately
+        // (continuous-loop, gap-free pickup).
+        autopilot::notify_pickup();
     });
 }
 

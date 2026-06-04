@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use knowledge_base::{KnowledgeBackend, MemoryEntry, MemoryStore};
+use knowledge_base::{CodeGraphStore, KnowledgeBackend, MemoryEntry, MemoryStore};
 // Canonical subject constants live in knowledge-base so server and clients
 // cannot drift.
 use knowledge_base::bridge_client::{DB_EXEC_SUBJECT, DB_QUERY_SUBJECT};
@@ -29,6 +29,13 @@ const DB_BRIDGE_WILDCARD: &str = "swarm.db.>";
 const BRIDGE_QUEUE_GROUP: &str = "db-bridge";
 /// Response payload guard below NATS' 1 MB default max payload.
 const MAX_RESPONSE_BYTES: usize = 900_000;
+/// Directories never descended into when enumerating a repo for graph build.
+const GRAPH_IGNORE_DIRS: &[&str] = &[
+    "target", "node_modules", ".git", "dist", "build", "vendor",
+    ".venv", "venv", "__pycache__", ".next", "out", ".cargo",
+];
+/// Hard ceiling on files scanned in one graph build (runaway guard).
+const MAX_GRAPH_FILES: usize = 5000;
 /// Leading verbs allowed on `swarm.db.exec` statements.
 const EXEC_ALLOWED_VERBS: &[&str] = &["SELECT", "CREATE", "UPDATE", "UPSERT", "DELETE", "RELATE", "INSERT"];
 /// Substrings rejected anywhere in bridged SQL (admin/ddl/session control).
@@ -149,6 +156,9 @@ impl DbBridge {
             }
             s if s.starts_with("swarm.db.autopilot.") => {
                 self.handle_autopilot(s.trim_start_matches("swarm.db.autopilot."), payload).await
+            }
+            s if s.starts_with("swarm.db.graph.") => {
+                self.handle_graph(s.trim_start_matches("swarm.db.graph."), payload).await
             }
             other => DbResponse::err(format!("unknown bridge subject: {other}")),
         }
@@ -341,6 +351,122 @@ impl DbBridge {
             other => DbResponse::err(format!("unknown memory op: {other}")),
         }
     }
+
+    /// Code knowledge-graph ops.
+    ///   build      {project, repo_path, files?}  → {entities, relations} counts
+    ///   entity     {project, name}               → matching entities
+    ///   relations  {project, name}               → edges touching name
+    ///   neighbors  {project, seed, depth?}       → reachable nodes + hops
+    async fn handle_graph(&self, op: &str, payload: &[u8]) -> DbResponse {
+        let body: serde_json::Value = serde_json::from_slice(payload).unwrap_or(serde_json::Value::Null);
+        let project = body.get("project").and_then(|v| v.as_str()).unwrap_or("");
+        if project.is_empty() {
+            return DbResponse::err("project required");
+        }
+        let graph = CodeGraphStore::new(Arc::clone(&self.store));
+        match op {
+            "build" => {
+                let repo_path = body.get("repo_path").and_then(|v| v.as_str()).unwrap_or("");
+                if repo_path.is_empty() {
+                    return DbResponse::err("repo_path required");
+                }
+                // Caller-supplied file list, else enumerate supported sources.
+                let files: Vec<String> = body.get("files")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                let files = if files.is_empty() {
+                    enumerate_sources(std::path::Path::new(repo_path))
+                } else {
+                    files
+                };
+                if files.is_empty() {
+                    return DbResponse::err("no supported source files found");
+                }
+                // Extraction is CPU-bound (tree-sitter); keep it off the async
+                // reactor thread.
+                let root = repo_path.to_string();
+                let extracted = tokio::task::spawn_blocking(move || {
+                    swarm_tools::codegraph::extract(std::path::Path::new(&root), &files)
+                }).await;
+                let g = match extracted {
+                    Ok(g) => g,
+                    Err(e) => return DbResponse::err(format!("extraction task failed: {e}")),
+                };
+                let entities: Vec<serde_json::Value> =
+                    g.entities.iter().filter_map(|e| serde_json::to_value(e).ok()).collect();
+                let relations: Vec<serde_json::Value> =
+                    g.relations.iter().filter_map(|r| serde_json::to_value(r).ok()).collect();
+                match graph.rebuild(project, &entities, &relations).await {
+                    Ok((ne, nr)) => {
+                        info!(project, entities = ne, relations = nr, "code graph rebuilt");
+                        DbResponse::ok(vec![serde_json::json!({ "entities": ne, "relations": nr })])
+                    }
+                    Err(e) => DbResponse::err(e.to_string()),
+                }
+            }
+            "entity" => {
+                let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if name.is_empty() { return DbResponse::err("name required"); }
+                match graph.entity(project, name).await {
+                    Ok(rows) => DbResponse::ok(rows),
+                    Err(e) => DbResponse::err(e.to_string()),
+                }
+            }
+            "relations" => {
+                let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if name.is_empty() { return DbResponse::err("name required"); }
+                match graph.relations(project, name).await {
+                    Ok(rows) => DbResponse::ok(rows),
+                    Err(e) => DbResponse::err(e.to_string()),
+                }
+            }
+            "neighbors" => {
+                let seed = body.get("seed").and_then(|v| v.as_str()).unwrap_or("");
+                if seed.is_empty() { return DbResponse::err("seed required"); }
+                let depth = body.get("depth").and_then(|v| v.as_u64())
+                    .unwrap_or(knowledge_base::graph::MAX_TRAVERSE_DEPTH as u64) as usize;
+                match graph.neighbors(project, seed, depth).await {
+                    Ok(rows) => DbResponse::ok(rows),
+                    Err(e) => DbResponse::err(e.to_string()),
+                }
+            }
+            other => DbResponse::err(format!("unknown graph op: {other}")),
+        }
+    }
+}
+
+/// Recursively enumerate supported source files under `root`, returning paths
+/// RELATIVE to root (what the extractor expects). Skips ignore dirs and caps
+/// at `MAX_GRAPH_FILES`.
+fn enumerate_sources(root: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if out.len() >= MAX_GRAPH_FILES {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() {
+                if GRAPH_IGNORE_DIRS.contains(&name.as_ref()) || name.starts_with('.') {
+                    continue;
+                }
+                stack.push(path);
+            } else if let Ok(rel) = path.strip_prefix(root) {
+                let rel = rel.to_string_lossy().to_string();
+                if swarm_tools::codegraph::is_supported_file(&rel) {
+                    out.push(rel);
+                    if out.len() >= MAX_GRAPH_FILES {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

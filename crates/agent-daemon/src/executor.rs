@@ -26,6 +26,53 @@ fn format_update_where(task_id: &str, set_clause: &str, where_clause: &str) -> S
     }
 }
 
+/// Land a passed run's changes onto a `swarm/auto` branch in the source repo,
+/// via a throwaway git worktree so the live checkout is never touched. Commits
+/// accumulate on `swarm/auto` for human review/merge. Local-path repos only
+/// (remote URLs are left to PR mode). Best-effort; logs and moves on.
+fn land_to_branch(repo_url: &str, run_id: &str, goal: &str, files: &[(String, Vec<u8>)]) {
+    if files.is_empty() || repo_url.contains("://") {
+        return;
+    }
+    let repo = std::path::Path::new(repo_url);
+    if !repo.join(".git").exists() {
+        return;
+    }
+    let safe_id = run_id.replace([':', '/'], "_");
+    let land_dir = std::path::PathBuf::from(format!("/tmp/alpha-swarm/land/{safe_id}"));
+    let ld = land_dir.to_string_lossy().to_string();
+    let _ = std::fs::remove_dir_all(&land_dir);
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        std::process::Command::new("git").args(args).current_dir(dir).output()
+            .map(|o| o.status.success()).unwrap_or(false)
+    };
+    let _ = git(repo, &["worktree", "prune"]);
+    // Reuse the existing swarm/auto branch (accumulate), else create from HEAD.
+    if !git(repo, &["worktree", "add", "--force", &ld, "swarm/auto"])
+        && !git(repo, &["worktree", "add", "--force", "-b", "swarm/auto", &ld, "HEAD"])
+    {
+        warn!(run_id, "land: could not create swarm/auto worktree");
+        return;
+    }
+    for (path, content) in files {
+        let full = land_dir.join(path);
+        if let Some(parent) = full.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&full, content);
+    }
+    let _ = git(&land_dir, &["add", "-A"]);
+    let msg = format!("swarm: {} [{}]", goal.chars().take(60).collect::<String>(), run_id);
+    let committed = git(&land_dir, &[
+        "-c", "user.email=swarm@local", "-c", "user.name=alpha-swarm",
+        "commit", "-m", &msg, "--no-verify",
+    ]);
+    let _ = git(repo, &["worktree", "remove", "--force", &ld]);
+    if committed {
+        info!(run_id, branch = "swarm/auto", files = files.len(), "landed changes (review + merge swarm/auto)");
+    }
+}
+
 fn discover_source_files(repo_path: &std::path::Path) -> Vec<String> {
     let mut files = Vec::new();
     let extensions = ["rs", "ts", "js", "go", "py", "md", "toml", "json", "yaml", "yml"];
@@ -605,6 +652,12 @@ async fn handle_execute(
             } else {
                 RunStatus::Failed
             };
+
+            // Land verified changes onto swarm/auto for review/merge (the diff
+            // was only RECORDED before; this actually commits it on a branch).
+            if matches!(status, RunStatus::Passed) {
+                land_to_branch(&repo_url, task_id, goal, &result.modified_files);
+            }
 
             info!(
                 task_id, project,

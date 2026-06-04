@@ -20,11 +20,15 @@ mod shell;
 #[cfg(feature = "native")]
 mod tree_sitter_tools;
 #[cfg(feature = "native")]
+pub mod codegraph;
+#[cfg(feature = "native")]
 mod web;
 #[cfg(feature = "native")]
 pub mod nats_dispatch;
 #[cfg(feature = "native")]
 pub mod memory_tools;
+#[cfg(feature = "native")]
+pub mod wasm_tools;
 
 pub mod registry;
 pub use registry::ToolRegistry;

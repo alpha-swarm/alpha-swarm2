@@ -4,6 +4,11 @@
 # All Ollama runs on csatapaci (M2 Max 96GB) — embeddings, planning, agent
 [ollama]
 url = "http://100.81.10.8:11434"   # csatapaci
+# keep_alive on every request: "-1" = keep models resident (never idle-unload)
+# so gaps between queue items don't cause cold reloads. "" = Ollama's 5m default;
+# a Go duration like "10m" also works. Tip: set OLLAMA_MAX_LOADED_MODELS high
+# enough on the host if you want several distinct models warm at once.
+keep_alive = "-1"
 
 [surrealdb]
 # mode: embedded (in-process surrealkv, daemon = sole owner; default)
@@ -30,13 +35,14 @@ model = "claude-sonnet-4-20250514"
 
 [defaults]
 embed_model = "nomic-embed-text"    # 768-dim; must match knowledge_base::EMBED_DIM
-simple_model = "qwen2.5-coder:7b"
+simple_model = "qwen2.5-coder:14b"  # use a model present on csatapaci (7b not pulled)
 project = "default"
 
 # --- Agent Tiers ---
-# All inference on csatapaci. Orchestrator uses 14b (fast), agent uses 32b (quality).
+# All inference on csatapaci. Orchestrator = llama3.3:70b (planning reasoning),
+# agent = qwen2.5-coder:32b (code execution), worker = qwen2.5-coder:14b.
 [tiers.orchestrator]
-model = "qwen2.5-coder:14b"
+model = "llama3.3:70b"
 context_window = 16384
 time_limit_secs = 14400         # 4 hours
 token_limit = 1000000           # 1M tokens
@@ -45,7 +51,7 @@ max_backoff_secs = 60
 max_context_files = 100
 
 [tiers.agent]
-model = "qwen3:32b"
+model = "qwen2.5-coder:32b"
 context_window = 16384
 time_limit_secs = 1800          # 30 min
 token_limit = 300000            # 300K tokens
@@ -54,7 +60,7 @@ max_backoff_secs = 30
 max_context_files = 50
 
 [tiers.worker]
-model = "qwen2.5-coder:7b"
+model = "qwen2.5-coder:14b"     # 7b not pulled on csatapaci; 14b is present + warm
 context_window = 8192
 time_limit_secs = 300           # 5 min
 token_limit = 100000            # 100K tokens
@@ -134,3 +140,42 @@ enabled = false
 tick_secs = 300
 max_runs_per_day = 5
 auto_approve = true
+# Continuous loop: with enabled+continuous+auto_approve all true, the daemon
+# drains the autopilot_goal backlog back-to-back (cap bypassed, event-driven
+# pickup on run completion). Every run is still quality-gated (cargo
+# fmt/check/test), so only passing changes count. Seed the backlog via
+# `nats req swarm.db.autopilot.queue '{"project":"...","goal":"..."}'`.
+continuous = false
+
+# Embedded Wassette WASM tool host. Tools are sandboxed WASM components run
+# in-process (deny-by-default capabilities). Each [[wassette.tools]] entry is
+# loaded on startup and granted ONLY the listed capabilities. Build a tool
+# component first, e.g. codegraph:
+#   env WASI_SDK_PATH=~/.local/wasi-sdk CC_wasm32_wasip2=~/.local/wasi-sdk/bin/clang \
+#       AR_wasm32_wasip2=~/.local/wasi-sdk/bin/llvm-ar \
+#       cargo build --release --target wasm32-wasip2 -p tool-codegraph
+[wassette]
+enabled = true
+component_dir = "/tmp/alpha-swarm/wassette/components"
+
+# Multi-language code knowledge-graph extraction (tree-sitter). Needs read
+# access to the repos it analyzes (the daemon also lazily grants the per-run
+# repo at call time, so fs_read here is just a startup convenience).
+[[wassette.tools]]
+wasm = "/Users/markkovari/DEV/markkovari/alpha-swarm2/target/wasm32-wasip2/release/tool_codegraph.wasm"
+fs_read = ["/Users/markkovari/DEV/markkovari/alpha-swarm2"]
+
+# Sandboxed filesystem tools (read_file / list_files / grep). Enabling these
+# OVERRIDES the native fs tools of the same name with the WASM versions, which
+# are disk-mode only (no FileProvider / zero-disk support). The daemon injects
+# repo-path and lazily grants read on each run's repo, so no fs_read needed.
+# Uncomment to migrate the fs tool surface to WASM:
+# [[wassette.tools]]
+# wasm = "/Users/markkovari/DEV/markkovari/alpha-swarm2/target/wasm32-wasip2/release/tool_fs.wasm"
+
+# Sandboxed HTTP fetch (overrides native fetch_url). Capability-scoped: it can
+# ONLY reach the hosts listed in `net` (deny-by-default). Add the hosts your
+# agents should be allowed to fetch. Uncomment to enable:
+# [[wassette.tools]]
+# wasm = "/Users/markkovari/DEV/markkovari/alpha-swarm2/target/wasm32-wasip2/release/tool_fetch.wasm"
+# net = ["docs.rs", "crates.io", "raw.githubusercontent.com"]

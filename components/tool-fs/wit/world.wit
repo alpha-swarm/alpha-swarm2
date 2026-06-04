@@ -1,0 +1,17 @@
+package alpha-swarm:fs@0.1.0;
+
+/// Sandboxed filesystem tools. Each function takes the repo root explicitly
+/// (the daemon injects it from run context) and operates only within the
+/// directories Wassette has granted read access to.
+world fs {
+    /// Read a UTF-8 text file at `path` (relative to repo-path). Truncated if large.
+    export read-file: func(repo-path: string, path: string) -> result<string, string>;
+
+    /// List files under repo-path, newline-separated relative paths. When
+    /// `pattern` is set, only paths containing it are returned.
+    export list-files: func(repo-path: string, pattern: option<string>) -> result<string, string>;
+
+    /// Search files under repo-path for lines containing `pattern`. Optional
+    /// `path` prefix and `glob` extension filter. Returns `relpath:line:text`.
+    export grep: func(repo-path: string, pattern: string, path: option<string>, glob: option<string>) -> result<string, string>;
+}

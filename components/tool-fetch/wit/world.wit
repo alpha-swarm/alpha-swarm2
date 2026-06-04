@@ -1,0 +1,16 @@
+package alpha-swarm:fetch@0.1.0;
+
+/// Sandboxed HTTP fetch tool. Uses wasi:http/outgoing-handler; Wassette gates
+/// the actual network access to the hosts granted in policy (deny-by-default).
+world fetch {
+    import wasi:http/outgoing-handler@0.2.0;
+    import wasi:http/types@0.2.0;
+    import wasi:io/streams@0.2.0;
+    import wasi:io/poll@0.2.0;
+    import wasi:io/error@0.2.0;
+    import wasi:clocks/monotonic-clock@0.2.0;
+
+    /// GET an http/https URL and return the response body as text (truncated if
+    /// large). Errors on non-2xx or if the host isn't granted.
+    export fetch-url: func(url: string) -> result<string, string>;
+}

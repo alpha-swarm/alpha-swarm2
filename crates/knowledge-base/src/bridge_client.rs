@@ -14,6 +14,8 @@ pub const DB_EXEC_SUBJECT: &str = "swarm.db.exec";
 pub const DB_WORKFLOW_SUBJECT_PREFIX: &str = "swarm.db.workflow.";
 /// Typed memory ops prefix (`store/search/recall/decay/stats`).
 pub const DB_MEMORY_SUBJECT_PREFIX: &str = "swarm.db.memory.";
+/// Typed code-graph ops prefix (`build/entity/relations/neighbors`).
+pub const DB_GRAPH_SUBJECT_PREFIX: &str = "swarm.db.graph.";
 /// Default request-reply timeout for bridge calls.
 pub const DEFAULT_BRIDGE_TIMEOUT_SECS: u64 = 30;
 
@@ -83,6 +85,19 @@ impl NatsDbClient {
     /// Invoke a typed memory op (`store/search/recall/decay/stats`).
     pub async fn memory_op(&self, op: &str, body: serde_json::Value) -> Result<Vec<serde_json::Value>> {
         let parsed = self.request_raw(&format!("{DB_MEMORY_SUBJECT_PREFIX}{op}"), body).await?;
+        if parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            Ok(parsed.get("rows").and_then(|r| r.as_array()).cloned().unwrap_or_default())
+        } else {
+            anyhow::bail!(
+                "bridge error: {}",
+                parsed.get("error").and_then(|e| e.as_str()).unwrap_or("unknown")
+            )
+        }
+    }
+
+    /// Invoke a typed code-graph op (`build/entity/relations/neighbors`).
+    pub async fn graph_op(&self, op: &str, body: serde_json::Value) -> Result<Vec<serde_json::Value>> {
+        let parsed = self.request_raw(&format!("{DB_GRAPH_SUBJECT_PREFIX}{op}"), body).await?;
         if parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
             Ok(parsed.get("rows").and_then(|r| r.as_array()).cloned().unwrap_or_default())
         } else {
