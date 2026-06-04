@@ -30,6 +30,106 @@ fn is_trivial_goal(goal: &str) -> bool {
     let lower = goal.to_lowercase();
     TRIVIAL_GOAL_KEYWORDS.iter().any(|k| lower.contains(k))
 }
+
+// --- Learned planner-tier routing (contextual bandit over goal shape) ---
+/// Tier history needed before stats override the heuristic default.
+const ROUTING_MIN_ATTEMPTS: i64 = 3;
+/// Exploration rate (per-mille): how often to try the non-default tier so the
+/// stats stay fresh. Deterministic per goal (no RNG) via the goal hash.
+const ROUTING_EXPLORE_PERMILLE: u64 = 150;
+const ROUTING_TIER_AGENT: &str = "agent";
+const ROUTING_TIER_ORCH: &str = "orchestrator";
+
+/// Coarse goal shape for routing — the bucket over which outcomes accumulate.
+fn goal_shape(goal: &str) -> &'static str {
+    if is_trivial_goal(goal) { "trivial" } else { "complex" }
+}
+
+/// Stable (build-independent) goal hash for deterministic exploration jitter.
+fn goal_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x00000100000001b3);
+    }
+    h
+}
+
+/// Map a planner model name back to its tier label (for recording outcomes).
+fn tier_label_for_model(model: &str, config: &SwarmConfig) -> Option<&'static str> {
+    if model == config.tiers.agent.model { Some(ROUTING_TIER_AGENT) }
+    else if model == config.tiers.orchestrator.model { Some(ROUTING_TIER_ORCH) }
+    else { None }
+}
+
+/// Pick the planner tier for a goal, learning from past gate outcomes. Coarse
+/// contextual bandit: for the goal's shape, prefer the tier with the higher
+/// historical gate-pass rate (tiebreak: lower latency) once it has
+/// `ROUTING_MIN_ATTEMPTS` of data; else the heuristic default (trivial→agent,
+/// else orchestrator). Epsilon-greedy exploration keeps stats fresh. Advisory —
+/// the gate is the backstop, so a wrong pick costs a run, not correctness.
+async fn recommend_planner_tier<'a>(
+    store: &dyn KnowledgeBackend,
+    project: &str,
+    goal: &str,
+    config: &'a SwarmConfig,
+) -> &'a swarm_config::TierConfig {
+    let shape = goal_shape(goal);
+    let default_label = if shape == "trivial" { ROUTING_TIER_AGENT } else { ROUTING_TIER_ORCH };
+    let tier_for = |label: &str| if label == ROUTING_TIER_AGENT { &config.tiers.agent } else { &config.tiers.orchestrator };
+
+    let rows = store.query_json(
+        "SELECT tier, attempts, successes, total_ms FROM routing_stats WHERE project = $p AND shape = $s",
+        serde_json::json!({ "p": project, "s": shape }),
+    ).await.unwrap_or_default();
+
+    let mut total_attempts = 0i64;
+    let mut best: Option<(&str, f64, f64)> = None; // (label, success_rate, avg_ms)
+    for label in [ROUTING_TIER_AGENT, ROUTING_TIER_ORCH] {
+        let row = rows.iter().find(|r| r.get("tier").and_then(|v| v.as_str()) == Some(label));
+        let a = row.and_then(|r| r.get("attempts")).and_then(|v| v.as_i64()).unwrap_or(0);
+        let s = row.and_then(|r| r.get("successes")).and_then(|v| v.as_i64()).unwrap_or(0);
+        let ms = row.and_then(|r| r.get("total_ms")).and_then(|v| v.as_i64()).unwrap_or(0);
+        total_attempts += a;
+        if a >= ROUTING_MIN_ATTEMPTS {
+            let rate = s as f64 / a as f64;
+            let avg = ms as f64 / a as f64;
+            let better = best.is_none_or(|(_, br, bavg)| rate > br || (rate == br && avg < bavg));
+            if better { best = Some((label, rate, avg)); }
+        }
+    }
+
+    let explore = total_attempts > 0 && (goal_hash(goal) % 1000) < ROUTING_EXPLORE_PERMILLE;
+    let chosen = if explore {
+        if default_label == ROUTING_TIER_AGENT { ROUTING_TIER_ORCH } else { ROUTING_TIER_AGENT }
+    } else {
+        best.map(|(l, _, _)| l).unwrap_or(default_label)
+    };
+    info!(task = %project, goal_shape = shape, chosen_tier = chosen, explore, "learned routing: planner tier");
+    tier_for(chosen)
+}
+
+/// Record a run's outcome against the tier that planned it (best-effort, never
+/// fails the run). Read-modify-write upsert keyed by (project, shape, tier).
+async fn record_routing(store: &dyn KnowledgeBackend, project: &str, shape: &str, tier: &str, success: bool, ms: u64) {
+    let succ = if success { 1 } else { 0 };
+    let existing = store.query_json(
+        "SELECT id, attempts, successes, total_ms FROM routing_stats WHERE project = $p AND shape = $s AND tier = $t LIMIT 1",
+        serde_json::json!({ "p": project, "s": shape, "t": tier }),
+    ).await.unwrap_or_default();
+    if let Some(row) = existing.into_iter().next() {
+        let id = row.get("id").map(|v| v.to_string().trim_matches('"').to_string()).unwrap_or_default();
+        let a = row.get("attempts").and_then(|v| v.as_i64()).unwrap_or(0) + 1;
+        let s = row.get("successes").and_then(|v| v.as_i64()).unwrap_or(0) + succ;
+        let m = row.get("total_ms").and_then(|v| v.as_i64()).unwrap_or(0) + ms as i64;
+        let _ = store.db_query_raw(&format!("UPDATE {id} SET attempts = {a}, successes = {s}, total_ms = {m}")).await;
+    } else {
+        let _ = store.db_query_raw(&format!(
+            "CREATE routing_stats SET project = '{}', shape = '{}', tier = '{}', attempts = 1, successes = {}, total_ms = {}",
+            project.replace('\'', ""), shape, tier, succ, ms,
+        )).await;
+    }
+}
 use swarm_events::{EventPublisher, SwarmEvent};
 
 fn format_update(task_id: &str, set_clause: &str) -> String {
@@ -429,12 +529,9 @@ async fn handle_planning(
         (None, Vec::new())
     };
 
-    let planner_tier = if is_trivial_goal(goal) {
-        info!(task_id, "trivial goal → planning on agent tier (skipping 70b)");
-        &config.tiers.agent
-    } else {
-        &config.tiers.orchestrator
-    };
+    // Learned routing: pick the planner tier from past gate outcomes for this
+    // goal shape (falls back to the trivial-goal heuristic with no history).
+    let planner_tier = recommend_planner_tier(store.as_ref(), project, goal, config).await;
     match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files, planner_tier, None, past_plans_block.as_deref()).await {
         Ok(tasks) => {
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -851,6 +948,15 @@ async fn handle_execute(
                     .filter(|b| !b.is_empty())
                     .unwrap_or_else(|| "main".to_string());
                 land_to_branch(&repo_url, &base_branch, task_id, goal, &result.modified_files);
+            }
+
+            // Learned routing: attribute this run's gate outcome to the tier that
+            // planned it (best-effort; advisory stats only).
+            if let Ok(plans) = store.get_plans(task_id).await
+                && let Some(model) = plans.last().map(|p| p.model_used.clone())
+                && let Some(tier_label) = tier_label_for_model(&model, config)
+            {
+                record_routing(store.as_ref(), project, goal_shape(goal), tier_label, gate_passed, duration).await;
             }
 
             info!(
