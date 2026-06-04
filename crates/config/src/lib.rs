@@ -83,6 +83,11 @@ pub struct AutopilotConfig {
     /// Auto-approve autonomous (`agent_id = autopilot`) planned runs. Human-
     /// submitted runs always require manual approval regardless.
     pub auto_approve: bool,
+    /// Continuous loop mode: bypass the daily cap and pick the next backlog
+    /// goal up the moment a run completes (event-driven), draining the queue
+    /// back-to-back. Quality gates still gate every run, so nothing broken
+    /// merges. Default false.
+    pub continuous: bool,
 }
 
 impl Default for AutopilotConfig {
@@ -92,6 +97,7 @@ impl Default for AutopilotConfig {
             tick_secs: DEFAULT_AUTOPILOT_TICK_SECS,
             max_runs_per_day: DEFAULT_AUTOPILOT_MAX_RUNS_PER_DAY,
             auto_approve: true,
+            continuous: false,
         }
     }
 }

@@ -564,6 +564,9 @@ fn spawn_task(
         if let Some(handle) = lease_handle {
             handle.abort();
         }
+        // Wake the autopilot to pick up the next backlog goal immediately
+        // (continuous-loop, gap-free pickup).
+        autopilot::notify_pickup();
     });
 }
 

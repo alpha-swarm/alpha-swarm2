@@ -140,6 +140,12 @@ enabled = false
 tick_secs = 300
 max_runs_per_day = 5
 auto_approve = true
+# Continuous loop: with enabled+continuous+auto_approve all true, the daemon
+# drains the autopilot_goal backlog back-to-back (cap bypassed, event-driven
+# pickup on run completion). Every run is still quality-gated (cargo
+# fmt/check/test), so only passing changes count. Seed the backlog via
+# `nats req swarm.db.autopilot.queue '{"project":"...","goal":"..."}'`.
+continuous = false
 
 # Embedded Wassette WASM tool host. Tools are sandboxed WASM components run
 # in-process (deny-by-default capabilities). Each [[wassette.tools]] entry is

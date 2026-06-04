@@ -11,13 +11,26 @@
 //! time, hard `max_runs_per_day` ceiling. The normal pipeline (plan → approve
 //! → workflow execute) does the rest.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use tokio::sync::Notify;
 use tracing::{info, warn};
 
 use knowledge_base::KnowledgeBackend;
 use swarm_config::AutopilotConfig;
 use swarm_events::NatsScheduler;
+
+/// Wakes the autopilot loop to check the backlog immediately. Signalled when a
+/// run completes so continuous mode picks up the next goal gap-free, instead of
+/// waiting for the next poll tick.
+static PICKUP: OnceLock<Arc<Notify>> = OnceLock::new();
+fn pickup() -> &'static Arc<Notify> {
+    PICKUP.get_or_init(|| Arc::new(Notify::new()))
+}
+/// Signal the autopilot to re-check the backlog now (call on run completion).
+pub fn notify_pickup() {
+    pickup().notify_one();
+}
 
 /// agent_id stamped at creation (cosmetic; the planner reassigns it).
 pub const AUTOPILOT_AGENT_ID: &str = "autopilot";
@@ -40,12 +53,22 @@ pub fn spawn(
         tick_secs = cfg.tick_secs,
         max_runs_per_day = cfg.max_runs_per_day,
         auto_approve = cfg.auto_approve,
+        continuous = cfg.continuous,
         "Autopilot ENABLED — autonomous backlog execution"
     );
     tokio::spawn(async move {
-        let interval = Duration::from_secs(cfg.tick_secs.max(10));
+        // Continuous mode: short fallback poll + event-driven wake on run
+        // completion (notify_pickup). Otherwise the periodic tick.
+        let interval = if cfg.continuous {
+            Duration::from_secs(cfg.tick_secs.clamp(5, 20))
+        } else {
+            Duration::from_secs(cfg.tick_secs.max(10))
+        };
         loop {
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                _ = pickup().notified() => {}
+            }
             if let Err(e) = tick(&cfg, store.as_ref(), scheduler.as_deref()).await {
                 warn!(error = %e, "autopilot tick failed");
             }
@@ -85,10 +108,13 @@ async fn tick(
         return Ok(());
     }
 
-    // 3. Daily cap (cost guardrail).
-    let today_count = autonomous_runs_today(store).await?;
-    if today_count >= cfg.max_runs_per_day as i64 {
-        return Ok(());
+    // 3. Daily cap (cost guardrail) — bypassed in continuous mode (the quality
+    //    gate is the real guard; local inference has no per-run $ cost).
+    if !cfg.continuous {
+        let today_count = autonomous_runs_today(store).await?;
+        if today_count >= cfg.max_runs_per_day as i64 {
+            return Ok(());
+        }
     }
 
     // 4. Drain the oldest queued backlog goal.
@@ -120,7 +146,7 @@ async fn tick(
         AUTOPILOT_SOURCE,
     );
     store.db_query_raw(&create).await?;
-    info!(project = %project, goal = %goal, today = today_count + 1, "autopilot started autonomous goal");
+    info!(project = %project, goal = %goal, continuous = cfg.continuous, "autopilot started autonomous goal");
     Ok(())
 }
 
