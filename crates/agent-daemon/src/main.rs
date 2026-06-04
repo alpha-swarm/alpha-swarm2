@@ -124,18 +124,30 @@ async fn main() -> Result<()> {
     // next queue item (no cold reload between back-to-back jobs) and recovers
     // after an Ollama restart. Warms every distinct chat tier + the embed model.
     {
-        let router_warm = Arc::clone(&router);
         let ollama_warm = Arc::clone(&ollama);
+        // Each tier PINS its own model (preferred_model = tier.model in
+        // agent.rs / planner.rs), so a run touches all of them — keep every
+        // distinct tier model co-resident, not just the router's fallback pick.
+        // (Set OLLAMA_MAX_LOADED_MODELS >= number of distinct models on the host.)
+        let mut chat_models = vec![
+            config.tiers.orchestrator.model.clone(),
+            config.tiers.agent.model.clone(),
+            config.tiers.worker.model.clone(),
+        ];
+        chat_models.sort();
+        chat_models.dedup();
+        chat_models.retain(|m| !m.is_empty());
         let embed_model = config.defaults.embed_model.clone();
         tokio::spawn(async move {
+            use inference_client::InferenceBackend;
             let opts = inference_client::InferenceOptions { max_tokens: Some(1), ..Default::default() };
-            info!(embed = %embed_model, "Warming generation + embed models into Ollama memory (keep_alive)");
+            info!(chat = ?chat_models, embed = %embed_model, "Warming tier models into Ollama memory (keep_alive)");
             loop {
-                // Warm via the router so it loads exactly the model the router
-                // selects, on the host it routes to (one tiny generation).
                 let messages = vec![inference_client::ChatMessage::user("warm")];
-                if let Err(e) = router_warm.chat(&messages, inference_client::Complexity::Medium, &opts).await {
-                    warn!(error = %e, "generation warm ping failed (will load on first use)");
+                for m in &chat_models {
+                    if let Err(e) = ollama_warm.chat(m, &messages, &opts).await {
+                        warn!(model = %m, error = %e, "warm ping failed (will load on first use)");
+                    }
                 }
                 if !embed_model.is_empty() {
                     let _ = ollama_warm.embed(&embed_model, "warm").await;
