@@ -238,6 +238,10 @@ pub struct TierConfig {
 #[serde(default)]
 pub struct OllamaConfig {
     pub url: String,
+    /// Ollama `keep_alive` for every request. "-1" keeps models resident
+    /// (no idle unload), so queue gaps don't cause cold reloads. "" disables
+    /// (use Ollama's 5-minute default). Accepts durations like "10m" too.
+    pub keep_alive: String,
 }
 
 /// Default embedded SurrealDB data directory (kv-surrealkv).
@@ -427,7 +431,7 @@ impl Default for TierConfig {
 
 impl Default for OllamaConfig {
     fn default() -> Self {
-        Self { url: "http://100.81.10.8:11434".into() }
+        Self { url: "http://100.81.10.8:11434".into(), keep_alive: "-1".into() }
     }
 }
 

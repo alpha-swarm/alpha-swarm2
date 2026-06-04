@@ -16,13 +16,34 @@ const EMBED_TIMEOUT: Duration = Duration::from_secs(120); // 2 minutes
 /// Hard timeout for metadata requests (tags, ps)
 const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Default `keep_alive` sent to Ollama: "-1" keeps the model resident
+/// indefinitely (never idle-unloads), so gaps between queue items don't
+/// trigger an expensive cold reload of the big model.
+pub const DEFAULT_KEEP_ALIVE: &str = "-1";
+
 pub struct OllamaBackend {
     client: Client,
     base_url: String,
+    /// `keep_alive` attached to every request (None = Ollama's 5m default).
+    /// Stored as a JSON value: an integer like `-1` (seconds; -1 = forever)
+    /// must be a NUMBER, while a Go duration like "10m" is a string — Ollama
+    /// rejects the string "-1" ("missing unit in duration").
+    keep_alive: Option<serde_json::Value>,
 }
 
 impl OllamaBackend {
     pub fn new(base_url: impl Into<String>) -> Self {
+        Self::with_keep_alive(base_url, Some(DEFAULT_KEEP_ALIVE.to_string()))
+    }
+
+    /// Construct with an explicit `keep_alive` (e.g. from config). `None` falls
+    /// back to Ollama's default idle-unload behavior. A value that parses as an
+    /// integer is sent as a JSON number; otherwise as a duration string.
+    pub fn with_keep_alive(base_url: impl Into<String>, keep_alive: Option<String>) -> Self {
+        let keep_alive = keep_alive.map(|s| match s.parse::<i64>() {
+            Ok(n) => serde_json::Value::from(n),
+            Err(_) => serde_json::Value::String(s),
+        });
         Self {
             client: Client::builder()
                 .timeout(INFERENCE_TIMEOUT)
@@ -30,6 +51,7 @@ impl OllamaBackend {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             base_url: base_url.into(),
+            keep_alive,
         }
     }
 }
@@ -65,6 +87,8 @@ struct ChatRequest {
     options: Option<OllamaOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OllamaTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -194,6 +218,7 @@ impl InferenceBackend for OllamaBackend {
                 stop: options.stop.clone(),
             }),
             tools: None,
+            keep_alive: self.keep_alive.clone(),
         };
 
         let start = Instant::now();
@@ -257,6 +282,7 @@ impl OllamaBackend {
                 stop: options.stop.clone(),
             }),
             tools: None,
+            keep_alive: self.keep_alive.clone(),
         };
 
         let start = Instant::now();
@@ -318,6 +344,7 @@ impl OllamaBackend {
                 stop: options.stop.clone(),
             }),
             tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
+            keep_alive: self.keep_alive.clone(),
         };
 
         let start = Instant::now();
@@ -357,6 +384,8 @@ impl OllamaBackend {
 struct EmbedRequest {
     model: String,
     input: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -370,6 +399,7 @@ impl OllamaBackend {
         let request = EmbedRequest {
             model: model.to_string(),
             input: text.to_string(),
+            keep_alive: self.keep_alive.clone(),
         };
 
         let response = self.client

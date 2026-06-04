@@ -4,6 +4,11 @@
 # All Ollama runs on csatapaci (M2 Max 96GB) — embeddings, planning, agent
 [ollama]
 url = "http://100.81.10.8:11434"   # csatapaci
+# keep_alive on every request: "-1" = keep models resident (never idle-unload)
+# so gaps between queue items don't cause cold reloads. "" = Ollama's 5m default;
+# a Go duration like "10m" also works. Tip: set OLLAMA_MAX_LOADED_MODELS high
+# enough on the host if you want several distinct models warm at once.
+keep_alive = "-1"
 
 [surrealdb]
 # mode: embedded (in-process surrealkv, daemon = sole owner; default)
