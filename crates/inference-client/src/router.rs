@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use anyhow::{Result, bail};
 use tracing::{info, warn};
 
@@ -5,10 +7,34 @@ use crate::backend::InferenceBackend;
 use crate::types::*;
 
 /// Routes inference requests to the best available backend.
-/// Picks model by complexity tier, falls back across backends.
+///
+/// Model is picked by complexity tier; among the backends that actually host
+/// that model the request goes to the LEAST-loaded one (cross-machine load
+/// balancing), with a round-robin tiebreak so even sequential calls spread
+/// across the Ollama hosts (picur / csatapaci / malna) instead of all piling
+/// onto the first one. Other backends remain failure fallbacks.
 #[derive(Default)]
 pub struct InferenceRouter {
     backends: Vec<Box<dyn InferenceBackend>>,
+    /// In-flight request count per backend (index-parallel to `backends`).
+    in_flight: Vec<AtomicUsize>,
+    /// Round-robin cursor used to break ties between equally-loaded backends.
+    rr: AtomicUsize,
+}
+
+/// RAII counter: increments a backend's in-flight count for the duration of a
+/// request and decrements on drop (covers early return / error paths).
+struct InFlightGuard<'a>(&'a AtomicUsize);
+impl<'a> InFlightGuard<'a> {
+    fn enter(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(counter)
+    }
+}
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl InferenceRouter {
@@ -18,6 +44,7 @@ impl InferenceRouter {
 
     pub fn add_backend(mut self, backend: impl InferenceBackend + 'static) -> Self {
         self.backends.push(Box::new(backend));
+        self.in_flight.push(AtomicUsize::new(0));
         self
     }
 
@@ -41,6 +68,20 @@ impl InferenceRouter {
         statuses
     }
 
+    /// List every backend's models, tagged with the backend's index, so the
+    /// router knows WHICH hosts carry each model (one extra entry per host that
+    /// has it). One fan-out of `list_models` across backends.
+    async fn list_models_indexed(&self) -> Vec<(usize, ModelInfo)> {
+        let mut out = Vec::new();
+        for (idx, backend) in self.backends.iter().enumerate() {
+            match backend.list_models().await {
+                Ok(models) => out.extend(models.into_iter().map(|m| (idx, m))),
+                Err(e) => warn!(backend = ?backend.kind(), "Failed to list models: {e}"),
+            }
+        }
+        out
+    }
+
     /// Pick the best model for a complexity tier.
     ///
     /// Routing strategy:
@@ -49,46 +90,69 @@ impl InferenceRouter {
     ///   Simple tasks still get routed to the largest model because
     ///   the quality improvement is worth the extra seconds.
     pub async fn recommend_model(&self, complexity: Complexity) -> Result<ModelInfo> {
-        let models = self.list_models().await?;
-        if models.is_empty() {
+        Ok(self.pick_model_and_hosts(complexity).await?.0)
+    }
+
+    /// Pick the model for a tier AND the set of backend indices that host it.
+    /// The index set is what `chat` load-balances across.
+    async fn pick_model_and_hosts(&self, complexity: Complexity) -> Result<(ModelInfo, Vec<usize>)> {
+        let indexed = self.list_models_indexed().await;
+        if indexed.is_empty() {
             bail!("No models available on any backend");
         }
+        let models: Vec<ModelInfo> = indexed.iter().map(|(_, m)| m.clone()).collect();
 
         let pick = match complexity {
-            Complexity::Simple => {
-                // Use largest code model — quality over speed
-                largest_ollama(&models)
-                    .or_else(|| best_ollama_by_size(&models, |_| true))
-                    .or_else(|| any_ready(&models))
-            }
-            Complexity::Medium => {
-                // Largest Ollama code model
-                largest_ollama(&models)
-                    .or_else(|| best_ollama_by_size(&models, |_| true))
-                    .or_else(|| any_ready(&models))
-            }
-            Complexity::Complex => {
-                // Prefer Claude Sonnet, then largest Ollama, then anything
-                find_model(&models, BackendKind::Claude, "sonnet")
-                    .or_else(|| find_model(&models, BackendKind::Claude, ""))
-                    .or_else(|| largest_ollama(&models))
-                    .or_else(|| any_ready(&models))
-            }
+            // Simple + Medium → largest code model (quality over speed).
+            Complexity::Simple | Complexity::Medium => largest_ollama(&models)
+                .or_else(|| best_ollama_by_size(&models, |_| true))
+                .or_else(|| any_ready(&models)),
+            Complexity::Complex => find_model(&models, BackendKind::Claude, "sonnet")
+                .or_else(|| find_model(&models, BackendKind::Claude, ""))
+                .or_else(|| largest_ollama(&models))
+                .or_else(|| any_ready(&models)),
         };
 
         match pick {
             Some(model) => {
+                // Every backend that lists this exact model is a routing candidate.
+                let hosts: Vec<usize> = indexed
+                    .iter()
+                    .filter(|(_, m)| m.name == model.name && m.backend == model.backend)
+                    .map(|(i, _)| *i)
+                    .collect();
                 info!(
                     complexity = ?complexity,
                     model = %model.name,
                     backend = ?model.backend,
                     params = %model.parameter_size,
+                    hosts = hosts.len(),
                     "Model selected for complexity tier"
                 );
-                Ok(model)
+                Ok((model, hosts))
             }
             None => bail!("No suitable model for complexity {:?}", complexity),
         }
+    }
+
+    /// Order candidate backend indices least-loaded first, rotating the
+    /// equal-loaded leaders by a round-robin cursor so sequential calls spread
+    /// across hosts instead of always hitting index 0.
+    fn order_by_load(&self, candidates: &[usize]) -> Vec<usize> {
+        let mut ordered: Vec<usize> = candidates.to_vec();
+        ordered.sort_by_key(|&i| self.in_flight[i].load(Ordering::Relaxed));
+        if ordered.len() > 1 {
+            let min = self.in_flight[ordered[0]].load(Ordering::Relaxed);
+            let tied = ordered
+                .iter()
+                .take_while(|&&i| self.in_flight[i].load(Ordering::Relaxed) == min)
+                .count();
+            if tied > 1 {
+                let start = self.rr.fetch_add(1, Ordering::Relaxed) % tied;
+                ordered[..tied].rotate_left(start);
+            }
+        }
+        ordered
     }
 
     /// Get the next-tier model for retry escalation.
@@ -135,17 +199,20 @@ impl InferenceRouter {
                 }
         }
 
-        // Auto-select via routing
-        let recommended = self.recommend_model(complexity).await?;
+        // Auto-select model + the backends that host it.
+        let (recommended, hosts) = self.pick_model_and_hosts(complexity).await?;
 
-        // Try the recommended model on ALL backends that have it (not just the first)
-        for backend in self.backends.iter().filter(|b| b.kind() == recommended.backend) {
-            match backend.chat(&recommended.name, messages, options).await {
+        // Route to the least-loaded host carrying the model (cross-machine load
+        // balancing); fall through to the next-least-loaded on failure.
+        for idx in self.order_by_load(&hosts) {
+            let _guard = InFlightGuard::enter(&self.in_flight[idx]);
+            match self.backends[idx].chat(&recommended.name, messages, options).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => warn!(
+                    host = idx,
                     backend = ?recommended.backend,
                     model = %recommended.name,
-                    "Backend failed for recommended model: {e}, trying next"
+                    "Backend failed for recommended model: {e}, trying next host"
                 ),
             }
         }
@@ -360,6 +427,42 @@ mod tests {
         };
         let resp = router.chat(&[ChatMessage::user("test")], Complexity::Simple, &opts).await.unwrap();
         assert_eq!(resp.backend, BackendKind::Ollama);
+    }
+
+    #[tokio::test]
+    async fn distributes_across_hosts_round_robin() {
+        // Two Ollama hosts carrying the SAME model — sequential requests must
+        // fan out (one each), not both hit host 0.
+        let h0 = MockBackend::new(BackendKind::Ollama)
+            .with_model("qwen2.5-coder:7b", "7.6B")
+            .with_response("from-h0");
+        let h1 = MockBackend::new(BackendKind::Ollama)
+            .with_model("qwen2.5-coder:7b", "7.6B")
+            .with_response("from-h1");
+        let c0 = h0.calls.clone();
+        let c1 = h1.calls.clone();
+
+        let router = InferenceRouter::new().add_backend(h0).add_backend(h1);
+        let opts = InferenceOptions::default();
+        router.chat(&[ChatMessage::user("a")], Complexity::Simple, &opts).await.unwrap();
+        router.chat(&[ChatMessage::user("b")], Complexity::Simple, &opts).await.unwrap();
+
+        assert_eq!(c0.lock().unwrap().len(), 1, "host 0 should serve exactly one request");
+        assert_eq!(c1.lock().unwrap().len(), 1, "host 1 should serve exactly one request");
+    }
+
+    #[tokio::test]
+    async fn fails_over_to_next_host_with_same_model() {
+        // Host 0 has the model but no queued response (errors); host 1 serves it.
+        let h0 = MockBackend::new(BackendKind::Ollama).with_model("qwen2.5-coder:7b", "7.6B");
+        let h1 = MockBackend::new(BackendKind::Ollama)
+            .with_model("qwen2.5-coder:7b", "7.6B")
+            .with_response("ok")
+            .with_response("ok"); // enough for either rr start order
+        let router = InferenceRouter::new().add_backend(h0).add_backend(h1);
+        let opts = InferenceOptions::default();
+        let resp = router.chat(&[ChatMessage::user("x")], Complexity::Simple, &opts).await.unwrap();
+        assert_eq!(resp.content, "ok");
     }
 
     #[tokio::test]
