@@ -26,6 +26,32 @@ fn format_update_where(task_id: &str, set_clause: &str, where_clause: &str) -> S
     }
 }
 
+/// Force the managed clone onto the project's configured branch. `ensure_repo`
+/// only tracks the repo's default branch, so without this agents edit the wrong
+/// (stale) branch and landing clobbers. Best-effort; logged on failure.
+async fn sync_repo_to_branch(store: &dyn knowledge_base::KnowledgeBackend, project: &str, repo_path: &std::path::Path) {
+    let branch = store
+        .query_json("SELECT branch FROM project WHERE name = $p", serde_json::json!({ "p": project }))
+        .await
+        .ok()
+        .and_then(|rows| rows.first().and_then(|r| r.get("branch")).and_then(|b| b.as_str()).map(String::from))
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "main".to_string());
+    let git = |args: &[&str]| {
+        std::process::Command::new("git").args(args).current_dir(repo_path).output()
+            .map(|o| o.status.success()).unwrap_or(false)
+    };
+    let _ = git(&["fetch", "origin", &branch]);
+    let origin_ref = format!("origin/{branch}");
+    if git(&["checkout", "-B", &branch, &origin_ref]) || git(&["checkout", &branch]) {
+        let _ = git(&["reset", "--hard", &origin_ref]);
+        let _ = git(&["clean", "-fd"]);
+        info!(project, %branch, "synced managed clone to project branch");
+    } else {
+        warn!(project, %branch, "could not checkout project branch; using clone default");
+    }
+}
+
 /// Land a passed run's changes onto a `swarm/auto` branch in the source repo,
 /// via a throwaway git worktree so the live checkout is never touched. Commits
 /// accumulate on `swarm/auto` for human review/merge. Local-path repos only
@@ -173,6 +199,7 @@ async fn handle_planning(
             return;
         }
     };
+    sync_repo_to_branch(store.as_ref(), project, &repo_path).await;
 
     // Discover files and plan
     let repo_files = discover_source_files(&repo_path);
@@ -398,6 +425,7 @@ async fn handle_execute(
         }
     };
     let repo_path = std::path::PathBuf::from(&repo_path_str);
+    sync_repo_to_branch(store.as_ref(), project, &repo_path).await;
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
 
