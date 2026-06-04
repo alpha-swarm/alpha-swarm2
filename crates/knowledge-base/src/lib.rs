@@ -19,9 +19,13 @@ pub mod bridge_client;
 pub mod backend;
 #[cfg(feature = "native")]
 pub mod rvindex;
+#[cfg(feature = "native")]
+pub mod graph;
 
 #[cfg(feature = "native")]
 pub use store::KnowledgeStore;
+#[cfg(feature = "native")]
+pub use graph::CodeGraphStore;
 #[cfg(feature = "native")]
 pub use queries::SimilarRun;
 #[cfg(feature = "native")]
