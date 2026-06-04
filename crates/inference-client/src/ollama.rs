@@ -21,6 +21,26 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 /// trigger an expensive cold reload of the big model.
 pub const DEFAULT_KEEP_ALIVE: &str = "-1";
 
+/// num_ctx sizing: float the KV-cache window to the actual prompt rather than
+/// always allocating the full tier window (which slows prefill on small
+/// prompts). Conservative by design so output quality can't regress: chars/3
+/// over-estimates the token count, a generous output headroom is added, and the
+/// result is clamped to [floor, caller-ceiling] — never below the floor, never
+/// above what the caller already asked for.
+const NUM_CTX_FLOOR: u32 = 4096;
+const NUM_CTX_OUTPUT_HEADROOM: u32 = 4096;
+const NUM_CTX_CHARS_PER_TOKEN: usize = 3;
+
+/// Size `num_ctx` from the prompt's char length, clamped to `[NUM_CTX_FLOOR,
+/// ceiling]`. `ceiling` is the tier's max_tokens (None = let Ollama default).
+fn sized_num_ctx(prompt_chars: usize, ceiling: Option<u32>) -> Option<u32> {
+    ceiling.map(|c| {
+        let est_prompt_tokens = (prompt_chars / NUM_CTX_CHARS_PER_TOKEN) as u32;
+        let lo = NUM_CTX_FLOOR.min(c);
+        est_prompt_tokens.saturating_add(NUM_CTX_OUTPUT_HEADROOM).clamp(lo, c)
+    })
+}
+
 pub struct OllamaBackend {
     client: Client,
     base_url: String,
@@ -214,7 +234,7 @@ impl InferenceBackend for OllamaBackend {
             stream: false,
             options: Some(OllamaOptions {
                 temperature: options.temperature,
-                num_ctx: options.max_tokens.map(|t| t.max(4096)),
+                num_ctx: sized_num_ctx(messages.iter().map(|m| m.content.len()).sum(), options.max_tokens),
                 stop: options.stop.clone(),
             }),
             tools: None,
@@ -278,7 +298,7 @@ impl OllamaBackend {
             stream: true,
             options: Some(OllamaOptions {
                 temperature: options.temperature,
-                num_ctx: options.max_tokens.map(|t| t.max(4096)),
+                num_ctx: sized_num_ctx(messages.iter().map(|m| m.content.len()).sum(), options.max_tokens),
                 stop: options.stop.clone(),
             }),
             tools: None,
@@ -340,7 +360,7 @@ impl OllamaBackend {
             stream: false,
             options: Some(OllamaOptions {
                 temperature: options.temperature,
-                num_ctx: options.max_tokens.map(|t| t.max(4096)),
+                num_ctx: sized_num_ctx(messages.iter().map(|m| m.content.len()).sum(), options.max_tokens),
                 stop: options.stop.clone(),
             }),
             tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },

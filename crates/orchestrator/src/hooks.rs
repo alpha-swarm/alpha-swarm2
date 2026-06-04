@@ -67,6 +67,9 @@ pub struct RunCompleteCtx<'a> {
     pub retrieved_pattern_ids: &'a [String],
     /// Compact human-readable plan summary for trajectory recording.
     pub plan_summary: &'a str,
+    /// The run's merged diff (verified by the gate when quality_passed). Distill
+    /// from this — the actual change that worked — not just the plan summary.
+    pub diff: &'a str,
 }
 
 /// Lifecycle hook. All methods default to no-ops so implementors override

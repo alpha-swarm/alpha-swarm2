@@ -12,6 +12,26 @@ const ATTEMPT_PREVIEW_CHARS: usize = 500;
 const GATE_WORKTREE: &str = "/tmp/alpha-swarm/gate";
 /// Persistent cargo target dir kept warm across gate runs (incremental builds).
 const GATE_TARGET_DIR: &str = "/tmp/alpha-swarm/gate-target";
+/// Keywords marking an edit-shaped, low-reasoning goal that the agent tier can
+/// plan without the heavier orchestrator (70b) model.
+const TRIVIAL_GOAL_KEYWORDS: &[&str] = &[
+    "doc comment", "/// ", "add a comment", "rename", "typo", "unused",
+    "remove the", "add a doc", "docstring", "spelling", "whitespace",
+];
+/// Max goal length still eligible for the cheaper planner tier.
+const TRIVIAL_GOAL_MAX_CHARS: usize = 240;
+
+/// Conservative heuristic: short + edit-shaped goals plan on the agent tier
+/// (qwen2.5-coder:32b) instead of the 70b orchestrator, saving the big-model
+/// prefill. Anything ambiguous stays on the big model — and the quality gate is
+/// the backstop either way, so a misroute costs a run, never correctness.
+fn is_trivial_goal(goal: &str) -> bool {
+    if goal.len() > TRIVIAL_GOAL_MAX_CHARS {
+        return false;
+    }
+    let lower = goal.to_lowercase();
+    TRIVIAL_GOAL_KEYWORDS.iter().any(|k| lower.contains(k))
+}
 use swarm_events::{EventPublisher, SwarmEvent};
 
 fn format_update(task_id: &str, set_clause: &str) -> String {
@@ -85,6 +105,12 @@ fn run_quality_gate(repo_path: &std::path::Path, files: &[(String, Vec<u8>)]) ->
     if pkgs.is_empty() {
         verdict = cargo(&["check"]); // non-crate edits → workspace check
     } else {
+        // Fast-fail: cheap `cargo check -p` first (most rejected edits are
+        // non-compiling — E0433 etc.); skips the test-harness build/link cost
+        // on the common failure. Only on a clean check do we build + run tests.
+        for pkg in &pkgs {
+            if verdict.is_ok() { verdict = cargo(&["check", "-p", pkg]); }
+        }
         for pkg in &pkgs {
             if verdict.is_ok() { verdict = cargo(&["test", "-p", pkg]); } // compiles incl. #[cfg(test)] + runs
         }
@@ -361,29 +387,55 @@ async fn handle_planning(
     // Retrieve past proven plans for similar goals and inject as guidance.
     // Weighted by closed-loop effectiveness — proven patterns rank higher.
     let (past_plans_block, retrieved_pattern_ids) = if let Some(memory) = &memory {
-        let namespaces = [knowledge_base::MEM_NS_PATTERNS, knowledge_base::MEM_NS_SOLUTIONS];
-        match memory.search_text_weighted(&namespaces, project, goal, config.learning.max_proven_plans).await {
-            Ok(hits) if !hits.is_empty() => {
-                let mut block = String::new();
-                let mut ids = Vec::new();
-                for hit in &hits {
-                    if hit.similarity < config.learning.min_similarity { continue; }
-                    if block.len() + hit.entry.content.len() > config.learning.proven_plans_char_budget { break; }
-                    block.push_str(&format!("- (sim {:.2}) {}\n", hit.similarity, hit.entry.content));
-                    if let Some(id) = &hit.entry.id { ids.push(id.clone()); }
-                }
-                if block.is_empty() { (None, Vec::new()) } else {
-                    info!(task_id, patterns = ids.len(), "SONA: injecting past proven plans into planner");
-                    (Some(block), ids)
-                }
+        let budget = config.learning.proven_plans_char_budget;
+        let min_sim = config.learning.min_similarity;
+        let top_k = config.learning.max_proven_plans;
+        let mut block = String::new();
+        let mut ids = Vec::new();
+
+        // Proven plans (effectiveness-weighted) — reuse what worked.
+        let proven = [knowledge_base::MEM_NS_PATTERNS, knowledge_base::MEM_NS_SOLUTIONS];
+        if let Ok(hits) = memory.search_text_weighted(&proven, project, goal, top_k).await {
+            for hit in &hits {
+                if hit.similarity < min_sim { continue; }
+                if block.len() + hit.entry.content.len() > budget { break; }
+                if block.is_empty() { block.push_str("WORKING PLANS (reuse / adapt to current files):\n"); }
+                block.push_str(&format!("- (sim {:.2}) {}\n", hit.similarity, hit.entry.content));
+                if let Some(id) = &hit.entry.id { ids.push(id.clone()); }
             }
-            _ => (None, Vec::new()),
+        }
+
+        // Recent failures for similar goals — negative guidance (plain cosine;
+        // error entries have no effectiveness history to weight by). Only the
+        // proven `ids` feed effectiveness tracking — errors are not patterns.
+        if let Ok(fails) = memory.search_text(&[knowledge_base::MEM_NS_ERRORS], project, goal, top_k).await {
+            let mut wrote_header = false;
+            for hit in &fails {
+                if hit.similarity < min_sim { continue; }
+                if block.len() + hit.entry.content.len() > budget { break; }
+                if !wrote_header {
+                    block.push_str("\nRECENT FAILED ATTEMPTS (do NOT repeat these approaches):\n");
+                    wrote_header = true;
+                }
+                block.push_str(&format!("- (sim {:.2}) {}\n", hit.similarity, hit.entry.content));
+            }
+        }
+
+        if block.is_empty() { (None, Vec::new()) } else {
+            info!(task_id, patterns = ids.len(), "SONA: injecting prior run memory into planner");
+            (Some(block), ids)
         }
     } else {
         (None, Vec::new())
     };
 
-    match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files, &config.tiers.orchestrator, None, past_plans_block.as_deref()).await {
+    let planner_tier = if is_trivial_goal(goal) {
+        info!(task_id, "trivial goal → planning on agent tier (skipping 70b)");
+        &config.tiers.agent
+    } else {
+        &config.tiers.orchestrator
+    };
+    match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files, planner_tier, None, past_plans_block.as_deref()).await {
         Ok(tasks) => {
             let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -777,6 +829,10 @@ async fn handle_execute(
                 warn!(task_id, reason = %e, "quality gate FAILED — not landing");
             }
             let status = if gate.is_ok() { RunStatus::Passed } else { RunStatus::Failed };
+            // The REAL gate verdict (not the runner's always-true disk stub). Feed
+            // this into learning + events so distillation/effectiveness are gated on
+            // "compiled + tests passed", not "an edit applied".
+            let gate_passed = matches!(status, RunStatus::Passed);
 
             // Land verified changes onto swarm/auto (+ push + PR) for review/merge.
             if matches!(status, RunStatus::Passed) {
@@ -791,7 +847,7 @@ async fn handle_execute(
 
             info!(
                 task_id, project,
-                quality_passed = result.quality_passed,
+                quality_passed = gate_passed,
                 any_work_done,
                 tasks = result.tasks.len(),
                 tasks_passed,
@@ -1041,12 +1097,13 @@ async fn handle_execute(
                     run_id: task_id,
                     project,
                     goal,
-                    quality_passed: result.quality_passed,
+                    quality_passed: gate_passed,
                     tasks_passed,
                     tasks_failed,
                     total_duration_ms: duration,
                     retrieved_pattern_ids: &pattern_ids,
                     plan_summary: &plan_summary,
+                    diff: result.merged_diff.as_deref().unwrap_or(""),
                 }).await;
             }
 
@@ -1060,7 +1117,7 @@ async fn handle_execute(
                 let _ = pub_.publish(&SwarmEvent::SwarmCompleted {
                     project: project.into(),
                     goal: goal.into(),
-                    quality_passed: result.quality_passed,
+                    quality_passed: gate_passed,
                     tasks_passed: tasks_passed as u32,
                     tasks_failed: tasks_failed as u32,
                     total_duration_ms: duration,

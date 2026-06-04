@@ -574,8 +574,9 @@ impl SwarmRunner {
                                 for edit in &parsed {
                                     if let agent_core::FileEdit::Edit { path, old, new } = edit {
                                         if let Some(current) = virt_fp.workspace.read_file(&virt_fp.store, path) {
-                                            let updated = current.replacen(old.as_str(), new.as_str(), 1);
-                                            virt_fp.workspace.write_file(&mut virt_fp.store, path, &updated);
+                                            if let Some(updated) = agent_core::fuzzy_replace(&current, old, new) {
+                                                virt_fp.workspace.write_file(&mut virt_fp.store, path, &updated);
+                                            }
                                         }
                                     } else if let agent_core::FileEdit::Create { path, content } = edit {
                                         virt_fp.workspace.write_file(&mut virt_fp.store, path, content);
@@ -717,8 +718,7 @@ impl SwarmRunner {
                         info!(task_id = %task.id, path = %edit.path, "Applying direct edit (no inference)");
                         let full_path = wt_path.join(&edit.path);
                         let applied = if let Ok(content) = std::fs::read_to_string(&full_path) {
-                            if content.contains(&edit.old) {
-                                let updated = content.replacen(&edit.old, &edit.new, 1);
+                            if let Some(updated) = agent_core::fuzzy_replace(&content, &edit.old, &edit.new) {
                                 std::fs::write(&full_path, &updated).is_ok()
                             } else {
                                 warn!(task_id = %task.id, "Direct edit OLD block not found, will use agent");

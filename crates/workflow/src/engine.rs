@@ -31,6 +31,10 @@ use crate::repo::WorkflowRepo;
 
 /// Code file extensions whose change warrants a build/test check.
 const QG_CODE_EXTENSIONS: &[&str] = &["rs", "ts", "js", "go", "py"];
+/// Shared warm cargo target dir (matches the daemon's executor gate) so the
+/// engine's QualityGate check and the final gate reuse one dependency cache
+/// instead of each paying a separate cold build.
+const QG_CARGO_TARGET_DIR: &str = "/tmp/alpha-swarm/gate-target";
 
 /// Run a build/test check in `repo_path` for a QualityGate step. Returns
 /// Ok(()) on a clean check, Err(msg) on failure (→ replan). Self-contained:
@@ -45,14 +49,21 @@ fn run_quality_check(repo_path: &std::path::Path, changed: &[String]) -> Result<
     if !has_code {
         return Ok(());
     }
-    let (program, args): (&str, &[&str]) = if repo_path.join("Cargo.toml").exists() {
+    let is_cargo = repo_path.join("Cargo.toml").exists();
+    let (program, args): (&str, &[&str]) = if is_cargo {
         ("cargo", &["check", "--quiet"])
     } else if repo_path.join("package.json").exists() {
         ("pnpm", &["check"])
     } else {
         return Ok(());
     };
-    match Command::new(program).args(args).current_dir(repo_path).output() {
+    let mut cmd = Command::new(program);
+    cmd.args(args).current_dir(repo_path);
+    if is_cargo {
+        let _ = std::fs::create_dir_all(QG_CARGO_TARGET_DIR);
+        cmd.env("CARGO_TARGET_DIR", QG_CARGO_TARGET_DIR);
+    }
+    match cmd.output() {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
