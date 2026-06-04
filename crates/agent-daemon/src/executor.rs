@@ -132,6 +132,65 @@ async fn record_routing(store: &dyn KnowledgeBackend, project: &str, shape: &str
 }
 use swarm_events::{EventPublisher, SwarmEvent};
 
+// --- Co-edit suggestions (files that historically change together) ---
+/// Min co-occurrence count for a file to be suggested.
+const COEDIT_MIN_COOCCURRENCE: usize = 2;
+/// Max co-edit suggestions injected into the planner prompt.
+const COEDIT_MAX_SUGGESTIONS: usize = 6;
+/// Max seed files (named in the goal) to expand from.
+const COEDIT_MAX_SEEDS: usize = 5;
+
+/// Files named in the goal that match a known repo path (the co-edit seeds).
+fn extract_goal_files(goal: &str, repo_files: &[String]) -> Vec<String> {
+    repo_files.iter()
+        .filter(|f| goal.contains(f.as_str()))
+        .take(COEDIT_MAX_SEEDS)
+        .cloned()
+        .collect()
+}
+
+/// Suggest files that historically co-changed with the goal's named files, from
+/// passed-run history (`agent_run.files_modified`). Pure co-occurrence stats —
+/// surfaces the "edit compiles but breaks the caller" file the plan forgot.
+/// Returns a planner-prompt block, or None when there's no seed/signal.
+async fn coedit_hint(store: &dyn KnowledgeBackend, project: &str, goal: &str, repo_files: &[String]) -> Option<String> {
+    let seeds = extract_goal_files(goal, repo_files);
+    if seeds.is_empty() {
+        return None;
+    }
+    let rows = store.query_json(
+        "SELECT files_modified FROM agent_run WHERE project = $p AND status = 'passed'",
+        serde_json::json!({ "p": project }),
+    ).await.ok()?;
+    let mut tally: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for row in &rows {
+        let files: Vec<String> = row.get("files_modified")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if files.iter().any(|f| seeds.contains(f)) {
+            for f in &files {
+                if !seeds.contains(f) {
+                    *tally.entry(f.clone()).or_default() += 1;
+                }
+            }
+        }
+    }
+    let mut suggestions: Vec<(String, usize)> = tally.into_iter()
+        .filter(|(_, c)| *c >= COEDIT_MIN_COOCCURRENCE)
+        .collect();
+    suggestions.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    suggestions.truncate(COEDIT_MAX_SUGGESTIONS);
+    if suggestions.is_empty() {
+        return None;
+    }
+    let list = suggestions.iter()
+        .map(|(f, c)| format!("- {f} (co-changed {c}×)"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!("FILES THAT HISTORICALLY CHANGE TOGETHER with the named file(s) — include them if the change needs them:\n{list}"))
+}
+
 // --- Adversarial verify (2nd-model semantic review of a passed diff) ---
 /// Max chars of the diff fed to the verifier (keeps the prompt bounded).
 const VERIFY_DIFF_MAX_CHARS: usize = 4000;
@@ -590,10 +649,20 @@ async fn handle_planning(
         (None, Vec::new())
     };
 
+    // Co-edit hint: append files that historically co-change with the goal's
+    // named files, so the plan includes them up front (fewer gate rejections
+    // from a half-change that breaks a caller).
+    let planner_block = match (past_plans_block, coedit_hint(store.as_ref(), project, goal, &repo_files).await) {
+        (Some(p), Some(c)) => Some(format!("{p}\n{c}")),
+        (Some(p), None) => Some(p),
+        (None, Some(c)) => Some(c),
+        (None, None) => None,
+    };
+
     // Learned routing: pick the planner tier from past gate outcomes for this
     // goal shape (falls back to the trivial-goal heuristic with no history).
     let planner_tier = recommend_planner_tier(store.as_ref(), project, goal, config).await;
-    match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files, planner_tier, None, past_plans_block.as_deref()).await {
+    match swarm_orchestrator::plan_goal(&router, &plan_goal, &repo_files, planner_tier, None, planner_block.as_deref()).await {
         Ok(tasks) => {
             let duration_ms = start.elapsed().as_millis() as u64;
 
