@@ -27,6 +27,9 @@ const MAX_PATTERN_CHARS: usize = 900;
 const ERR_SIG_MAX_CHARS: usize = 600;
 /// Max tokens requested from the distillation LLM call.
 const DISTILL_MAX_TOKENS: u32 = 512;
+/// Max chars of the verified diff fed to the distillation LLM (keeps the prompt
+/// bounded on large changes).
+const DISTILL_DIFF_MAX_CHARS: usize = 2000;
 
 /// Stable key for a goal shape: sha256 of the lowercased, whitespace-collapsed goal.
 fn goal_shape_key(goal: &str) -> String {
@@ -177,8 +180,9 @@ impl ExecutionHook for TrajectoryRecorder {
             let guard_set = Arc::clone(&self.distilling_projects);
             let goal = state.goal.clone();
             let plan_summary = ctx.plan_summary.to_string();
+            let diff: String = ctx.diff.chars().take(DISTILL_DIFF_MAX_CHARS).collect();
             tokio::spawn(async move {
-                distill_pattern(&memory, &router, &tier, &project, &goal, &plan_summary, goal_embedding).await;
+                distill_pattern(&memory, &router, &tier, &project, &goal, &plan_summary, &diff, goal_embedding).await;
                 guard_set.lock().await.remove(&project);
             });
         } else if !succeeded {
@@ -187,7 +191,10 @@ impl ExecutionHook for TrajectoryRecorder {
             let entry = MemoryEntry {
                 id: None,
                 namespace: MEM_NS_ERRORS.into(),
-                key: goal_shape_key(&state.goal),
+                // Key per-run (not per goal-shape): distinct failures of the same
+                // goal must all be retained, else the UPSERT collapses history to
+                // the latest one and the planner only ever sees one pitfall.
+                key: ctx.run_id.to_string(),
                 content: format!("GOAL: {}\nFAILED PLAN:\n{}", state.goal, signature),
                 embedding: goal_embedding,
                 metadata: serde_json::json!({ "run_id": ctx.run_id }),
@@ -206,6 +213,7 @@ impl ExecutionHook for TrajectoryRecorder {
 
 /// LLM-distill a successful run into a `patterns` entry keyed and embedded by
 /// goal shape. Best-effort: failures only log.
+#[allow(clippy::too_many_arguments)]
 async fn distill_pattern(
     memory: &MemoryStore,
     router: &InferenceRouter,
@@ -213,9 +221,18 @@ async fn distill_pattern(
     project: &str,
     goal: &str,
     plan_summary: &str,
+    diff: &str,
     goal_embedding: Vec<f32>,
 ) {
-    let user_msg = format!("GOAL: {goal}\n\nPLAN THAT WORKED:\n{plan_summary}\n\nOUTCOME: passed");
+    // Distill from the VERIFIED diff (the change the gate passed), with the plan
+    // summary as secondary context — not the plan alone, which can list noop or
+    // failed sub-tasks.
+    let diff_block = if diff.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nVERIFIED DIFF:\n{diff}")
+    };
+    let user_msg = format!("GOAL: {goal}\n\nPLAN THAT WORKED:\n{plan_summary}{diff_block}\n\nOUTCOME: passed");
     let messages = vec![
         ChatMessage::system(DISTILL_SYSTEM),
         ChatMessage::user(user_msg),

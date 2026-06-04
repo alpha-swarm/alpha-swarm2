@@ -61,7 +61,7 @@ pub async fn plan_goal(
 
     let past_block = past_plans
         .filter(|p| !p.is_empty())
-        .map(|p| format!("PAST PROVEN PLANS (guidance from similar successful goals — adapt to current files):\n{p}\n\n"))
+        .map(|p| format!("PRIOR RUN MEMORY (reuse what worked, avoid what failed — adapt to current files):\n{p}\n\n"))
         .unwrap_or_default();
 
     let user_msg = format!("GOAL: {goal}\n\n{past_block}{file_list}");

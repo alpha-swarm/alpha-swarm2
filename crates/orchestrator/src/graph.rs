@@ -162,8 +162,13 @@ impl GraphExecutor {
             match edit {
                 FileEdit::Edit { path, old, new } => {
                     let content = self.read_file(path)?;
-                    if let Some(updated) = content.replacen(old, new, 1).into() {
-                        self.write_file(path, &updated)?;
+                    // Fuzzy match (LE-normalize + trimmed line search) — a plain
+                    // replacen miss would rewrite the file unchanged yet look
+                    // applied. A real miss bails → runner escalates to the full
+                    // agent instead of "passing" on an unchanged file.
+                    match agent_core::fuzzy_replace(&content, old, new) {
+                        Some(updated) => self.write_file(path, &updated)?,
+                        None => bail!("edit OLD block not found in {path}"),
                     }
                 }
                 FileEdit::Create { path, content } => self.write_file(path, content)?,

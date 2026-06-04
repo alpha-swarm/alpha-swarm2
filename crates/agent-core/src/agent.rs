@@ -105,6 +105,18 @@ pub struct AgentProgress {
 /// Callback for real-time progress updates.
 pub type ProgressFn = Box<dyn Fn(AgentProgress) + Send + Sync>;
 
+/// Compile-fix loop: when the tool agent says DONE with edits applied, verify
+/// they compile before accepting. On failure, feed the error back and let the
+/// model fix its own output — up to this many times — then accept (the outer
+/// quality gate is the backstop). Disk mode only; skipped under a zero-disk
+/// FileProvider or when the change can't be scoped to a crate.
+const COMPILE_FIX_ATTEMPTS: u32 = 2;
+/// Warm cargo target dir for the agent's in-loop compile check (shared with the
+/// daemon's gate so the build stays incremental).
+const AGENT_CHECK_TARGET_DIR: &str = "/tmp/alpha-swarm/gate-target";
+/// Max stderr lines fed back to the model on a compile-check failure.
+const COMPILE_FIX_ERR_LINES: usize = 8;
+
 /// A one-shot code modification agent.
 pub struct Agent {
     router: Arc<InferenceRouter>,
@@ -621,6 +633,7 @@ impl Agent {
         let mut total_duration = 0u64;
         let mut all_edits = Vec::new();
         let mut tool_call_records = Vec::new();
+        let mut compile_fix_used = 0u32;
 
         for step in 1..=max_steps {
             // Drain peer messages before each inference call
@@ -783,10 +796,26 @@ impl Agent {
                                 progress(AgentProgress { step, max_steps, action: "done:nudged".into(), result: summary.clone(), duration_ms: 0, tokens_in: total_tokens_in, tokens_out: total_tokens_out, edits_count: 0 });
                             }
                         } else {
-                            info!(step, summary = %summary, "Tool loop: DONE");
-                            done = true;
-                            if let Some(ref progress) = self.progress_fn {
-                                progress(AgentProgress { step, max_steps, action: "done".into(), result: summary.clone(), duration_ms: 0, tokens_in: total_tokens_in, tokens_out: total_tokens_out, edits_count: all_edits.len() });
+                            // Verify the edits compile before accepting DONE. On
+                            // failure (within budget), feed the error back so the
+                            // model fixes its own non-compiling output instead of
+                            // handing it to the gate.
+                            match self.compile_check(&all_edits) {
+                                Err(err) if compile_fix_used < COMPILE_FIX_ATTEMPTS => {
+                                    compile_fix_used += 1;
+                                    warn!(step, attempt = compile_fix_used, "Tool loop: DONE but edits don't compile, feeding error back");
+                                    feedback_parts.push(format!("[compile check FAILED] Your edits do not compile:\n{err}\n\nFix the cause with <<<EDIT>>> blocks (read the file first if needed), then <<<DONE>>> again."));
+                                    if let Some(ref progress) = self.progress_fn {
+                                        progress(AgentProgress { step, max_steps, action: "done:compile-fail".into(), result: err.chars().take(80).collect(), duration_ms: 0, tokens_in: total_tokens_in, tokens_out: total_tokens_out, edits_count: all_edits.len() });
+                                    }
+                                }
+                                _ => {
+                                    info!(step, summary = %summary, "Tool loop: DONE");
+                                    done = true;
+                                    if let Some(ref progress) = self.progress_fn {
+                                        progress(AgentProgress { step, max_steps, action: "done".into(), result: summary.clone(), duration_ms: 0, tokens_in: total_tokens_in, tokens_out: total_tokens_out, edits_count: all_edits.len() });
+                                    }
+                                }
                             }
                         }
                     }
@@ -975,5 +1004,51 @@ impl Agent {
             }
         }
         Ok(())
+    }
+
+    /// Compile-check the applied edits on disk. `Ok(())` = clean or
+    /// not-applicable (zero-disk mode, non-cargo repo, or change not scopable to
+    /// a crate); `Err(stderr tail)` = build failed. Scoped to the changed crates
+    /// (`-p`) and run against the warm gate target dir so it stays incremental.
+    fn compile_check(&self, edits: &[FileEdit]) -> std::result::Result<(), String> {
+        if self.file_provider.is_some() || !self.repo_path.join("Cargo.toml").exists() {
+            return Ok(());
+        }
+        let mut pkgs: Vec<String> = Vec::new();
+        for e in edits {
+            let (FileEdit::Edit { path, .. } | FileEdit::Create { path, .. } | FileEdit::Delete { path }) = e;
+            if let Some(dir) = path.strip_prefix("crates/").and_then(|r| r.split('/').next())
+                && let Ok(toml) = std::fs::read_to_string(self.repo_path.join("crates").join(dir).join("Cargo.toml"))
+                && let Some(name) = toml.lines().find_map(|l| l.trim().strip_prefix("name = \"").and_then(|s| s.strip_suffix('"')))
+                && !pkgs.iter().any(|p| p == name)
+            {
+                pkgs.push(name.to_string());
+            }
+        }
+        if pkgs.is_empty() {
+            // Can't scope to a crate — a full workspace check is too costly
+            // mid-loop; leave it to the outer gate.
+            return Ok(());
+        }
+        let mut args: Vec<String> = vec!["check".into(), "--quiet".into()];
+        for p in &pkgs {
+            args.push("-p".into());
+            args.push(p.clone());
+        }
+        let _ = std::fs::create_dir_all(AGENT_CHECK_TARGET_DIR);
+        let out = std::process::Command::new("cargo")
+            .args(&args)
+            .current_dir(&self.repo_path)
+            .env("CARGO_TARGET_DIR", AGENT_CHECK_TARGET_DIR)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let mut tail: Vec<&str> = stderr.lines().rev().take(COMPILE_FIX_ERR_LINES).collect();
+            tail.reverse();
+            Err(tail.join("\n"))
+        }
     }
 }
