@@ -30,6 +30,7 @@ pub const INDEXABLE_EXTENSIONS: &[&str] = &["rs", "ts", "js", "go", "py", "md", 
 pub const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", "dist", ".wash"];
 
 /// Check if a file has a code extension (triggers quality gate).
+/// Check if a file has a code extension that triggers quality gates.
 pub fn is_code_file(path: &str) -> bool {
     CODE_EXTENSIONS.iter().any(|ext| path.ends_with(&format!(".{ext}")))
 }
