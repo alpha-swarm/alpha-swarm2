@@ -190,6 +190,7 @@ pub struct ResourceConfig {
     pub hosts: Vec<HostConfig>,
 }
 
+/// Returns the default maximum number of concurrent agents.
 fn default_max_concurrent_agents() -> usize { 2 }
 fn default_max_sub_plan_depth() -> u32 { 3 }
 fn default_max_graph_retries() -> u32 { 3 }
