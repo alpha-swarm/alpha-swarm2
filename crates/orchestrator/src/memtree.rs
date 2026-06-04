@@ -26,9 +26,19 @@ const WORKSPACE_BASE: &str = "/tmp/alpha-swarm/workspaces";
 
 impl MemTreeManager {
     pub fn new(repo_path: impl Into<PathBuf>) -> Self {
+        let repo_path = repo_path.into();
+        // Per-run workspaces: sit them beside the run's isolated clone so two
+        // parallel runs never collide on a shared task-id path (e.g. both runs'
+        // "task-1"). When repo_path is the per-run clone
+        // (/tmp/alpha-swarm/runs/{run}/repo) this yields
+        // /tmp/alpha-swarm/runs/{run}/workspaces, cleaned up with the run.
+        // Falls back to the global base if repo_path has no parent.
+        let base_dir = repo_path.parent()
+            .map(|p| p.join("workspaces"))
+            .unwrap_or_else(|| PathBuf::from(WORKSPACE_BASE));
         Self {
-            repo_path: repo_path.into(),
-            base_dir: PathBuf::from(WORKSPACE_BASE),
+            repo_path,
+            base_dir,
             workspaces: Vec::new(),
         }
     }

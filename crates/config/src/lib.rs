@@ -179,6 +179,12 @@ pub struct ResourceConfig {
     /// Max parallel sub-agents per swarm run (to avoid OOM with large models).
     #[serde(default = "default_max_concurrent_agents")]
     pub max_concurrent_agents: usize,
+    /// Max whole runs executing concurrently (parallel goals). Each runs in an
+    /// isolated workspace + own gate; inference still serializes on the shared
+    /// Ollama queue, so the win is overlapping CPU gate / git with peers' GPU
+    /// work. 1 = strictly serial.
+    #[serde(default = "default_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
     /// Maximum depth for recursive sub-plan decomposition.
     #[serde(default = "default_max_sub_plan_depth")]
     pub max_sub_plan_depth: u32,
@@ -191,6 +197,7 @@ pub struct ResourceConfig {
 }
 
 fn default_max_concurrent_agents() -> usize { 2 }
+fn default_max_concurrent_runs() -> usize { 2 }
 fn default_max_sub_plan_depth() -> u32 { 3 }
 fn default_max_graph_retries() -> u32 { 3 }
 
@@ -374,6 +381,7 @@ impl Default for ResourceConfig {
             max_ram_percent: 75.0,
             check_interval_secs: 10,
             max_concurrent_agents: default_max_concurrent_agents(),
+            max_concurrent_runs: default_max_concurrent_runs(),
             max_sub_plan_depth: default_max_sub_plan_depth(),
             max_graph_retries: default_max_graph_retries(),
             hosts: default_hosts(),
