@@ -1,0 +1,11 @@
+package alpha-swarm:codegraph@0.1.0;
+
+/// Multi-language code knowledge-graph extraction via tree-sitter.
+world codegraph {
+    /// Extract code entities and relations from the given source files
+    /// (paths relative to repo-path). Supported languages: Rust, Python,
+    /// JavaScript, TypeScript (+TSX), Go; other extensions are skipped.
+    /// Returns a JSON object: {"entities":[{kind,name,file,line,lang}],
+    /// "relations":[{from,kind,to,file}]}. Returns an error string on failure.
+    export extract-graph: func(repo-path: string, files: list<string>) -> result<string, string>;
+}

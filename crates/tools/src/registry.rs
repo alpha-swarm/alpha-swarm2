@@ -78,6 +78,21 @@ impl ToolRegistry {
         self
     }
 
+    /// Surface the process-global WASM tool set (if installed) as normal tools.
+    /// No-op when no embedded Wassette host has been initialized.
+    #[cfg(feature = "native")]
+    pub fn with_wasm_tools(mut self) -> Self {
+        if let Some(set) = crate::wasm_tools::wasm_tools() {
+            for spec in &set.specs {
+                self.register(Box::new(crate::wasm_tools::WasmTool::new(
+                    set.host.clone(),
+                    spec.clone(),
+                )));
+            }
+        }
+        self
+    }
+
     /// Get tool names for inclusion in agent prompts.
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()

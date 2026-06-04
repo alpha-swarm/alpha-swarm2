@@ -134,3 +134,36 @@ enabled = false
 tick_secs = 300
 max_runs_per_day = 5
 auto_approve = true
+
+# Embedded Wassette WASM tool host. Tools are sandboxed WASM components run
+# in-process (deny-by-default capabilities). Each [[wassette.tools]] entry is
+# loaded on startup and granted ONLY the listed capabilities. Build a tool
+# component first, e.g. codegraph:
+#   env WASI_SDK_PATH=~/.local/wasi-sdk CC_wasm32_wasip2=~/.local/wasi-sdk/bin/clang \
+#       AR_wasm32_wasip2=~/.local/wasi-sdk/bin/llvm-ar \
+#       cargo build --release --target wasm32-wasip2 -p tool-codegraph
+[wassette]
+enabled = true
+component_dir = "/tmp/alpha-swarm/wassette/components"
+
+# Multi-language code knowledge-graph extraction (tree-sitter). Needs read
+# access to the repos it analyzes (the daemon also lazily grants the per-run
+# repo at call time, so fs_read here is just a startup convenience).
+[[wassette.tools]]
+wasm = "/Users/markkovari/DEV/markkovari/alpha-swarm2/target/wasm32-wasip2/release/tool_codegraph.wasm"
+fs_read = ["/Users/markkovari/DEV/markkovari/alpha-swarm2"]
+
+# Sandboxed filesystem tools (read_file / list_files / grep). Enabling these
+# OVERRIDES the native fs tools of the same name with the WASM versions, which
+# are disk-mode only (no FileProvider / zero-disk support). The daemon injects
+# repo-path and lazily grants read on each run's repo, so no fs_read needed.
+# Uncomment to migrate the fs tool surface to WASM:
+# [[wassette.tools]]
+# wasm = "/Users/markkovari/DEV/markkovari/alpha-swarm2/target/wasm32-wasip2/release/tool_fs.wasm"
+
+# Sandboxed HTTP fetch (overrides native fetch_url). Capability-scoped: it can
+# ONLY reach the hosts listed in `net` (deny-by-default). Add the hosts your
+# agents should be allowed to fetch. Uncomment to enable:
+# [[wassette.tools]]
+# wasm = "/Users/markkovari/DEV/markkovari/alpha-swarm2/target/wasm32-wasip2/release/tool_fetch.wasm"
+# net = ["docs.rs", "crates.io", "raw.githubusercontent.com"]

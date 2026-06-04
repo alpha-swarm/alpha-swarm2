@@ -852,7 +852,9 @@ impl SwarmRunner {
                             });
                         }
 
-                        let mut tools = swarm_tools::ToolRegistry::with_defaults();
+                        let mut tools = swarm_tools::ToolRegistry::with_defaults()
+                            // Embedded Wassette WASM tools (no-op if none installed).
+                            .with_wasm_tools();
                         // Memory tools need the NATS bridge — register only
                         // when a client is attached (prompt list stays honest).
                         if let Some(nc) = nats_client_clone.clone() {

@@ -199,6 +199,15 @@ async fn main() -> Result<()> {
         config.defaults.embed_model.clone(),
     ));
 
+    // Embedded Wassette WASM tool host: load configured tool components, grant
+    // their capabilities, and install the process-global tool set so agent runs
+    // surface them as ordinary tools (no-op when [wassette] enabled = false).
+    match tool_host::install_from_config(&config.wassette).await {
+        Ok(0) => {}
+        Ok(n) => info!(tools = n, "WASM tool host ready"),
+        Err(e) => warn!(error = %e, "WASM tool host init failed (agents run without WASM tools)"),
+    }
+
     // Embedded ruvector ANN index (HNSW + SIMD, pure-Rust) for memory
     // retrieval. Ephemeral cache — rebuilt from SurrealDB (authoritative) here.
     if config.learning.enabled {

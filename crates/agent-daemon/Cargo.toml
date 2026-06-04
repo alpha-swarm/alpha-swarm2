@@ -22,6 +22,8 @@ agent-core = { path = "../agent-core" }
 swarm-orchestrator = { path = "../orchestrator" }
 swarm-workflow = { path = "../workflow" }
 knowledge-base = { path = "../knowledge-base" }
+swarm-tools = { path = "../tools" }
+tool-host = { path = "../tool-host" }
 quality-gate-lib = { path = "../quality-gate" }
 swarm-events = { path = "../events" }
 async-nats = "0.38"

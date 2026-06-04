@@ -22,6 +22,8 @@ pub struct SwarmConfig {
     pub learning: LearningConfig,
     /// Autonomous operation (OFF by default).
     pub autopilot: AutopilotConfig,
+    /// Embedded Wassette WASM tool host (OFF by default).
+    pub wassette: WassetteConfig,
     /// Inference providers (multiple Ollama hosts, etc.)
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
@@ -92,6 +94,49 @@ impl Default for AutopilotConfig {
             auto_approve: true,
         }
     }
+}
+
+/// Default on-disk dir where the embedded Wassette runtime caches components
+/// + their capability policies. Ephemeral (`/tmp`): components are reloaded and
+/// policies re-granted from config on every daemon startup.
+pub const DEFAULT_WASSETTE_COMPONENT_DIR: &str = "/tmp/alpha-swarm/wassette/components";
+
+/// Embedded Wassette WASM tool host. OFF by default — tools surface to agents
+/// only when enabled, and every component is deny-by-default until granted.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct WassetteConfig {
+    /// Master switch. Default false — no WASM tools are loaded unless enabled.
+    pub enabled: bool,
+    /// Component cache + policy directory.
+    pub component_dir: String,
+    /// WASM tool components to load on startup, with their capability grants.
+    pub tools: Vec<WasmToolConfig>,
+}
+
+impl Default for WassetteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            component_dir: DEFAULT_WASSETTE_COMPONENT_DIR.into(),
+            tools: Vec::new(),
+        }
+    }
+}
+
+/// One WASM tool component + the capabilities it is granted (deny-by-default).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct WasmToolConfig {
+    /// Path to the `.wasm` component (absolute, or relative to the daemon cwd),
+    /// or a full `file://`/`oci://` URI.
+    pub wasm: String,
+    /// Absolute directories to grant read access (e.g. repo roots for codegraph).
+    pub fs_read: Vec<String>,
+    /// Absolute directories to grant read+write access.
+    pub fs_write: Vec<String>,
+    /// Hosts to grant outbound network access (e.g. for a web-fetch tool).
+    pub net: Vec<String>,
 }
 
 /// An inference provider configuration.
