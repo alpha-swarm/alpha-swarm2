@@ -8,6 +8,10 @@ use swarm_config::SwarmConfig;
 
 /// Max chars for attempt preview fields
 const ATTEMPT_PREVIEW_CHARS: usize = 500;
+/// Throwaway git worktree where the quality gate materializes + tests changes.
+const GATE_WORKTREE: &str = "/tmp/alpha-swarm/gate";
+/// Persistent cargo target dir kept warm across gate runs (incremental builds).
+const GATE_TARGET_DIR: &str = "/tmp/alpha-swarm/gate-target";
 use swarm_events::{EventPublisher, SwarmEvent};
 
 fn format_update(task_id: &str, set_clause: &str) -> String {
@@ -26,11 +30,110 @@ fn format_update_where(task_id: &str, set_clause: &str, where_clause: &str) -> S
     }
 }
 
+/// Real quality gate: materialize the run's changed files in a throwaway
+/// worktree (the per-task workspaces are gone by now) and run `cargo check` +
+/// `cargo test` on the changed crates. Returns Ok(()) only if all pass. This
+/// is the gate the runner's disk-mode path stubs out (always-true) — without
+/// it the loop merges unverified (even non-compiling) code.
+fn run_quality_gate(repo_path: &std::path::Path, files: &[(String, Vec<u8>)]) -> Result<(), String> {
+    use std::process::Command;
+    if files.is_empty() {
+        return Ok(());
+    }
+    let gate = std::path::PathBuf::from(GATE_WORKTREE);
+    let g = gate.to_string_lossy().to_string();
+    let git = |args: &[&str]| Command::new("git").args(args).current_dir(repo_path).output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    let _ = git(&["worktree", "prune"]);
+    let _ = git(&["worktree", "remove", "--force", &g]);
+    if !git(&["worktree", "add", "--force", "--detach", &g, "HEAD"]) {
+        return Err("quality gate: worktree add failed".into());
+    }
+    // Keep a persistent cargo target dir warm across gate runs (incremental
+    // builds) via CARGO_TARGET_DIR — NOT a worktree symlink: a dangling symlink
+    // makes cargo's create_dir_all fail with ENOTDIR (os error 20).
+    let _ = std::fs::create_dir_all(GATE_TARGET_DIR);
+
+    // Write the run's modified files + collect the changed crate packages.
+    let mut pkgs: Vec<String> = Vec::new();
+    for (p, content) in files {
+        let full = gate.join(p);
+        if let Some(parent) = full.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&full, content);
+        if let Some(dir) = p.strip_prefix("crates/").and_then(|r| r.split('/').next()) {
+            if let Ok(toml) = std::fs::read_to_string(gate.join("crates").join(dir).join("Cargo.toml")) {
+                if let Some(name) = toml.lines().find_map(|l| {
+                    l.trim().strip_prefix("name = \"").and_then(|s| s.strip_suffix('"'))
+                }) {
+                    if !pkgs.iter().any(|x| x == name) { pkgs.push(name.to_string()); }
+                }
+            }
+        }
+    }
+
+    let cargo = |args: &[&str]| -> Result<(), String> {
+        let out = Command::new("cargo").args(args).current_dir(&gate)
+            .env("CARGO_TARGET_DIR", GATE_TARGET_DIR).output().map_err(|e| e.to_string())?;
+        if out.status.success() { Ok(()) }
+        else { Err(format!("`cargo {}` failed: {}", args.join(" "),
+            String::from_utf8_lossy(&out.stderr).lines().rev().take(4).collect::<Vec<_>>().join(" "))) }
+    };
+
+    let mut verdict = Ok(());
+    if pkgs.is_empty() {
+        verdict = cargo(&["check"]); // non-crate edits → workspace check
+    } else {
+        for pkg in &pkgs {
+            if verdict.is_ok() { verdict = cargo(&["test", "-p", pkg]); } // compiles incl. #[cfg(test)] + runs
+        }
+    }
+    let _ = git(&["worktree", "remove", "--force", &g]);
+    verdict
+}
+
+/// Force the managed clone onto the project's configured branch. `ensure_repo`
+/// only tracks the repo's default branch, so without this agents edit the wrong
+/// (stale) branch and landing clobbers. Best-effort; logged on failure.
+async fn sync_repo_to_branch(store: &dyn knowledge_base::KnowledgeBackend, project: &str, repo_path: &std::path::Path) {
+    let branch = store
+        .query_json("SELECT branch FROM project WHERE name = $p", serde_json::json!({ "p": project }))
+        .await
+        .ok()
+        .and_then(|rows| rows.first().and_then(|r| r.get("branch")).and_then(|b| b.as_str()).map(String::from))
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "main".to_string());
+    let git = |args: &[&str]| {
+        std::process::Command::new("git").args(args).current_dir(repo_path).output()
+            .map(|o| o.status.success()).unwrap_or(false)
+    };
+    let _ = git(&["fetch", "origin", &branch]);
+    // Prefer the accumulating loop branch (swarm/auto) when it exists upstream,
+    // so serial edits to the same file build on each other instead of
+    // clobbering. Falls back to the project branch (and the lander creates
+    // swarm/auto from it on the first pass).
+    let _ = git(&["fetch", "origin", "swarm/auto"]);
+    let branch = if git(&["rev-parse", "--verify", "--quiet", "origin/swarm/auto"]) {
+        "swarm/auto".to_string()
+    } else {
+        branch
+    };
+    let origin_ref = format!("origin/{branch}");
+    if git(&["checkout", "-B", &branch, &origin_ref]) || git(&["checkout", &branch]) {
+        let _ = git(&["reset", "--hard", &origin_ref]);
+        let _ = git(&["clean", "-fd"]);
+        info!(project, %branch, "synced managed clone");
+    } else {
+        warn!(project, %branch, "could not checkout branch; using clone default");
+    }
+}
+
 /// Land a passed run's changes onto a `swarm/auto` branch in the source repo,
 /// via a throwaway git worktree so the live checkout is never touched. Commits
 /// accumulate on `swarm/auto` for human review/merge. Local-path repos only
 /// (remote URLs are left to PR mode). Best-effort; logs and moves on.
-fn land_to_branch(repo_url: &str, run_id: &str, goal: &str, files: &[(String, Vec<u8>)]) {
+fn land_to_branch(repo_url: &str, base_branch: &str, run_id: &str, goal: &str, files: &[(String, Vec<u8>)]) {
     if files.is_empty() || repo_url.contains("://") {
         return;
     }
@@ -69,7 +172,22 @@ fn land_to_branch(repo_url: &str, run_id: &str, goal: &str, files: &[(String, Ve
     ]);
     let _ = git(repo, &["worktree", "remove", "--force", &ld]);
     if committed {
-        info!(run_id, branch = "swarm/auto", files = files.len(), "landed changes (review + merge swarm/auto)");
+        info!(run_id, branch = "swarm/auto", files = files.len(), "landed changes");
+        // Push the loop branch + ensure a PR exists (best-effort; needs an
+        // 'origin' on a hosting service + gh auth — silently skipped otherwise).
+        if git(repo, &["push", "-u", "origin", "swarm/auto"]) {
+            let pr = std::process::Command::new("gh")
+                .args([
+                    "pr", "create", "--base", base_branch, "--head", "swarm/auto",
+                    "--title", "swarm: autonomous loop changes",
+                    "--body", "Quality-gated changes accumulated by the autopilot loop. Review before merge.",
+                ])
+                .current_dir(repo)
+                .output();
+            if matches!(pr, Ok(ref o) if o.status.success()) {
+                info!(run_id, base = base_branch, "opened swarm/auto PR");
+            } // else: PR already exists — the push updated it.
+        }
     }
 }
 
@@ -173,6 +291,7 @@ async fn handle_planning(
             return;
         }
     };
+    sync_repo_to_branch(store.as_ref(), project, &repo_path).await;
 
     // Discover files and plan
     let repo_files = discover_source_files(&repo_path);
@@ -398,6 +517,7 @@ async fn handle_execute(
         }
     };
     let repo_path = std::path::PathBuf::from(&repo_path_str);
+    sync_repo_to_branch(store.as_ref(), project, &repo_path).await;
 
     info!(task_id, repo = %repo_path.display(), "Repo ready, executing swarm");
 
@@ -644,19 +764,29 @@ async fn handle_execute(
             // Check if any agent produced work — either via edits or via tool-based file writes
             let any_work_done = tasks_passed > 0 || !result.merged_diff.as_ref().is_none_or(|d| d.is_empty());
 
-            // A run with zero successful sub-agents is always a failure
-            let status = if !any_work_done {
-                RunStatus::Failed
-            } else if result.quality_passed {
-                RunStatus::Passed
+            // Real quality gate: materialize the changed files + `cargo
+            // check/test` the changed crates. The runner's disk-mode
+            // quality_passed is a stub (always true), so the actual verification
+            // happens HERE before anything lands.
+            let gate = if any_work_done {
+                run_quality_gate(&repo_path, &result.modified_files)
             } else {
-                RunStatus::Failed
+                Err("no changes produced".to_string())
             };
+            if let Err(ref e) = gate {
+                warn!(task_id, reason = %e, "quality gate FAILED — not landing");
+            }
+            let status = if gate.is_ok() { RunStatus::Passed } else { RunStatus::Failed };
 
-            // Land verified changes onto swarm/auto for review/merge (the diff
-            // was only RECORDED before; this actually commits it on a branch).
+            // Land verified changes onto swarm/auto (+ push + PR) for review/merge.
             if matches!(status, RunStatus::Passed) {
-                land_to_branch(&repo_url, task_id, goal, &result.modified_files);
+                let base_branch = store
+                    .query_json("SELECT branch FROM project WHERE name = $p", serde_json::json!({ "p": project }))
+                    .await.ok()
+                    .and_then(|rows| rows.first().and_then(|r| r.get("branch")).and_then(|b| b.as_str()).map(String::from))
+                    .filter(|b| !b.is_empty())
+                    .unwrap_or_else(|| "main".to_string());
+                land_to_branch(&repo_url, &base_branch, task_id, goal, &result.modified_files);
             }
 
             info!(
@@ -690,9 +820,9 @@ async fn handle_execute(
 
             // Build run record with full tracking data
             let mut final_run = AgentRun::new(project, goal, "daemon", &model_str);
-            final_run.status = status;
+            final_run.status = status.clone();
             final_run.duration_ms = duration;
-            final_run.quality_gate_passed = Some(result.quality_passed && any_work_done);
+            final_run.quality_gate_passed = Some(matches!(status, RunStatus::Passed));
             final_run.diff = captured_diff;
             final_run.tokens_input = total_in;
             final_run.tokens_output = total_out;
