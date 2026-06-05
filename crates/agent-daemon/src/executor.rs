@@ -1017,6 +1017,7 @@ async fn handle_execute(
             .with_parent_run_id(task_id)
             .with_max_concurrent(config.resources.max_concurrent_agents)
             .with_planner_tier(config.tiers.orchestrator.clone())
+            .with_agent_tier(config.tiers.agent.clone())
             .with_depth(config.resources.max_sub_plan_depth)
             .with_embed_model(config.defaults.embed_model.clone())
             .with_hooks(Arc::clone(&hooks))
