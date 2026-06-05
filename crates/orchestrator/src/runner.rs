@@ -778,7 +778,7 @@ impl SwarmRunner {
                         };
                         let executor = crate::graph::GraphExecutor::new(
                             Arc::clone(&self.router), wt_path.clone(), crate_name, 3,
-                        ).with_model(exec_model).with_ollama(Arc::clone(&self.ollama));
+                        ).with_model(exec_model.clone()).with_ollama(Arc::clone(&self.ollama));
                         let graph_result = match tmpl.as_str() {
                             "edit" => executor.execute_edit(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
                             "create" => executor.execute_create(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
@@ -792,9 +792,17 @@ impl SwarmRunner {
                                 any_applied = true;
                                 let summary = format!("Graph:{tmpl} edits:{}", gr.edits.len());
                                 completed_summaries.insert(task.id.clone(), summary);
+                                // Stamp the tier model that ran this task so
+                                // model_used / the brain export attribute it
+                                // (the graph response loses .model on some paths
+                                // → was recorded "unknown", hiding escalation).
+                                let mut gr_response = gr.response;
+                                if gr_response.model.is_empty() {
+                                    gr_response.model = exec_model.clone();
+                                }
                                 let result = TaskRunResult {
                                     task, agent_result: Some(AgentResult {
-                                        edits: gr.edits, inference_response: gr.response,
+                                        edits: gr.edits, inference_response: gr_response,
                                         applied: true, skipped: false, run_id: None, attempt: 1,
                                         escalated_from: None, tool_calls: vec![],
                                     }), error: None,
