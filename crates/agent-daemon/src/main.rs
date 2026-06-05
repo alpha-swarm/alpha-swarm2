@@ -13,6 +13,7 @@ mod db_bridge;
 mod http_bridge;
 mod autopilot;
 mod github_sync;
+mod knowledge_sync;
 pub mod resources;
 pub mod provider_client;
 
@@ -319,6 +320,18 @@ async fn main() -> Result<()> {
     // GitHub Issues ticketing: ingest labelled issues → backlog, sync run
     // status back to issues (labels + comments). No-op unless [github] enabled.
     github_sync::spawn(config.github.clone(), Arc::clone(&store));
+
+    // Knowledge carry-over: import the learned brain from .swarm on a fresh DB,
+    // periodically export it back (+ optional git commit). Repo = daemon CWD.
+    if let Ok(repo) = std::env::current_dir() {
+        knowledge_sync::spawn(
+            config.knowledge.clone(),
+            Arc::clone(&store),
+            Arc::clone(&ollama),
+            config.defaults.embed_model.clone(),
+            repo,
+        );
+    }
 
     // Start resource heartbeat
     {
