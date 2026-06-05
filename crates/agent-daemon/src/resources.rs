@@ -130,6 +130,10 @@ async fn check_ollama(name: &str, ollama_url: &str) -> ResourceSnapshot {
 /// the configured maximum RAM usage percentage (`max_ram_percent`).
 const PER_RUN_RAM_PERCENT: f64 = 25.0;
 
+fn calculate_per_run_headroom_slot(headroom: f64) -> usize {
+    ((headroom / PER_RUN_RAM_PERCENT).floor() as usize).clamp(1, usize::MAX)
+}
+
 /// Calculates the effective number of concurrent run slots based on live RAM headroom.
 ///
 /// This function adapts the number of possible concurrent runs by considering
@@ -153,8 +157,7 @@ pub fn effective_slots(config: &ResourceConfig) -> usize {
     }
     let snap = check_local("local");
     let headroom = (config.max_ram_percent - snap.ram_percent).max(0.0);
-    let fit = (headroom / PER_RUN_RAM_PERCENT).floor() as usize;
-    let slots = fit.clamp(1, max);
+    let slots = calculate_per_run_headroom_slot(headroom).clamp(1, max);
     if slots < max {
         warn!(
             ram = format!("{:.1}%", snap.ram_percent),
