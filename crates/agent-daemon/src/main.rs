@@ -12,6 +12,7 @@ mod hooks;
 mod db_bridge;
 mod http_bridge;
 mod autopilot;
+mod github_sync;
 pub mod resources;
 pub mod provider_client;
 
@@ -314,6 +315,10 @@ async fn main() -> Result<()> {
     // Autonomous operation (opt-in; OFF by default). Drains the autopilot_goal
     // backlog when idle + under the daily cap.
     autopilot::spawn(config.autopilot.clone(), Arc::clone(&store), scheduler.clone(), config.resources.max_concurrent_runs);
+
+    // GitHub Issues ticketing: ingest labelled issues → backlog, sync run
+    // status back to issues (labels + comments). No-op unless [github] enabled.
+    github_sync::spawn(config.github.clone(), Arc::clone(&store));
 
     // Start resource heartbeat
     {

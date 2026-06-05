@@ -152,6 +152,26 @@ auto_approve = true
 # `nats req swarm.db.autopilot.queue '{"project":"...","goal":"..."}'`.
 continuous = false
 
+# --- GitHub Issues ticketing (OFF by default) ---
+# When enabled, the daemon treats GitHub Issues as the 1:1 ticket queue:
+#   * INGEST: open issues labelled `trigger_label` → autopilot_goal backlog
+#     (tagged external_id "owner/repo#N"); the issue gets a `swarm:queued`
+#     label + a comment.
+#   * RECONCILE: each run's status is synced back to its issue as a `swarm:*`
+#     label + comment (running / done+PR-link / failed). A passing run opens a
+#     per-issue PR (`Fixes #N`) so merging auto-closes the issue.
+# GitHub's own notifications then ping you on every state change (no custom
+# notifier needed). Auth is ambient `gh` (must be `gh auth login`-ed). Polling,
+# not webhooks. Label scheme: humans apply `swarm` to opt an issue in; the
+# daemon manages `swarm:queued|running|done|failed|skipped`.
+[github]
+enabled = false
+repo = ""                  # owner/repo; empty → infer from the repo's origin remote
+trigger_label = "swarm"    # only issues with this label become tickets
+poll_secs = 60
+base_branch = ""           # PR base; empty → the project's branch, else "main"
+project = "default"        # backlog project ingested issues feed
+
 # Embedded Wassette WASM tool host. Tools are sandboxed WASM components run
 # in-process (deny-by-default capabilities). Each [[wassette.tools]] entry is
 # loaded on startup and granted ONLY the listed capabilities. Build a tool

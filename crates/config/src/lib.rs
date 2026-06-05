@@ -30,6 +30,9 @@ pub struct SwarmConfig {
     /// Inference providers (multiple Ollama hosts, etc.)
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+    /// GitHub Issues ticketing integration (OFF by default).
+    #[serde(default)]
+    pub github: GithubConfig,
 }
 
 /// Default severity at/above which a security finding fails the run.
@@ -131,6 +134,47 @@ impl Default for AutopilotConfig {
             max_runs_per_day: DEFAULT_AUTOPILOT_MAX_RUNS_PER_DAY,
             auto_approve: true,
             continuous: false,
+        }
+    }
+}
+
+/// Default label that marks a GitHub issue as a swarm ticket.
+pub const DEFAULT_GITHUB_TRIGGER_LABEL: &str = "swarm";
+/// Default GitHub issue/run reconcile poll interval.
+pub const DEFAULT_GITHUB_POLL_SECS: u64 = 60;
+
+/// GitHub Issues as the 1:1 ticketing backend. OFF by default. When enabled,
+/// open issues carrying `trigger_label` are ingested as autopilot goals, and
+/// each run's status is synced back to its issue (labels + comments); a passing
+/// run opens a per-issue PR (`Fixes #N`). Auth is ambient `gh` (the daemon
+/// already shells `gh`); the repo is inferred from the project's origin remote
+/// when `repo` is empty.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GithubConfig {
+    /// Master switch. Default false.
+    pub enabled: bool,
+    /// `owner/repo`. Empty → infer from the project's git origin remote.
+    pub repo: String,
+    /// Only issues with this label become tickets.
+    pub trigger_label: String,
+    /// Issue↔run reconcile poll interval (seconds).
+    pub poll_secs: u64,
+    /// PR base branch. Empty → the project's branch, else "main".
+    pub base_branch: String,
+    /// Project whose backlog ingested issues feed.
+    pub project: String,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            repo: String::new(),
+            trigger_label: DEFAULT_GITHUB_TRIGGER_LABEL.to_string(),
+            poll_secs: DEFAULT_GITHUB_POLL_SECS,
+            base_branch: String::new(),
+            project: "default".to_string(),
         }
     }
 }
