@@ -34,6 +34,10 @@ const STRIPPED_PREFIXES: &[&str] = &["USE ", "DEFINE TABLE"];
 /// Leading verbs allowed on /sql statements (same policy as the NATS bridge).
 const ALLOWED_VERBS: &[&str] = &["SELECT", "CREATE", "UPDATE", "UPSERT", "DELETE", "RELATE", "INSERT"];
 /// Built Leptos dashboard bundle (trunk dist), relative to the daemon workdir.
+///
+/// This constant holds the directory path where the Leptos dashboard bundle is located.
+/// The dashboard is served by the HTTP shim for WASM components, allowing access to the
+/// built web application.
 const DASHBOARD_DIR: &str = "dashboard-leptos/dist";
 
 #[derive(Clone)]

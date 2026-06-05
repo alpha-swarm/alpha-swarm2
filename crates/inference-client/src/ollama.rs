@@ -39,6 +39,7 @@ pub const DEFAULT_KEEP_ALIVE: &str = "-1";
 /// collapses similar prompts onto a shared window so the model stays resident.
 const NUM_CTX_FLOOR: u32 = 4096;
 const NUM_CTX_OUTPUT_HEADROOM: u32 = 4096;
+/// Number of characters per token used for estimating the number of context tokens.
 const NUM_CTX_CHARS_PER_TOKEN: usize = 3;
 
 /// Size `num_ctx` from the prompt's char length, clamped to `[NUM_CTX_FLOOR,

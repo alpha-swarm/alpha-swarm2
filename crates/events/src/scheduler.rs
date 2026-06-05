@@ -13,6 +13,7 @@ const RESOURCE_TTL: Duration = Duration::from_secs(60);
 /// KV bucket names
 const TASKS_BUCKET: &str = "swarm-tasks";
 const LEASES_BUCKET: &str = "swarm-leases";
+/// The bucket name for storing resource snapshots.
 const RESOURCES_BUCKET: &str = "swarm-resources";
 /// Key for the global execution lock (only 1 goal runs across all daemons).
 const EXECUTION_LOCK_KEY: &str = "goal-execution-lock";
@@ -165,7 +166,16 @@ impl NatsScheduler {
     }
 
     /// Publish this daemon's resource snapshot.
-    pub async fn publish_resources(&self, res: &HostResources) -> Result<()> {
+    /// Publishes the resources of a host to the KV store.
+///
+/// # Arguments
+///
+/// * `res` - A reference to the `HostResources` struct containing the resource information.
+///
+/// # Returns
+///
+/// A `Result` indicating success or failure.
+pub async fn publish_resources(&self, res: &HostResources) -> Result<()> {
         let key = format!("host.{}", sanitize_key(&self.daemon_id));
         let value = serde_json::to_vec(res)?;
         self.resources.put(&key, value.into()).await
@@ -265,7 +275,19 @@ impl NatsScheduler {
     /// Slots are independent KV keys with atomic `create()`, so two pollers (or
     /// daemons) never grab the same slot — the cap on concurrent executions.
     /// Backed by the leases bucket (TTL), so a dead daemon's slot auto-frees.
-    pub async fn try_acquire_execution_slot(&self, run_id: &str, slots: usize) -> Result<Option<usize>> {
+    /// Attempts to acquire an execution slot for the given run ID.
+///
+/// # Arguments
+///
+/// * `run_id` - A unique identifier for the run attempting to acquire a slot.
+/// * `slots` - The number of slots requested.
+///
+/// # Returns
+///
+/// * `Ok(Some(slot))` if a slot is successfully acquired, with the slot index.
+/// * `Ok(None)` if no slots are available.
+/// * `Err(e)` if an error occurs during the acquisition process.
+pub async fn try_acquire_execution_slot(&self, run_id: &str, slots: usize) -> Result<Option<usize>> {
         for i in 0..slots.max(1) {
             let key = format!("{EXECUTION_LOCK_KEY}.slot-{i}");
             let value = serde_json::to_vec(&serde_json::json!({
