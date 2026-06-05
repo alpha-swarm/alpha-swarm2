@@ -307,6 +307,10 @@ pub async fn try_acquire_execution_slot(&self, run_id: &str, slots: usize) -> Re
 }
 
 /// Sanitize a key for NATS KV — replace colons with dots, remove invalid chars.
+/// Makes a string safe as a NATS KV key.
+///
+/// This function ensures that the input string can be used as a valid key in a NATS KeyValue (KV)
+/// store by replacing any characters that are not allowed in KV keys with underscores (`_`).
 fn sanitize_key(s: &str) -> String {
     s.chars().map(|c| match c {
         ':' => '.',
