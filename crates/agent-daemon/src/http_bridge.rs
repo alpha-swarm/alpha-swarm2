@@ -29,6 +29,8 @@ use swarm_workflow::WorkflowEngine;
 const STRIPPED_PREFIXES: &[&str] = &["USE ", "DEFINE TABLE"];
 /// Leading verbs allowed on /sql statements (same policy as the NATS bridge).
 const ALLOWED_VERBS: &[&str] = &["SELECT", "CREATE", "UPDATE", "UPSERT", "DELETE", "RELATE", "INSERT"];
+/// Built Leptos dashboard bundle (trunk dist), relative to the daemon workdir.
+const DASHBOARD_DIR: &str = "dashboard-leptos/dist";
 
 #[derive(Clone)]
 struct Shared {
@@ -43,16 +45,24 @@ pub async fn serve(addr: String, store: Arc<dyn KnowledgeBackend>, engine: Arc<W
         .route("/health", get(|| async { "ok" }))
         .route("/sql", post(handle_sql))
         .route("/workflow/{op}", post(handle_workflow))
+        // Serve the Leptos dashboard bundle for any non-API path (so the daemon
+        // is the single endpoint: API + UI on the same origin → no CORS).
+        .fallback_service(tower_http::services::ServeDir::new(DASHBOARD_DIR))
         .with_state(shared);
 
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
+    // Bind all interfaces on the configured port so the dashboard + /sql are
+    // reachable cross-machine (e.g. http://picur:8001/), not just localhost.
+    // Exposes /sql on the LAN — intended for the trusted local lattice.
+    let port = addr.rsplit(':').next().unwrap_or("8001");
+    let bind = format!("0.0.0.0:{port}");
+    let listener = match tokio::net::TcpListener::bind(&bind).await {
         Ok(l) => l,
         Err(e) => {
-            warn!(addr, error = %e, "HTTP bridge bind failed — shim unavailable");
+            warn!(bind, error = %e, "HTTP bridge bind failed — shim unavailable");
             return;
         }
     };
-    info!(addr, "HTTP bridge listening (component /sql shim)");
+    info!(bind, "HTTP bridge listening (API /sql + Leptos dashboard)");
     if let Err(e) = axum::serve(listener, app).await {
         warn!(error = %e, "HTTP bridge server ended");
     }

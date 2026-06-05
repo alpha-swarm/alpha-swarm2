@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["dashboard"]
+exclude = ["dashboard", "dashboard-leptos"]
 members = [
     "crates/config",
     "crates/inference-client",
