@@ -132,15 +132,7 @@ impl NatsScheduler {
     }
 
     /// Renew a lease (heartbeat — prevents expiry during long tasks).
-    /// Renews the lease for a given run ID.
-///
-/// This function updates the lease entry in the KV store to extend its expiration time,
-/// ensuring that the daemon continues to have exclusive access to the task.
-/// Renews the lease for a given run ID.
-///
-/// This function updates the lease entry in the KV store to extend its expiration time,
-/// ensuring that the daemon continues to have exclusive access to the task.
-pub async fn renew_lease(&self, run_id: &str) -> Result<()> {
+    pub async fn renew_lease(&self, run_id: &str) -> Result<()> {
         let key = format!("lease.{}", sanitize_key(run_id));
         let lease = LeaseEntry {
             daemon_id: self.daemon_id.clone(),
@@ -154,7 +146,16 @@ pub async fn renew_lease(&self, run_id: &str) -> Result<()> {
     }
 
     /// Publish this daemon's resource snapshot.
-    pub async fn publish_resources(&self, res: &HostResources) -> Result<()> {
+    /// Publishes the resources of a host to the KV store.
+///
+/// # Arguments
+///
+/// * `res` - A reference to the `HostResources` struct containing the resource information.
+///
+/// # Returns
+///
+/// A `Result` indicating success or failure.
+pub async fn publish_resources(&self, res: &HostResources) -> Result<()> {
         let key = format!("host.{}", sanitize_key(&self.daemon_id));
         let value = serde_json::to_vec(res)?;
         self.resources.put(&key, value.into()).await
