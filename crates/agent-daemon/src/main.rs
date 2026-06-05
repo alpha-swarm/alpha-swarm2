@@ -143,13 +143,17 @@ async fn main() -> Result<()> {
     // after an Ollama restart. Warms every distinct chat tier + the embed model.
     {
         let ollama_warm = Arc::clone(&ollama);
-        // Each tier PINS its own model (preferred_model = tier.model in
-        // agent.rs / planner.rs), so a run touches all of them — keep every
-        // distinct tier model co-resident, not just the router's fallback pick.
-        // (Set OLLAMA_MAX_LOADED_MODELS >= number of distinct models on the host.)
+        // Warm only the ALWAYS-ON fast-path tiers (planner + worker). The agent
+        // tier is the on-demand ESCALATION model (e.g. 32b for refactors): if it
+        // differs from the fast model and the host's OLLAMA_MAX_LOADED_MODELS is
+        // small (e.g. 2), warming it too means the warmer ping-pong-evicts the
+        // fast model + the escalation model every cycle (thrash → cold-load
+        // stalls). Let escalation load 32b on demand instead; the fast 14b path
+        // stays stably resident. For smooth escalation set
+        // OLLAMA_MAX_LOADED_MODELS >= 3 (14b + 32b + embed) and add the agent
+        // model back here.
         let mut chat_models = vec![
             config.tiers.orchestrator.model.clone(),
-            config.tiers.agent.model.clone(),
             config.tiers.worker.model.clone(),
         ];
         chat_models.sort();
