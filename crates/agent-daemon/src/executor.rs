@@ -438,11 +438,15 @@ async fn sync_repo_to_branch(store: &dyn knowledge_base::KnowledgeBackend, proje
     }
 }
 
-/// Land a passed run's changes onto a `swarm/auto` branch in the source repo,
-/// via a throwaway git worktree so the live checkout is never touched. Commits
-/// accumulate on `swarm/auto` for human review/merge. Local-path repos only
-/// (remote URLs are left to PR mode). Best-effort; logs and moves on.
-fn land_to_branch(repo_url: &str, base_branch: &str, run_id: &str, goal: &str, files: &[(String, Vec<u8>)]) {
+/// Land a passed run's changes in the source repo via a throwaway git worktree
+/// (the live checkout is never touched). Two modes:
+///   - `issue = Some(n)` (GitHub ticket) → a FRESH per-issue branch
+///     `swarm/issue-n` reset to base, with a PR whose body says `Fixes #n` so
+///     merging auto-closes the issue (true 1:1).
+///   - `issue = None` (manual goal) → accumulate on the shared `swarm/auto`
+///     branch + one rolling PR.
+/// Local-path repos only (remote URLs left to PR mode). Best-effort; logs on.
+fn land_to_branch(repo_url: &str, base_branch: &str, run_id: &str, goal: &str, files: &[(String, Vec<u8>)], issue: Option<i64>) {
     if files.is_empty() || repo_url.contains("://") {
         return;
     }
@@ -459,11 +463,20 @@ fn land_to_branch(repo_url: &str, base_branch: &str, run_id: &str, goal: &str, f
             .map(|o| o.status.success()).unwrap_or(false)
     };
     let _ = git(repo, &["worktree", "prune"]);
-    // Reuse the existing swarm/auto branch (accumulate), else create from HEAD.
-    if !git(repo, &["worktree", "add", "--force", &ld, "swarm/auto"])
-        && !git(repo, &["worktree", "add", "--force", "-b", "swarm/auto", &ld, "HEAD"])
-    {
-        warn!(run_id, "land: could not create swarm/auto worktree");
+
+    let branch = match issue {
+        Some(n) => format!("swarm/issue-{n}"),
+        None => "swarm/auto".to_string(),
+    };
+    let added = match issue {
+        // Per-issue: fresh branch reset to base each run (one ticket = one PR).
+        Some(_) => git(repo, &["worktree", "add", "--force", "-B", &branch, &ld, "HEAD"]),
+        // Aggregate: reuse swarm/auto (accumulate), else create from HEAD.
+        None => git(repo, &["worktree", "add", "--force", &ld, &branch])
+            || git(repo, &["worktree", "add", "--force", "-b", &branch, &ld, "HEAD"]),
+    };
+    if !added {
+        warn!(run_id, %branch, "land: could not create worktree");
         return;
     }
     for (path, content) in files {
@@ -474,30 +487,48 @@ fn land_to_branch(repo_url: &str, base_branch: &str, run_id: &str, goal: &str, f
         let _ = std::fs::write(&full, content);
     }
     let _ = git(&land_dir, &["add", "-A"]);
-    let msg = format!("swarm: {} [{}]", goal.chars().take(60).collect::<String>(), run_id);
+    let goal_short: String = goal.chars().take(60).collect();
+    let msg = match issue {
+        Some(n) => format!("swarm: {goal_short} (#{n}) [{run_id}]"),
+        None => format!("swarm: {goal_short} [{run_id}]"),
+    };
     let committed = git(&land_dir, &[
         "-c", "user.email=swarm@local", "-c", "user.name=alpha-swarm",
         "commit", "-m", &msg, "--no-verify",
     ]);
     let _ = git(repo, &["worktree", "remove", "--force", &ld]);
-    if committed {
-        info!(run_id, branch = "swarm/auto", files = files.len(), "landed changes");
-        // Push the loop branch + ensure a PR exists (best-effort; needs an
-        // 'origin' on a hosting service + gh auth — silently skipped otherwise).
-        if git(repo, &["push", "-u", "origin", "swarm/auto"]) {
-            let pr = std::process::Command::new("gh")
-                .args([
-                    "pr", "create", "--base", base_branch, "--head", "swarm/auto",
-                    "--title", "swarm: autonomous loop changes",
-                    "--body", "Quality-gated changes accumulated by the autopilot loop. Review before merge.",
-                ])
-                .current_dir(repo)
-                .output();
-            if matches!(pr, Ok(ref o) if o.status.success()) {
-                info!(run_id, base = base_branch, "opened swarm/auto PR");
-            } // else: PR already exists — the push updated it.
-        }
+    if !committed {
+        return;
     }
+    info!(run_id, %branch, files = files.len(), "landed changes");
+    // Push + ensure a PR exists (needs an 'origin' on a hosting service + gh
+    // auth — silently skipped otherwise). Per-issue branches are reset each run,
+    // so force-with-lease; the aggregate branch accumulates with a plain push.
+    let pushed = match issue {
+        Some(_) => git(repo, &["push", "--force-with-lease", "-u", "origin", &branch]),
+        None => git(repo, &["push", "-u", "origin", &branch]),
+    };
+    if !pushed {
+        return;
+    }
+    let (title, body) = match issue {
+        Some(n) => (
+            format!("swarm: {goal_short}"),
+            format!("Fixes #{n}\n\n{}\n\n🤖 Autonomous change by alpha-swarm — quality-gated (cargo check/test). Review before merge.",
+                goal.chars().take(500).collect::<String>()),
+        ),
+        None => (
+            "swarm: autonomous loop changes".to_string(),
+            "Quality-gated changes accumulated by the autopilot loop. Review before merge.".to_string(),
+        ),
+    };
+    let pr = std::process::Command::new("gh")
+        .args(["pr", "create", "--base", base_branch, "--head", &branch, "--title", &title, "--body", &body])
+        .current_dir(repo)
+        .output();
+    if matches!(pr, Ok(ref o) if o.status.success()) {
+        info!(run_id, base = base_branch, %branch, "opened PR");
+    } // else: PR already exists — the push updated it.
 }
 
 fn discover_source_files(repo_path: &std::path::Path) -> Vec<String> {
@@ -1163,7 +1194,15 @@ async fn handle_execute(
                     .and_then(|rows| rows.first().and_then(|r| r.get("branch")).and_then(|b| b.as_str()).map(String::from))
                     .filter(|b| !b.is_empty())
                     .unwrap_or_else(|| "main".to_string());
-                land_to_branch(&repo_url, &base_branch, task_id, goal, &result.modified_files);
+                // If this run came from a GitHub ticket ("owner/repo#N"), land on
+                // a per-issue branch + PR ("Fixes #N"); else accumulate on swarm/auto.
+                let issue = store
+                    .query_json(&format!("SELECT external_id FROM {task_id}"), serde_json::Value::Null)
+                    .await.ok()
+                    .and_then(|rows| rows.first().and_then(|r| r.get("external_id")).and_then(|v| v.as_str()).map(String::from))
+                    .filter(|s| !s.is_empty())
+                    .and_then(|ext| ext.rsplit('#').next().and_then(|n| n.parse::<i64>().ok()));
+                land_to_branch(&repo_url, &base_branch, task_id, goal, &result.modified_files, issue);
             }
 
             // Learned routing: attribute this run's gate outcome to the tier that

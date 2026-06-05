@@ -42,6 +42,11 @@ pub struct AgentRun {
     /// Phase timing breakdown (embedding_ms, rag_ms, planning_ms, agent_ms, qg_ms).
     #[serde(default)]
     pub phase_timings: Option<PhaseTimingRecord>,
+    /// External ticket this run originated from, e.g. "owner/repo#42" (GitHub
+    /// issue). None for dashboard/manually-submitted runs. Carried from the
+    /// autopilot_goal so status can be synced back to the issue.
+    #[serde(default)]
+    pub external_id: Option<String>,
 }
 
 /// Timing breakdown for each phase of a swarm run.
@@ -223,6 +228,7 @@ impl AgentRun {
             progress_message: None,
             tool_calls: Vec::new(),
             phase_timings: None,
+            external_id: None,
         }
     }
 }

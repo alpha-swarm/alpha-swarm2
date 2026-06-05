@@ -116,13 +116,16 @@ async fn tick(
     // 4. Drain the oldest queued backlog goal.
     // NOTE: surrealdb requires ORDER BY fields to appear in the projection.
     let rows = store.query_json(
-        "SELECT id, project, goal, created_at FROM autopilot_goal WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1",
+        "SELECT id, project, goal, external_id, created_at FROM autopilot_goal WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1",
         serde_json::Value::Null,
     ).await?;
     let Some(row) = rows.into_iter().next() else { return Ok(()) };
     let goal_id = row.get("id").map(|v| v.to_string().trim_matches('"').to_string()).unwrap_or_default();
     let project = row.get("project").and_then(|v| v.as_str()).unwrap_or("default").to_string();
     let goal = row.get("goal").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // Carry the source ticket (e.g. GitHub "owner/repo#42") onto the run so the
+    // github_sync loop can reconcile its status back to the issue.
+    let external_id = row.get("external_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     if goal.is_empty() {
         return Ok(());
     }
@@ -132,14 +135,20 @@ async fn tick(
         "UPDATE {goal_id} SET status = 'started', started_at = time::now()"
     )).await?;
 
+    let ext_clause = if external_id.is_empty() {
+        String::new()
+    } else {
+        format!(", external_id = '{}'", external_id.replace('\'', ""))
+    };
     let create = format!(
         "CREATE agent_run SET project = '{}', task_description = '{}', status = 'planning', \
              agent_id = '{}', source = '{}', model_used = 'auto', created_at = time::now(), \
-             files_modified = [], tokens_input = 0, tokens_output = 0, duration_ms = 0",
+             files_modified = [], tokens_input = 0, tokens_output = 0, duration_ms = 0{}",
         project.replace('\'', ""),
         goal.replace('\'', ""),
         AUTOPILOT_AGENT_ID,
         AUTOPILOT_SOURCE,
+        ext_clause,
     );
     store.db_query_raw(&create).await?;
     info!(project = %project, goal = %goal, continuous = cfg.continuous, "autopilot started autonomous goal");
