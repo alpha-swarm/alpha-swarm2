@@ -175,6 +175,20 @@ poll_secs = 60
 base_branch = ""           # PR base; empty → the project's branch, else "main"
 project = "default"        # backlog project ingested issues feed
 
+# --- Knowledge carry-over (export OFF by default) ---
+# Export the learned brain (SONA patterns/errors/trajectories + routing stats +
+# run transcripts) to human-readable, git-friendly files under <repo>/.swarm so
+# it travels with the repo and is reviewable. A fresh DB re-imports + re-embeds
+# it on startup. Embeddings are derived → never written to git. auto_commit
+# snapshots .swarm onto commit_branch via a throwaway worktree (never touches
+# the live checkout) — review/merge that branch to land the brain in main.
+[knowledge]
+export = false
+import_on_start = true
+export_interval_secs = 900
+auto_commit = false
+commit_branch = "swarm/knowledge"
+
 # Embedded Wassette WASM tool host. Tools are sandboxed WASM components run
 # in-process (deny-by-default capabilities). Each [[wassette.tools]] entry is
 # loaded on startup and granted ONLY the listed capabilities. Build a tool

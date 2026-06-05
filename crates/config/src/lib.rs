@@ -33,6 +33,10 @@ pub struct SwarmConfig {
     /// GitHub Issues ticketing integration (OFF by default).
     #[serde(default)]
     pub github: GithubConfig,
+    /// Knowledge carry-over: export the learned brain to git-friendly files,
+    /// re-import (re-embedding) on a fresh DB.
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
 }
 
 /// Default severity at/above which a security finding fails the run.
@@ -175,6 +179,43 @@ impl Default for GithubConfig {
             poll_secs: DEFAULT_GITHUB_POLL_SECS,
             base_branch: String::new(),
             project: "default".to_string(),
+        }
+    }
+}
+
+/// Default knowledge-export interval.
+pub const DEFAULT_KNOWLEDGE_EXPORT_SECS: u64 = 900;
+/// Default branch the knowledge snapshot is committed to.
+pub const DEFAULT_KNOWLEDGE_BRANCH: &str = "swarm/knowledge";
+
+/// Knowledge carry-over. The learned brain (SONA memory + routing stats + run
+/// transcripts) is exported to human-readable, git-friendly files under
+/// `<repo>/.swarm` so it travels with the repo and is reviewable; a fresh DB
+/// re-imports + re-embeds it. Embeddings are derived → never written to git.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct KnowledgeConfig {
+    /// Periodically write `.swarm/` snapshots from the live DB.
+    pub export: bool,
+    /// On startup, seed an EMPTY memory table from `.swarm/` (re-embedding).
+    pub import_on_start: bool,
+    /// How often to export.
+    pub export_interval_secs: u64,
+    /// Commit + push `.swarm/` to `commit_branch` after each export (via a
+    /// throwaway worktree — the live checkout is never touched).
+    pub auto_commit: bool,
+    /// Branch the snapshot is committed to (kept off `main`; review/merge it).
+    pub commit_branch: String,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            export: false,
+            import_on_start: true,
+            export_interval_secs: DEFAULT_KNOWLEDGE_EXPORT_SECS,
+            auto_commit: false,
+            commit_branch: DEFAULT_KNOWLEDGE_BRANCH.to_string(),
         }
     }
 }
