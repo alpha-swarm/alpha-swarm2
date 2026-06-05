@@ -40,12 +40,27 @@ const MEMORY_DECAY_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// 5-minute default idle-unload window; with keep_alive=-1 this is a safety net
 /// (also re-warms after an Ollama restart).
 const WARM_INTERVAL: Duration = Duration::from_secs(240);
+/// Shared, warm cargo target dir for the AGENT's quality tools
+/// (run_check/run_build). Each per-run workspace otherwise compiles from a COLD
+/// target (~100s/check — the loop's real bottleneck); a process-wide shared dir
+/// makes those checks incremental (~seconds after the first build). The gate
+/// keeps its own GATE_TARGET_DIR, so the two never contend on cargo's lock.
+const AGENT_TARGET_DIR: &str = "/tmp/alpha-swarm/agent-target";
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter("info,agent_core=info,swarm_orchestrator=info")
         .init();
+
+    // Warm, shared cargo target for agent quality tools (run_check/run_build) so
+    // mid-iteration `cargo check`/`clippy` are incremental, not cold full builds.
+    // Respect an explicit override; set before any task/thread is spawned.
+    if std::env::var_os("CARGO_TARGET_DIR").is_none() {
+        let _ = std::fs::create_dir_all(AGENT_TARGET_DIR);
+        unsafe { std::env::set_var("CARGO_TARGET_DIR", AGENT_TARGET_DIR); }
+        info!(dir = AGENT_TARGET_DIR, "Warm shared cargo target dir for agent checks");
+    }
 
     let config = SwarmConfig::load();
     let daemon_id = format!("daemon-{}-{}", hostname(), &uuid::Uuid::new_v4().to_string()[..8]);
