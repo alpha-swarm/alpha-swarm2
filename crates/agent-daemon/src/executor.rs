@@ -1114,7 +1114,13 @@ async fn handle_execute(
             let tasks_passed = result.results.iter().filter(|r| r.agent_result.as_ref().is_some_and(|a| a.applied)).count();
             let tasks_failed = result.results.iter().filter(|r| r.error.is_some()).count();
             // Check if any agent produced work — either via edits or via tool-based file writes
-            let any_work_done = tasks_passed > 0 || !result.merged_diff.as_ref().is_none_or(|d| d.is_empty());
+            // A run "did work" only if it produced REAL captured file changes
+            // (git diff in the workspace, cargo's own Cargo.lock churn stripped
+            // upstream). The agent CLAIMING tasks passed (tasks_passed > 0) is
+            // not enough: a failed-to-apply edit reports success but leaves no
+            // diff, and gating an empty change set trivially "passes" because the
+            // unchanged baseline still compiles. Require an actual diff.
+            let any_work_done = !result.modified_files.is_empty();
 
             // Real quality gate: materialize the changed files + `cargo
             // check/test` the changed crates. The runner's disk-mode
@@ -1251,9 +1257,12 @@ async fn handle_execute(
                 final_run.response_text = Some(responses.join("\n---\n"));
             }
 
-            // Collect files modified from sub-agents
-            final_run.files_modified = result.results.iter()
-                .flat_map(|r| r.task.files.iter().cloned())
+            // Files ACTUALLY modified (real git-diff capture, Cargo.lock churn
+            // stripped) — NOT r.task.files, which is the planner's CLAIM and is
+            // recorded even when the edit never applied. Keeps files_modified
+            // consistent with `diff` so reviews + co-edit stats reflect reality.
+            final_run.files_modified = result.modified_files.iter()
+                .map(|(p, _)| p.clone())
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
                 .collect();

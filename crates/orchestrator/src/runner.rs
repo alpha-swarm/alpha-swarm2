@@ -925,7 +925,18 @@ impl SwarmRunner {
                             .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(String::from).collect())
                             .unwrap_or_default();
 
+                        // A Cargo.lock delta with no matching Cargo.toml edit is
+                        // just cargo re-resolving deps during the run's checks —
+                        // the agent never touched it. Capturing it pollutes the
+                        // diff and lands unrelated lock churn in swarm/auto, and
+                        // can mask a no-op run as "changed". Drop that churn (and
+                        // any target/ artifacts); keep Cargo.lock only when a
+                        // Cargo.toml also changed (a real dependency edit).
+                        let toml_changed = changed.iter().chain(new_files.iter())
+                            .any(|f| f.ends_with("Cargo.toml"));
                         for file_path in changed.iter().chain(new_files.iter()) {
+                            if file_path.starts_with("target/") { continue; }
+                            if file_path.ends_with("Cargo.lock") && !toml_changed { continue; }
                             let orig = std::fs::read_to_string(self.repo_path.join(file_path)).unwrap_or_default();
                             virt_ws.load_file(&mut blob_store, file_path, &orig);
                             if let Ok(modified) = std::fs::read_to_string(ws.join(file_path)) {
