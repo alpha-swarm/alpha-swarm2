@@ -81,6 +81,7 @@ fn App() -> impl IntoView {
         </header>
         <main>
             <SubmitGoal set_tick=set_tick/>
+            <Queue tick=tick/>
             <Runs tick=tick/>
             <div class="grid2">
                 <Routing tick=tick/>
@@ -250,6 +251,36 @@ fn SubmitGoal(set_tick: WriteSignal<u32>) -> impl IntoView {
             <div class="row" style="margin-top:10px">
                 <button on:click=submit>"Queue goal"</button>
             </div>
+        </div>
+    }
+}
+
+#[component]
+fn Queue(tick: ReadSignal<u32>) -> impl IntoView {
+    let q = create_local_resource(
+        move || tick.get(),
+        |_| async move {
+            sql("SELECT goal, project, created_at FROM autopilot_goal WHERE status = 'queued' ORDER BY created_at ASC LIMIT 25".into()).await
+        },
+    );
+    view! {
+        <div class="panel">
+            <h2>"Queue — submitted, awaiting a run slot"</h2>
+            {move || {
+                let rows = q.get().unwrap_or_default();
+                if rows.is_empty() {
+                    view! { <p class="muted">"Empty. Submitted goals land here, then move to Runs when the loop picks them up."</p> }.into_view()
+                } else {
+                    view! {
+                        <ul>
+                            {rows.into_iter().map(|r| view! {
+                                <li>{truncate(&field(&r, "goal"), 110)}
+                                    <span class="muted">" — "{short_time(&field(&r, "created_at"))}</span></li>
+                            }).collect_view()}
+                        </ul>
+                    }.into_view()
+                }
+            }}
         </div>
     }
 }
