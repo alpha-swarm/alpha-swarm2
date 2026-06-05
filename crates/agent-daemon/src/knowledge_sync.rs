@@ -2,7 +2,15 @@
 /// # safe function
 ///
 /// This function performs a safe operation.
-fn safe() {
-    // Function implementation goes here
+
+struct Helper {
+    /// A helper field used for synchronization.
+    helper: String,
+}
+
+impl Helper {
+    fn new(helper: String) -> Self {
+        Helper { helper }
+    }
 }
 ```
