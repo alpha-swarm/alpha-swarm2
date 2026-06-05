@@ -342,7 +342,9 @@ async fn main() -> Result<()> {
     loop {
         tokio::time::sleep(FALLBACK_POLL_INTERVAL).await;
         if !resources::can_schedule(&config.resources) { continue; }
-        let max_runs = config.resources.max_concurrent_runs;
+        // Effective cap adapts to live memory pressure when dynamic_slots is on;
+        // otherwise the static max_concurrent_runs.
+        let max_runs = resources::effective_slots(&config.resources);
 
         // Fill free execution slots with pending tasks (planning OR execution).
         // Every run gets an isolated workspace + its own gate, so concurrent runs
@@ -413,7 +415,7 @@ async fn process_pending(
                         info!(id = %id, "Already claimed, deferring");
                         return;
                     }
-                    match sched.try_acquire_execution_slot(&id, config.resources.max_concurrent_runs).await {
+                    match sched.try_acquire_execution_slot(&id, resources::effective_slots(&config.resources)).await {
                         Ok(Some(s)) => Some(s),
                         _ => { let _ = sched.release_lease(&id).await; info!(id = %id, "No free slot, deferring"); return; }
                     }
