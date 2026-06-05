@@ -39,27 +39,30 @@ simple_model = "qwen2.5-coder:14b"  # use a model present on csatapaci (7b not p
 project = "default"
 
 # --- Agent Tiers ---
-# All inference on csatapaci (M2 Max 96GB). Models sized so the WHOLE resident
-# set stays well under ~70% RAM: llama3.3:70b alone was ~81GB (85%, swapped/
-# stalled), so the orchestrator is now qwen2.5-coder:32b (~20GB). Distinct
-# resident = 32b (orchestrator+agent) + 14b (worker) + nomic (embed) ≈ 30GB.
+# All inference on csatapaci (M2 Max 96GB). FAST-LOOP profile: every tier runs
+# the SAME model (qwen2.5-coder:14b) at the SAME context (8192), so Ollama never
+# reloads between planning/agent/worker calls and the whole resident set is just
+# 14b (~10GB) + nomic (~0.5GB) ≈ 11GB. 32b planning cost 2–8 min/goal; 14b plans
+# in seconds. Bias: cheap fast experiments + the real cargo-test gate filtering
+# bad output, NOT one slow over-thought plan — volume enriches SONA. Bump a tier
+# back to 32b only if plan quality on a class of goals proves too low.
 [tiers.orchestrator]
-model = "qwen2.5-coder:32b"     # was llama3.3:70b (81GB → swapped on a 96GB box)
-context_window = 16384
+model = "qwen2.5-coder:14b"     # fast planner (was 32b @ 2–8 min/plan)
+context_window = 8192
 time_limit_secs = 14400         # 4 hours
 token_limit = 1000000           # 1M tokens
-max_iterations = 20
+max_iterations = 10             # don't over-think; gate catches bad plans
 max_backoff_secs = 60
-max_context_files = 100
+max_context_files = 40          # tighter RAG → smaller prompt → faster prefill
 
 [tiers.agent]
-model = "qwen2.5-coder:32b"
-context_window = 16384
+model = "qwen2.5-coder:14b"
+context_window = 8192
 time_limit_secs = 1800          # 30 min
 token_limit = 300000            # 300K tokens
 max_iterations = 10
 max_backoff_secs = 30
-max_context_files = 50
+max_context_files = 30
 
 [tiers.worker]
 model = "qwen2.5-coder:14b"     # 7b not pulled on csatapaci; 14b is present + warm
