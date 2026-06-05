@@ -330,7 +330,11 @@ async fn adversarial_verify(router: &InferenceRouter, config: &SwarmConfig, goal
     ];
     let options = inference_client::InferenceOptions {
         max_tokens: Some(VERIFY_MAX_TOKENS),
-        preferred_model: Some(config.tiers.agent.model.clone()),
+        // Use the WARM fast tier (planner/14b), NOT the agent escalation tier:
+        // verify runs on every gate-passing run, so a cold-loading 32b here would
+        // re-thrash the limited Ollama slots. The rigorous reject-on-doubt prompt
+        // carries the judgement; a warm 14b critic stays fast + keeps the loop stable.
+        preferred_model: Some(config.tiers.orchestrator.model.clone()),
         preferred_backend: Some(inference_client::BackendKind::Ollama),
         ..Default::default()
     };
