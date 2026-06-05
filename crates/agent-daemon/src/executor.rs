@@ -193,6 +193,70 @@ async fn coedit_hint(store: &dyn KnowledgeBackend, project: &str, goal: &str, re
     Some(format!("FILES THAT HISTORICALLY CHANGE TOGETHER with the named file(s) — include them if the change needs them:\n{list}"))
 }
 
+// --- Graph-expanded scoping (structural neighbors via the code graph) ---
+/// Max structurally-related files surfaced to the planner.
+const GRAPH_EXPAND_MAX_NEIGHBORS: usize = 8;
+
+/// Expand the goal's named files by one hop over the code knowledge graph
+/// (code_entity defines name→file; code_rel relates names), surfacing files
+/// that are structurally coupled (callers, trait impls, type users) but may not
+/// lexically resemble the goal — the classic "edit compiles but breaks a
+/// caller" file embedding RAG misses. Returns a planner-prompt hint, or None.
+async fn graph_expand_hint(store: &dyn KnowledgeBackend, project: &str, goal: &str, repo_files: &[String]) -> Option<String> {
+    let seeds = extract_goal_files(goal, repo_files);
+    if seeds.is_empty() {
+        return None;
+    }
+    // 1. Entity names defined in the seed files.
+    let name_rows = store.query_json(
+        "SELECT name FROM code_entity WHERE project = $p AND file IN $files",
+        serde_json::json!({ "p": project, "files": seeds }),
+    ).await.ok()?;
+    let seed_names: Vec<String> = name_rows.iter()
+        .filter_map(|r| r.get("name").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    if seed_names.is_empty() {
+        return None;
+    }
+    // 2. Entity names related to the seed entities (1 hop, undirected).
+    let rel_rows = store.query_json(
+        "SELECT src, dst FROM code_rel WHERE project = $p AND (src IN $names OR dst IN $names)",
+        serde_json::json!({ "p": project, "names": seed_names }),
+    ).await.ok()?;
+    let seed_set: std::collections::HashSet<&str> = seed_names.iter().map(String::as_str).collect();
+    let mut related: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for r in &rel_rows {
+        for k in ["src", "dst"] {
+            if let Some(n) = r.get(k).and_then(|v| v.as_str())
+                && !seed_set.contains(n)
+            {
+                related.insert(n.to_string());
+            }
+        }
+    }
+    if related.is_empty() {
+        return None;
+    }
+    // 3. Files defining those related entities (excluding the seeds).
+    let related_vec: Vec<String> = related.into_iter().collect();
+    let file_rows = store.query_json(
+        "SELECT file FROM code_entity WHERE project = $p AND name IN $names",
+        serde_json::json!({ "p": project, "names": related_vec }),
+    ).await.ok()?;
+    let mut neighbor_files: Vec<String> = file_rows.iter()
+        .filter_map(|r| r.get("file").and_then(|v| v.as_str()).map(String::from))
+        .filter(|f| !seeds.contains(f))
+        .collect();
+    neighbor_files.sort();
+    neighbor_files.dedup();
+    neighbor_files.truncate(GRAPH_EXPAND_MAX_NEIGHBORS);
+    if neighbor_files.is_empty() {
+        return None;
+    }
+    let list = neighbor_files.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
+    Some(format!("STRUCTURALLY RELATED FILES (code-graph neighbors of the named file(s) — check if the change affects them):\n{list}"))
+}
+
 // --- Adversarial verify (2nd-model semantic review of a passed diff) ---
 /// Max chars of the diff fed to the verifier (keeps the prompt bounded).
 const VERIFY_DIFF_MAX_CHARS: usize = 4000;
@@ -651,15 +715,14 @@ async fn handle_planning(
         (None, Vec::new())
     };
 
-    // Co-edit hint: append files that historically co-change with the goal's
-    // named files, so the plan includes them up front (fewer gate rejections
-    // from a half-change that breaks a caller).
-    let planner_block = match (past_plans_block, coedit_hint(store.as_ref(), project, goal, &repo_files).await) {
-        (Some(p), Some(c)) => Some(format!("{p}\n{c}")),
-        (Some(p), None) => Some(p),
-        (None, Some(c)) => Some(c),
-        (None, None) => None,
-    };
+    // Planner context hints, each best-effort: prior-run memory (SONA) +
+    // historical co-edit files + structural code-graph neighbors. All steer the
+    // plan toward the files a change actually needs (fewer gate rejections from
+    // a half-change that breaks a caller).
+    let coedit = coedit_hint(store.as_ref(), project, goal, &repo_files).await;
+    let graph = graph_expand_hint(store.as_ref(), project, goal, &repo_files).await;
+    let blocks: Vec<String> = [past_plans_block, coedit, graph].into_iter().flatten().collect();
+    let planner_block = if blocks.is_empty() { None } else { Some(blocks.join("\n\n")) };
 
     // Learned routing: pick the planner tier from past gate outcomes for this
     // goal shape (falls back to the trivial-goal heuristic with no history).
