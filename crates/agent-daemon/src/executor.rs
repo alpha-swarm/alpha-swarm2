@@ -31,28 +31,25 @@ fn is_trivial_goal(goal: &str) -> bool {
     TRIVIAL_GOAL_KEYWORDS.iter().any(|k| lower.contains(k))
 }
 
-// --- Learned planner-tier routing (contextual bandit over goal shape) ---
-/// Tier history needed before stats override the heuristic default.
-const ROUTING_MIN_ATTEMPTS: i64 = 3;
-/// Exploration rate (per-mille): how often to try the non-default tier so the
-/// stats stay fresh. Deterministic per goal (no RNG) via the goal hash.
-const ROUTING_EXPLORE_PERMILLE: u64 = 150;
+// --- Learned planner-tier routing (UCB1 contextual bandit over goal shape) ---
+/// UCB1 exploration weight: higher = more exploration. ~1.0 is slightly more
+/// exploitative than the textbook sqrt(2); fine for a 2-arm tier choice.
+const ROUTING_UCB_C: f64 = 1.0;
 const ROUTING_TIER_AGENT: &str = "agent";
 const ROUTING_TIER_ORCH: &str = "orchestrator";
 
-/// Coarse goal shape for routing — the bucket over which outcomes accumulate.
+/// Goal shape — the bucket over which routing outcomes accumulate. Finer than
+/// trivial/complex so the bandit can learn e.g. that doc goals never need 70b
+/// while some "simple" edits do.
 fn goal_shape(goal: &str) -> &'static str {
-    if is_trivial_goal(goal) { "trivial" } else { "complex" }
-}
-
-/// Stable (build-independent) goal hash for deterministic exploration jitter.
-fn goal_hash(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in s.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x00000100000001b3);
+    let lower = goal.to_lowercase();
+    if lower.contains("doc comment") || lower.contains("docstring") || lower.contains("/// ") || lower.contains("add a comment") {
+        "doc"
+    } else if is_trivial_goal(goal) {
+        "simple"
+    } else {
+        "complex"
     }
-    h
 }
 
 /// Map a planner model name back to its tier label (for recording outcomes).
@@ -62,12 +59,12 @@ fn tier_label_for_model(model: &str, config: &SwarmConfig) -> Option<&'static st
     else { None }
 }
 
-/// Pick the planner tier for a goal, learning from past gate outcomes. Coarse
-/// contextual bandit: for the goal's shape, prefer the tier with the higher
-/// historical gate-pass rate (tiebreak: lower latency) once it has
-/// `ROUTING_MIN_ATTEMPTS` of data; else the heuristic default (trivial→agent,
-/// else orchestrator). Epsilon-greedy exploration keeps stats fresh. Advisory —
-/// the gate is the backstop, so a wrong pick costs a run, not correctness.
+/// Pick the planner tier for a goal via UCB1 over past gate outcomes for the
+/// goal's shape. Cold start (no history for the shape) → the heuristic default
+/// (complex→orchestrator, else agent). With history, score each tier by
+/// `success_rate + C·sqrt(ln(N)/n)`; an untried tier scores +inf so it's tried
+/// once — principled explore/exploit, no RNG. Advisory — the gate is the
+/// backstop, so a wrong pick costs a run, not correctness.
 async fn recommend_planner_tier<'a>(
     store: &dyn KnowledgeBackend,
     project: &str,
@@ -75,37 +72,42 @@ async fn recommend_planner_tier<'a>(
     config: &'a SwarmConfig,
 ) -> &'a swarm_config::TierConfig {
     let shape = goal_shape(goal);
-    let default_label = if shape == "trivial" { ROUTING_TIER_AGENT } else { ROUTING_TIER_ORCH };
+    let default_label = if shape == "complex" { ROUTING_TIER_ORCH } else { ROUTING_TIER_AGENT };
     let tier_for = |label: &str| if label == ROUTING_TIER_AGENT { &config.tiers.agent } else { &config.tiers.orchestrator };
 
     let rows = store.query_json(
-        "SELECT tier, attempts, successes, total_ms FROM routing_stats WHERE project = $p AND shape = $s",
+        "SELECT tier, attempts, successes FROM routing_stats WHERE project = $p AND shape = $s",
         serde_json::json!({ "p": project, "s": shape }),
     ).await.unwrap_or_default();
 
-    let mut total_attempts = 0i64;
-    let mut best: Option<(&str, f64, f64)> = None; // (label, success_rate, avg_ms)
-    for label in [ROUTING_TIER_AGENT, ROUTING_TIER_ORCH] {
+    // (label, attempts, successes) for each tier.
+    let stats: Vec<(&str, i64, i64)> = [ROUTING_TIER_AGENT, ROUTING_TIER_ORCH].iter().map(|&label| {
         let row = rows.iter().find(|r| r.get("tier").and_then(|v| v.as_str()) == Some(label));
         let a = row.and_then(|r| r.get("attempts")).and_then(|v| v.as_i64()).unwrap_or(0);
         let s = row.and_then(|r| r.get("successes")).and_then(|v| v.as_i64()).unwrap_or(0);
-        let ms = row.and_then(|r| r.get("total_ms")).and_then(|v| v.as_i64()).unwrap_or(0);
-        total_attempts += a;
-        if a >= ROUTING_MIN_ATTEMPTS {
-            let rate = s as f64 / a as f64;
-            let avg = ms as f64 / a as f64;
-            let better = best.is_none_or(|(_, br, bavg)| rate > br || (rate == br && avg < bavg));
-            if better { best = Some((label, rate, avg)); }
-        }
-    }
+        (label, a, s)
+    }).collect();
+    let total: i64 = stats.iter().map(|(_, a, _)| a).sum();
 
-    let explore = total_attempts > 0 && (goal_hash(goal) % 1000) < ROUTING_EXPLORE_PERMILLE;
-    let chosen = if explore {
-        if default_label == ROUTING_TIER_AGENT { ROUTING_TIER_ORCH } else { ROUTING_TIER_AGENT }
+    let chosen = if total == 0 {
+        default_label
     } else {
-        best.map(|(l, _, _)| l).unwrap_or(default_label)
+        let mut best = default_label;
+        let mut best_score = f64::NEG_INFINITY;
+        for &(label, a, s) in &stats {
+            let score = if a == 0 {
+                f64::INFINITY // explore an untried tier first
+            } else {
+                (s as f64 / a as f64) + ROUTING_UCB_C * ((total as f64).ln() / a as f64).sqrt()
+            };
+            if score > best_score {
+                best_score = score;
+                best = label;
+            }
+        }
+        best
     };
-    info!(task = %project, goal_shape = shape, chosen_tier = chosen, explore, "learned routing: planner tier");
+    info!(task = %project, goal_shape = shape, chosen_tier = chosen, total_attempts = total, "learned routing: planner tier (UCB1)");
     tier_for(chosen)
 }
 
