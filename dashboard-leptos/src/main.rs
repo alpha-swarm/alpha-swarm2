@@ -52,6 +52,8 @@ fn truncate(s: &str, n: usize) -> String {
 fn App() -> impl IntoView {
     let (tick, set_tick) = create_signal(0u32);
     Interval::new(POLL_MS, move || set_tick.update(|t| *t += 1)).forget();
+    // Currently-selected run id (clicked in the Runs table) → drives the detail panel.
+    let (selected, set_selected) = create_signal::<Option<String>>(None);
 
     view! {
         <header>
@@ -61,7 +63,8 @@ fn App() -> impl IntoView {
         </header>
         <main>
             <SubmitGoal set_tick=set_tick/>
-            <Runs tick=tick/>
+            <Runs tick=tick set_selected=set_selected/>
+            <Detail selected=selected tick=tick/>
             <div class="grid2">
                 <Routing tick=tick/>
                 <Recent tick=tick/>
@@ -118,7 +121,7 @@ fn SubmitGoal(set_tick: WriteSignal<u32>) -> impl IntoView {
 }
 
 #[component]
-fn Runs(tick: ReadSignal<u32>) -> impl IntoView {
+fn Runs(tick: ReadSignal<u32>, set_selected: WriteSignal<Option<String>>) -> impl IntoView {
     let runs = create_local_resource(
         move || tick.get(),
         |_| async move {
@@ -127,15 +130,16 @@ fn Runs(tick: ReadSignal<u32>) -> impl IntoView {
     );
     view! {
         <div class="panel">
-            <h2>"Runs"</h2>
+            <h2>"Runs — click a row for detail"</h2>
             <table>
                 <thead><tr><th>"Status"</th><th>"Goal"</th><th>"Progress"</th><th>"When"</th></tr></thead>
                 <tbody>
                     {move || runs.get().unwrap_or_default().into_iter().map(|r| {
                         let st = field(&r, "status");
                         let cls = format!("badge s-{st}");
+                        let id = field(&r, "id");
                         view! {
-                            <tr>
+                            <tr style="cursor:pointer" on:click=move |_| set_selected.set(Some(id.clone()))>
                                 <td><span class=cls>{st}</span></td>
                                 <td class="goal">{truncate(&field(&r, "task_description"), 90)}</td>
                                 <td class="muted">{truncate(&field(&r, "progress_message"), 60)}</td>
@@ -145,6 +149,72 @@ fn Runs(tick: ReadSignal<u32>) -> impl IntoView {
                     }).collect_view()}
                 </tbody>
             </table>
+        </div>
+    }
+}
+
+#[component]
+fn Detail(selected: ReadSignal<Option<String>>, tick: ReadSignal<u32>) -> impl IntoView {
+    // Refetch when the selection changes OR on each poll tick (live progress).
+    let data = create_local_resource(
+        move || (selected.get(), tick.get()),
+        |(sel, _)| async move {
+            let Some(id) = sel else { return None };
+            let run = sql(format!("SELECT * FROM {id}")).await.into_iter().next();
+            let plan = sql(format!(
+                "SELECT sub_tasks FROM goal_plan WHERE run_id = '{id}' ORDER BY version DESC LIMIT 1"
+            )).await.into_iter().next();
+            let tasks = plan
+                .and_then(|p| p.get("sub_tasks").and_then(|v| v.as_array()).cloned())
+                .unwrap_or_default();
+            run.map(|r| (r, tasks))
+        },
+    );
+
+    view! {
+        <div class="panel">
+            <h2>"Run detail"</h2>
+            {move || match data.get().flatten() {
+                None => view! {
+                    <p class="muted">"Click a run above to see its plan, files, model, and gate result."</p>
+                }.into_view(),
+                Some((r, tasks)) => {
+                    let files = r.get("files_modified").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    let err = field(&r, "error_message");
+                    let diff = field(&r, "diff");
+                    let num = |k: &str| r.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+                    view! {
+                        <p style="margin:0 0 12px"><b>{field(&r, "task_description")}</b></p>
+                        <div class="row" style="gap:18px; margin-bottom:14px">
+                            <span><span class=format!("badge s-{}", field(&r,"status"))>{field(&r,"status")}</span></span>
+                            <span class="muted">"model: "{field(&r, "model_used")}</span>
+                            <span class="muted">"tokens: "{num("tokens_input")}" / "{num("tokens_output")}</span>
+                            <span class="muted">{format!("{}ms", num("duration_ms"))}</span>
+                        </div>
+                        <h2>"Plan"</h2>
+                        <ul>
+                            {tasks.iter().map(|t| view!{
+                                <li>
+                                    <b>{field(t, "id")}</b>": "{field(t, "description")}
+                                    <span class="muted">" "{field(t, "complexity")}</span>
+                                </li>
+                            }).collect_view()}
+                        </ul>
+                        <h2>"Files modified"</h2>
+                        <ul>
+                            {files.iter().filter_map(|f| f.as_str().map(|s| s.to_string())).map(|f| view!{
+                                <li class="muted">{f}</li>
+                            }).collect_view()}
+                        </ul>
+                        {(!err.is_empty()).then(|| view!{
+                            <div><h2>"Failure / gate reason"</h2><pre style="white-space:pre-wrap; color:var(--fail)">{err}</pre></div>
+                        })}
+                        {(!diff.is_empty()).then(|| view!{
+                            <div><h2>"Diff"</h2><pre style="white-space:pre-wrap; max-height:340px; overflow:auto">{truncate(&diff, 4000)}</pre></div>
+                        })}
+                    }.into_view()
+                }
+            }}
         </div>
     }
 }
