@@ -139,9 +139,15 @@ async fn main() -> Result<()> {
         chat_models.dedup();
         chat_models.retain(|m| !m.is_empty());
         let embed_model = config.defaults.embed_model.clone();
+        // Warm at the orchestrator context window, NOT max_tokens=1: a tiny
+        // ceiling makes num_ctx collapse to ~1, which Ollama treats as "use the
+        // model default" and loads llama3.3:70b at its full 131072 context
+        // (~81GB VRAM) — starving the box so the 32b/embed models can't co-load.
+        // A sane ceiling keeps the resident KV cache (hence VRAM) small.
+        let warm_ctx = config.tiers.orchestrator.context_window;
         tokio::spawn(async move {
             use inference_client::InferenceBackend;
-            let opts = inference_client::InferenceOptions { max_tokens: Some(1), ..Default::default() };
+            let opts = inference_client::InferenceOptions { max_tokens: Some(warm_ctx), ..Default::default() };
             info!(chat = ?chat_models, embed = %embed_model, "Warming tier models into Ollama memory (keep_alive)");
             loop {
                 let messages = vec![inference_client::ChatMessage::user("warm")];

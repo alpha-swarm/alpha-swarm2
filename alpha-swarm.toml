@@ -39,10 +39,12 @@ simple_model = "qwen2.5-coder:14b"  # use a model present on csatapaci (7b not p
 project = "default"
 
 # --- Agent Tiers ---
-# All inference on csatapaci. Orchestrator = llama3.3:70b (planning reasoning),
-# agent = qwen2.5-coder:32b (code execution), worker = qwen2.5-coder:14b.
+# All inference on csatapaci (M2 Max 96GB). Models sized so the WHOLE resident
+# set stays well under ~70% RAM: llama3.3:70b alone was ~81GB (85%, swapped/
+# stalled), so the orchestrator is now qwen2.5-coder:32b (~20GB). Distinct
+# resident = 32b (orchestrator+agent) + 14b (worker) + nomic (embed) ≈ 30GB.
 [tiers.orchestrator]
-model = "llama3.3:70b"
+model = "qwen2.5-coder:32b"     # was llama3.3:70b (81GB → swapped on a 96GB box)
 context_window = 16384
 time_limit_secs = 14400         # 4 hours
 token_limit = 1000000           # 1M tokens
