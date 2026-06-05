@@ -13,6 +13,7 @@ const RESOURCE_TTL: Duration = Duration::from_secs(60);
 /// KV bucket names
 const TASKS_BUCKET: &str = "swarm-tasks";
 const LEASES_BUCKET: &str = "swarm-leases";
+/// The bucket name for storing resource snapshots.
 const RESOURCES_BUCKET: &str = "swarm-resources";
 /// Key for the global execution lock (only 1 goal runs across all daemons).
 const EXECUTION_LOCK_KEY: &str = "goal-execution-lock";
