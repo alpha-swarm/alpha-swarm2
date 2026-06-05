@@ -13,6 +13,9 @@ mod openai_compat;
 #[cfg(feature = "native")]
 pub mod mock;
 
+/// Dimensionality of the embedding vector
+pub const EMBED_DIM: usize = 768;
+
 pub use types::*;
 pub use backend::InferenceBackend;
 
