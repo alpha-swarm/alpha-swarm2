@@ -130,6 +130,26 @@ impl NatsScheduler {
         Ok(())
     }
 
+    /// Purge EVERY entry in the leases bucket — per-task claims (`lease.*`),
+    /// execution slots (`goal-execution-lock.slot-N`) and project locks
+    /// (`goal-execution-lock.PROJECT`). Call at startup only: a crashed daemon
+    /// leaves all three behind in KV (`create()` is atomic and never
+    /// auto-expires), so the new instance sees recovered tasks as "already
+    /// claimed" AND every execution slot as taken ("No free slot") — wedged
+    /// forever. The zombie-reset just moved all `running` rows back to
+    /// `pending`, so nothing is legitimately held at boot. Returns count purged.
+    pub async fn release_all_leases(&self) -> Result<usize> {
+        use futures::StreamExt;
+        let mut keys = self.leases.keys().await.context("Failed to list lease keys")?;
+        let mut purged = 0;
+        while let Some(key_result) = keys.next().await {
+            let Ok(key) = key_result else { continue };
+            let _ = self.leases.purge(&key).await;
+            purged += 1;
+        }
+        Ok(purged)
+    }
+
     /// Renew a lease (heartbeat — prevents expiry during long tasks).
     pub async fn renew_lease(&self, run_id: &str) -> Result<()> {
         let key = format!("lease.{}", sanitize_key(run_id));
