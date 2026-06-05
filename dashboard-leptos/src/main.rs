@@ -69,7 +69,49 @@ fn App() -> impl IntoView {
                 <Routing tick=tick/>
                 <Recent tick=tick/>
             </div>
+            <Memory tick=tick/>
         </main>
+    }
+}
+
+#[component]
+fn Memory(tick: ReadSignal<u32>) -> impl IntoView {
+    let counts = create_local_resource(
+        move || tick.get(),
+        |_| async move {
+            sql("SELECT namespace, count() AS c FROM memory_entry GROUP BY namespace".into()).await
+        },
+    );
+    let patterns = create_local_resource(
+        move || tick.get(),
+        |_| async move {
+            sql("SELECT content, use_count FROM memory_entry WHERE namespace = 'patterns' ORDER BY use_count DESC LIMIT 12".into()).await
+        },
+    );
+    view! {
+        <div class="panel">
+            <h2>"Learned memory (SONA)"</h2>
+            <div class="row" style="gap:16px; margin-bottom:12px">
+                {move || counts.get().unwrap_or_default().into_iter().map(|r| {
+                    let c = r.get("c").and_then(|v| v.as_i64()).unwrap_or(0);
+                    view! { <span class="muted">{field(&r, "namespace")}": "<b style="color:var(--fg)">{c}</b></span> }
+                }).collect_view()}
+            </div>
+            <table>
+                <thead><tr><th>"Distilled pattern"</th><th>"Reused"</th></tr></thead>
+                <tbody>
+                    {move || patterns.get().unwrap_or_default().into_iter().map(|r| {
+                        let uc = r.get("use_count").and_then(|v| v.as_i64()).unwrap_or(0);
+                        view! {
+                            <tr>
+                                <td class="goal">{truncate(&field(&r, "content"), 160)}</td>
+                                <td class="muted">{format!("{uc}×")}</td>
+                            </tr>
+                        }
+                    }).collect_view()}
+                </tbody>
+            </table>
+        </div>
     }
 }
 
