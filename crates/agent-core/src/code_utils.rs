@@ -40,28 +40,36 @@ pub fn fuzzy_replace(content: &str, old: &str, new: &str) -> Option<String> {
     if old_trimmed.is_empty() {
         return None;
     }
+    // Exact substring → replace EVERY occurrence. Multi-site refactors emit one
+    // block for a repeated expression and expect every call site rewritten;
+    // replacing only the first leaves the rest stale (broken or un-refactored).
+    // The cargo gate backstops any unintended over-replacement.
     if content_norm.contains(old_trimmed) {
-        return Some(content_norm.replacen(old_trimmed, new_norm.trim(), 1));
+        return Some(content_norm.replace(old_trimmed, new_norm.trim()));
     }
+
+    // Line-based fallback, matching on COLLAPSED whitespace so the model's
+    // internal-spacing drift (e.g. `f("x",  y)` vs `f("x", y)`) still matches.
+    let norm = |l: &str| l.split_whitespace().collect::<Vec<_>>().join(" ");
     let lines: Vec<&str> = content_norm.lines().collect();
-    let old_lines: Vec<&str> = old_trimmed.lines().map(|l| l.trim()).collect();
+    let old_lines: Vec<String> = old_trimmed.lines().map(norm).collect();
     let new_lines = || new_norm.trim().lines().map(|l| l.to_string());
 
     if old_lines.len() == 1 {
-        let idx = lines.iter().position(|l| l.trim() == old_lines[0])?;
+        let idx = lines.iter().position(|l| norm(l) == old_lines[0])?;
         let mut result: Vec<String> = lines[..idx].iter().map(|l| l.to_string()).collect();
         result.extend(new_lines());
         result.extend(lines[idx + 1..].iter().map(|l| l.to_string()));
         return Some(result.join("\n"));
     }
 
-    // Multi-line: find the window whose trimmed lines all match.
+    // Multi-line: find the window whose collapsed-whitespace lines all match.
     let start = (0..lines.len()).find(|&i| {
-        lines[i].trim() == old_lines[0]
+        norm(lines[i]) == old_lines[0]
             && old_lines
                 .iter()
                 .enumerate()
-                .all(|(j, ol)| i + j < lines.len() && lines[i + j].trim() == *ol)
+                .all(|(j, ol)| i + j < lines.len() && norm(lines[i + j]) == *ol)
     })?;
     let mut result: Vec<String> = lines[..start].iter().map(|l| l.to_string()).collect();
     result.extend(new_lines());
@@ -151,5 +159,25 @@ mod tests {
         // The critical contract: a non-matching OLD is None, NOT a silent no-op.
         assert_eq!(fuzzy_replace("let a = 1;\n", "nonexistent line", "x"), None);
         assert_eq!(fuzzy_replace("anything", "   ", "x"), None);
+    }
+
+    #[test]
+    fn fuzzy_replace_rewrites_all_sites() {
+        // Multi-site refactor: one block, repeated expression → EVERY site.
+        let content = "let a = key(x);\nlet b = key(y) + key(x);\n";
+        let got = fuzzy_replace(content, "key(x)", "lease(x)").unwrap();
+        assert!(!got.contains("key(x)"));
+        assert_eq!(got.matches("lease(x)").count(), 2);
+        assert!(got.contains("key(y)")); // untouched
+    }
+
+    #[test]
+    fn fuzzy_replace_tolerates_internal_whitespace() {
+        // Whole-line OLD with different internal spacing than the file → matches
+        // on collapsed whitespace (the model rarely reproduces spacing exactly).
+        let content = "fn f() {\n    let k = call(a,  b,   c);\n}\n";
+        let got = fuzzy_replace(content, "let k = call(a, b, c);", "let k = helper();");
+        assert!(got.is_some());
+        assert!(got.unwrap().contains("let k = helper();"));
     }
 }
