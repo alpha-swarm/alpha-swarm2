@@ -153,7 +153,7 @@ fn format_update_where(task_id: &str, set_clause: &str, where_clause: &str) -> S
 /// `cargo test` on the changed crates. Returns Ok(()) only if all pass. This
 /// is the gate the runner's disk-mode path stubs out (always-true) — without
 /// it the loop merges unverified (even non-compiling) code.
-fn run_quality_gate(repo_path: &std::path::Path, gate: &std::path::Path, files: &[(String, Vec<u8>)]) -> Result<(), String> {
+fn run_quality_gate(repo_path: &std::path::Path, gate: &std::path::Path, files: &[(String, Vec<u8>)], sec: &swarm_config::SecurityConfig) -> Result<(), String> {
     use std::process::Command;
     if files.is_empty() {
         return Ok(());
@@ -211,6 +211,12 @@ fn run_quality_gate(repo_path: &std::path::Path, gate: &std::path::Path, files: 
         for pkg in &pkgs {
             if verdict.is_ok() { verdict = cargo(&["test", "-p", pkg]); } // compiles incl. #[cfg(test)] + runs
         }
+    }
+    // Final tier: deterministic security scan over the run's added lines. Runs
+    // only on a clean check+test (so it strictly raises the bar) and before the
+    // worktree is torn down (so it can read HEAD via `git show`).
+    if verdict.is_ok() && sec.rules_enabled {
+        verdict = crate::security_scan::scan(files, gate, sec);
     }
     let _ = git(&["worktree", "remove", "--force", &g]);
     verdict
@@ -926,7 +932,7 @@ async fn handle_execute(
             // quality_passed is a stub (always true), so the actual verification
             // happens HERE before anything lands.
             let gate = if any_work_done {
-                run_quality_gate(&repo_path, &crate::repo::run_gate_path(task_id), &result.modified_files)
+                run_quality_gate(&repo_path, &crate::repo::run_gate_path(task_id), &result.modified_files, &config.security)
             } else {
                 Err("no changes produced".to_string())
             };

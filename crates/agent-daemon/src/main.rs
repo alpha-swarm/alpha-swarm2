@@ -6,6 +6,7 @@
 /// Usage: cargo run -p agent-daemon
 mod repo;
 mod executor;
+mod security_scan;
 mod git_pr;
 mod hooks;
 mod db_bridge;
