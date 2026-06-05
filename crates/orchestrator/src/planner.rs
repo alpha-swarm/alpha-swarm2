@@ -8,6 +8,22 @@ use crate::planner_types::{SubTask, PLANNER_SYSTEM, REPLANNER_SYSTEM, parse_plan
 const MAX_REPLAN_ERROR_CHARS: usize = 600;
 /// Max repo files listed in a replan prompt.
 const MAX_REPLAN_FILES: usize = 100;
+/// Min token length (from the goal) used to score file relevance.
+const FILE_RANK_TOKEN_MIN: usize = 3;
+/// Score boost for a file whose full path is named in the goal.
+const FILE_RANK_PATH_MENTION_BOOST: usize = 1000;
+
+/// Extractive context compression: score a repo file by overlap with the goal,
+/// so a token budget keeps the most likely-relevant files instead of an
+/// arbitrary alphabetical prefix. Full-path mention dominates; otherwise count
+/// goal tokens contained in the path.
+fn goal_relevance(file: &str, goal_lower: &str, goal_tokens: &[&str]) -> usize {
+    let f = file.to_lowercase();
+    if goal_lower.contains(&f) {
+        return FILE_RANK_PATH_MENTION_BOOST;
+    }
+    goal_tokens.iter().filter(|t| f.contains(**t)).count()
+}
 
 /// Decompose a high-level goal into sub-tasks via LLM inference.
 /// If `relevant_files` is provided (from RAG), those are prioritized in the file list.
@@ -44,10 +60,26 @@ pub async fn plan_goal(
         .map(|r| r.iter().map(|(p, _)| p.as_str()).collect())
         .unwrap_or_default();
 
-    let remaining: Vec<&str> = repo_files.iter()
+    // Extractive compression: rank eligible files by goal relevance before the
+    // budget cut, so the goal's target file survives even if it's alphabetically
+    // late and the repo is larger than max_files.
+    let goal_lower = goal.to_lowercase();
+    let goal_tokens: Vec<&str> = goal_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= FILE_RANK_TOKEN_MIN)
+        .collect();
+    let mut eligible: Vec<&str> = repo_files.iter()
         .filter(|f| !f.contains("/target/") && !f.starts_with("target/") && !already_listed.contains(f.as_str()))
-        .take(max_files.saturating_sub(already_listed.len()))
         .map(|s| s.as_str())
+        .collect();
+    eligible.sort_by(|a, b| {
+        goal_relevance(b, &goal_lower, &goal_tokens)
+            .cmp(&goal_relevance(a, &goal_lower, &goal_tokens))
+            .then_with(|| a.cmp(b))
+    });
+    let remaining: Vec<&str> = eligible
+        .into_iter()
+        .take(max_files.saturating_sub(already_listed.len()))
         .collect();
 
     if !remaining.is_empty() {
