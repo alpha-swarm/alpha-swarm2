@@ -29,6 +29,14 @@ async fn sql(query: String) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// GET a JSON endpoint (e.g. /review); Null on any error.
+async fn get_json(path: &str) -> Value {
+    match Request::get(path).send().await {
+        Ok(resp) => resp.json::<Value>().await.unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    }
+}
+
 /// String field accessor (handles string + non-string JSON values).
 fn field(v: &Value, key: &str) -> String {
     match v.get(key) {
@@ -78,8 +86,45 @@ fn App() -> impl IntoView {
                 <Routing tick=tick/>
                 <Recent tick=tick/>
             </div>
+            <Review tick=tick/>
             <Memory tick=tick/>
         </main>
+    }
+}
+
+#[component]
+fn Review(tick: ReadSignal<u32>) -> impl IntoView {
+    let data = create_local_resource(move || tick.get(), |_| async move { get_json("/review").await });
+    let commits = move || data.get().as_ref()
+        .and_then(|d| d.get("commits")).and_then(|c| c.as_array()).cloned().unwrap_or_default();
+    let prs = move || data.get().as_ref()
+        .and_then(|d| d.get("prs")).and_then(|p| p.as_array()).cloned().unwrap_or_default();
+    view! {
+        <div class="panel">
+            <h2>"Review — swarm/auto commits + open PRs"</h2>
+            <div class="grid2">
+                <div>
+                    <b>"Loop commits (not yet in main)"</b>
+                    <ul>
+                        {move || commits().into_iter().filter_map(|c| c.as_str().map(String::from)).map(|c| view! {
+                            <li class="muted" style="font-family:ui-monospace,monospace; font-size:12px">{c}</li>
+                        }).collect_view()}
+                    </ul>
+                </div>
+                <div>
+                    <b>"Open PRs"</b>
+                    <ul>
+                        {move || prs().into_iter().map(|p| {
+                            let n = p.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
+                            view! {
+                                <li>"#"{n}" "{field(&p, "title")}
+                                    <span class="muted">" ("{field(&p, "headRefName")}")"</span></li>
+                            }
+                        }).collect_view()}
+                    </ul>
+                </div>
+            </div>
+        </div>
     }
 }
 

@@ -53,6 +53,8 @@ pub async fn serve(addr: String, store: Arc<dyn KnowledgeBackend>, engine: Arc<W
         // Server-Sent Events: bridge NATS SwarmEvents → the dashboard so it
         // refreshes in real time instead of only polling.
         .route("/events", get(handle_events))
+        // Review: accumulated swarm/auto commits + open PRs (git log / gh).
+        .route("/review", get(handle_review))
         // Serve the Leptos dashboard bundle for any non-API path (so the daemon
         // is the single endpoint: API + UI on the same origin → no CORS).
         .fallback_service(tower_http::services::ServeDir::new(DASHBOARD_DIR))
@@ -101,6 +103,29 @@ async fn handle_events(
         None => Box::pin(futures::stream::empty()),
     };
     Sse::new(stream)
+}
+
+/// Review feed: the loop's accumulated `swarm/auto` commits (not yet in
+/// origin/main) + open PRs. Shells `git`/`gh` in the daemon's repo dir
+/// (spawn_blocking); each piece degrades to empty on error.
+async fn handle_review() -> axum::Json<serde_json::Value> {
+    let out = tokio::task::spawn_blocking(|| {
+        use std::process::Command;
+        let commits = Command::new("git")
+            .args(["log", "origin/main..swarm/auto", "--oneline", "--no-color", "-30"])
+            .output().ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(String::from).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let prs = Command::new("gh")
+            .args(["pr", "list", "--state", "open", "--json", "number,title,headRefName", "--limit", "30"])
+            .output().ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+            .unwrap_or_else(|| serde_json::json!([]));
+        serde_json::json!({ "commits": commits, "prs": prs })
+    }).await.unwrap_or_else(|_| serde_json::json!({ "commits": [], "prs": [] }));
+    axum::Json(out)
 }
 
 /// Execute a SurrealQL text body, one statement at a time, replying in the
