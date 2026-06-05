@@ -132,7 +132,15 @@ impl NatsScheduler {
     }
 
     /// Renew a lease (heartbeat — prevents expiry during long tasks).
-    pub async fn renew_lease(&self, run_id: &str) -> Result<()> {
+    /// Renews the lease for a given run ID.
+///
+/// This function updates the lease entry in the KV store to extend its expiration time,
+/// ensuring that the daemon continues to have exclusive access to the task.
+/// Renews the lease for a given run ID.
+///
+/// This function updates the lease entry in the KV store to extend its expiration time,
+/// ensuring that the daemon continues to have exclusive access to the task.
+pub async fn renew_lease(&self, run_id: &str) -> Result<()> {
         let key = format!("lease.{}", sanitize_key(run_id));
         let lease = LeaseEntry {
             daemon_id: self.daemon_id.clone(),
