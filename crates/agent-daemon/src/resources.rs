@@ -121,8 +121,9 @@ async fn check_ollama(name: &str, ollama_url: &str) -> ResourceSnapshot {
     snap
 }
 
-/// Estimated local RAM headroom (% of total) one parallel run+gate consumes.
-/// Used to derive how many runs fit under `max_ram_percent`.
+/// Estimated local RAM headroom (% of total) that a single parallel run and gate consumes.
+/// This constant is used to calculate the number of concurrent runs that can fit within
+/// the configured maximum RAM usage percentage (`max_ram_percent`).
 const PER_RUN_RAM_PERCENT: f64 = 25.0;
 
 /// Calculates the effective number of concurrent run slots based on live RAM headroom.
