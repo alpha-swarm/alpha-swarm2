@@ -152,4 +152,12 @@ mod tests {
         assert_eq!(fuzzy_replace("let a = 1;\n", "nonexistent line", "x"), None);
         assert_eq!(fuzzy_replace("anything", "   ", "x"), None);
     }
+
+    #[test]
+    fn test_is_code_file() {
+        assert!(is_code_file("src/main.rs"));
+        assert!(is_code_file("lib.rs"));
+        assert!(!is_code_file("README.md"));
+        assert!(!is_code_file("config.toml"));
+    }
 }
