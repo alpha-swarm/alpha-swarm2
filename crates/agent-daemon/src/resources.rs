@@ -125,11 +125,22 @@ async fn check_ollama(name: &str, ollama_url: &str) -> ResourceSnapshot {
 /// Used to derive how many runs fit under `max_ram_percent`.
 const PER_RUN_RAM_PERCENT: f64 = 25.0;
 
-/// Effective concurrent-run cap from LIVE local resources, bounded by
-/// `max_concurrent_runs` (never above it). Opt-in via `dynamic_slots`; off →
-/// the static cap. Counts how many `PER_RUN_RAM_PERCENT` chunks fit in the
-/// headroom below `max_ram_percent`, clamped to `[1, max_concurrent_runs]` — so
-/// it only ever LOWERS concurrency under memory pressure, never raises it.
+/// Calculates the effective number of concurrent run slots based on live RAM headroom.
+///
+/// This function adapts the number of possible concurrent runs by considering
+/// the available RAM headroom. It calculates how many `PER_RUN_RAM_PERCENT`
+/// chunks can fit within the headroom below the configured maximum RAM usage
+/// percentage (`max_ram_percent`). The result is clamped between 1 and
+/// `max_concurrent_runs`, ensuring that it only ever lowers concurrency under
+/// memory pressure, never raises it.
+///
+/// # Parameters
+/// - `config`: A reference to the resource configuration containing settings
+///   such as `max_concurrent_runs` and `dynamic_slots`.
+///
+/// # Returns
+/// The effective number of concurrent run slots that can be utilized given
+/// the current system's RAM usage.
 pub fn effective_slots(config: &ResourceConfig) -> usize {
     let max = config.max_concurrent_runs.max(1);
     if !config.dynamic_slots {
