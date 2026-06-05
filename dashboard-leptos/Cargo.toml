@@ -1,0 +1,19 @@
+# Leptos CSR dashboard — built with `trunk build --release`, served by the
+# daemon http_bridge (:8001) as static files. NOT a member of the native
+# workspace (it targets wasm32-unknown-unknown); trunk builds it standalone.
+[package]
+name = "dashboard-leptos"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+leptos = { version = "0.6", features = ["csr"] }
+gloo-net = "0.6"
+gloo-timers = { version = "0.3", features = ["futures"] }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true

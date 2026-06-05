@@ -29,6 +29,8 @@ use swarm_workflow::WorkflowEngine;
 const STRIPPED_PREFIXES: &[&str] = &["USE ", "DEFINE TABLE"];
 /// Leading verbs allowed on /sql statements (same policy as the NATS bridge).
 const ALLOWED_VERBS: &[&str] = &["SELECT", "CREATE", "UPDATE", "UPSERT", "DELETE", "RELATE", "INSERT"];
+/// Built Leptos dashboard bundle (trunk dist), relative to the daemon workdir.
+const DASHBOARD_DIR: &str = "dashboard-leptos/dist";
 
 #[derive(Clone)]
 struct Shared {
@@ -43,6 +45,9 @@ pub async fn serve(addr: String, store: Arc<dyn KnowledgeBackend>, engine: Arc<W
         .route("/health", get(|| async { "ok" }))
         .route("/sql", post(handle_sql))
         .route("/workflow/{op}", post(handle_workflow))
+        // Serve the Leptos dashboard bundle for any non-API path (so the daemon
+        // is the single endpoint: API + UI on the same origin → no CORS).
+        .fallback_service(tower_http::services::ServeDir::new(DASHBOARD_DIR))
         .with_state(shared);
 
     let listener = match tokio::net::TcpListener::bind(&addr).await {
