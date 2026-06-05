@@ -10,7 +10,10 @@ use crate::backend::InferenceBackend;
 use crate::types::*;
 
 /// Hard timeout for inference requests (chat/generate)
-const INFERENCE_TIMEOUT: Duration = Duration::from_secs(600); // 10 minutes
+// 14b generates in seconds; a request still running after this is stuck (a
+// jammed Ollama slot), so time out and free the slot rather than holding it for
+// 10 min and wedging every other request behind it.
+const INFERENCE_TIMEOUT: Duration = Duration::from_secs(180); // 3 minutes
 /// Hard timeout for embedding requests
 const EMBED_TIMEOUT: Duration = Duration::from_secs(120); // 2 minutes
 /// Hard timeout for metadata requests (tags, ps)
