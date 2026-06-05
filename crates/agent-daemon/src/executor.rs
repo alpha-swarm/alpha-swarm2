@@ -1661,3 +1661,27 @@ async fn fail_task_with_duration(
         }).await;
     }
 }
+
+#[cfg(test)]
+mod verify_tests {
+    use super::{diff_adds_test, diff_is_doc_only};
+
+    #[test]
+    fn detects_added_test() {
+        assert!(diff_adds_test("+    #[test]\n+    fn x() { assert_eq!(1, 1); }"));
+        assert!(diff_adds_test("+        assert!(got.is_some());"));
+        assert!(!diff_adds_test("+    pub fn foo() -> i32 { 1 }"));
+        // a REMOVED test (-) doesn't count as adding coverage
+        assert!(!diff_adds_test("-    #[test]\n-    fn gone() {}"));
+    }
+
+    #[test]
+    fn doc_only_detection() {
+        assert!(diff_is_doc_only("+/// a doc comment\n+//! module doc"));
+        assert!(diff_is_doc_only("-// old comment\n+// new comment"));
+        // real code change → not doc-only
+        assert!(!diff_is_doc_only("+/// doc\n+pub const X: u32 = 1;"));
+        // no changed lines at all → not doc-only (nothing to be lenient about)
+        assert!(!diff_is_doc_only(" context line only\n@@ hunk @@"));
+    }
+}
