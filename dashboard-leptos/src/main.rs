@@ -50,6 +50,26 @@ fn short_time(ts: &str) -> String {
     ts.chars().take(19).collect::<String>().replace('T', " ")
 }
 
+/// Human "x ago" for an ISO timestamp, via the browser clock — shows whether a
+/// run is actually live (recent) or stalled (minutes old).
+fn age(ts: &str) -> String {
+    if ts.is_empty() {
+        return "—".into();
+    }
+    let t = js_sys::Date::new(&JsValue::from_str(ts)).get_time();
+    if t.is_nan() {
+        return "—".into();
+    }
+    let secs = ((js_sys::Date::now() - t) / 1000.0).max(0.0) as u64;
+    if secs < 90 {
+        format!("{secs}s ago")
+    } else if secs < 5400 {
+        format!("{}m ago", secs / 60)
+    } else {
+        format!("{}h ago", secs / 3600)
+    }
+}
+
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() > n {
         format!("{}…", s.chars().take(n).collect::<String>())
@@ -291,7 +311,7 @@ fn Runs(tick: ReadSignal<u32>) -> impl IntoView {
     let runs = create_local_resource(
         move || tick.get(),
         |_| async move {
-            sql("SELECT id, status, task_description, progress_message, created_at FROM agent_run ORDER BY created_at DESC LIMIT 25".into()).await
+            sql("SELECT id, status, task_description, progress_message, created_at, last_activity_at FROM agent_run ORDER BY created_at DESC LIMIT 25".into()).await
         },
     );
     // Detail for the currently-expanded run; refetches on expand change + tick.
@@ -314,7 +334,7 @@ fn Runs(tick: ReadSignal<u32>) -> impl IntoView {
         <div class="panel">
             <h2>"Runs — click a row to expand"</h2>
             <table>
-                <thead><tr><th style="width:16px"></th><th>"Status"</th><th>"Goal"</th><th>"Progress"</th><th>"When"</th></tr></thead>
+                <thead><tr><th style="width:16px"></th><th>"Status"</th><th>"Goal"</th><th>"Progress"</th><th>"Activity"</th><th>"When"</th></tr></thead>
                 <tbody>
                     {move || runs.get().unwrap_or_default().into_iter().map(|r| {
                         let st = field(&r, "status");
@@ -331,10 +351,11 @@ fn Runs(tick: ReadSignal<u32>) -> impl IntoView {
                                 <td><span class=cls>{st}</span></td>
                                 <td class="goal">{truncate(&field(&r, "task_description"), 90)}</td>
                                 <td class="muted">{truncate(&field(&r, "progress_message"), 60)}</td>
+                                <td class="muted">{age(&field(&r, "last_activity_at"))}</td>
                                 <td class="muted">{short_time(&field(&r, "created_at"))}</td>
                             </tr>
                             {move || (expanded.get().as_deref() == Some(id_cond.as_str())).then(|| view! {
-                                <tr><td></td><td colspan="4">
+                                <tr><td></td><td colspan="5">
                                     {move || match detail.get().flatten() {
                                         Some((rr, tasks)) => detail_view(rr, tasks),
                                         None => view! { <span class="muted">"loading…"</span> }.into_view(),
