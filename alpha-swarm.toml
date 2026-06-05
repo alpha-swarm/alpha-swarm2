@@ -39,13 +39,16 @@ simple_model = "qwen2.5-coder:14b"  # use a model present on csatapaci (7b not p
 project = "default"
 
 # --- Agent Tiers ---
-# All inference on csatapaci (M2 Max 96GB). FAST-LOOP profile: every tier runs
-# the SAME model (qwen2.5-coder:14b) at the SAME context (8192), so Ollama never
-# reloads between planning/agent/worker calls and the whole resident set is just
-# 14b (~10GB) + nomic (~0.5GB) ≈ 11GB. 32b planning cost 2–8 min/goal; 14b plans
-# in seconds. Bias: cheap fast experiments + the real cargo-test gate filtering
-# bad output, NOT one slow over-thought plan — volume enriches SONA. Bump a tier
-# back to 32b only if plan quality on a class of goals proves too low.
+# All inference on csatapaci (M2 Max 96GB). FAST-LOOP + escalation:
+#   * orchestrator (planner) + worker = qwen2.5-coder:14b @ 8192 — plans in
+#     seconds; doc/edit/test tasks run here. 14b plans cost seconds vs 2–8 min
+#     for 32b, and most tasks don't need more.
+#   * agent = qwen2.5-coder:32b @ 16384 — the ESCALATION tier: refactor/complex
+#     tasks route here (14b can't reliably emit structural multi-line edits).
+# Both 14b (~10GB) + 32b (~22GB) + nomic stay co-resident (~33GB ≪ 70% RAM) and
+# are pre-warmed, so escalation never cold-loads/wedges. Distinct models don't
+# share a KV cache, so no reload churn between tiers. Set OLLAMA_MAX_LOADED_MODELS
+# >= 3 on the host.
 [tiers.orchestrator]
 model = "qwen2.5-coder:14b"     # fast planner (was 32b @ 2–8 min/plan)
 context_window = 8192
@@ -56,8 +59,8 @@ max_backoff_secs = 60
 max_context_files = 40          # tighter RAG → smaller prompt → faster prefill
 
 [tiers.agent]
-model = "qwen2.5-coder:14b"
-context_window = 8192
+model = "qwen2.5-coder:32b"     # escalation tier for refactor/complex tasks
+context_window = 16384          # more room for structural multi-file edits
 time_limit_secs = 1800          # 30 min
 token_limit = 300000            # 300K tokens
 max_iterations = 10
