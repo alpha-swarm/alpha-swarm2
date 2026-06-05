@@ -216,8 +216,9 @@ fn Detail(selected: ReadSignal<Option<String>>, tick: ReadSignal<u32>) -> impl I
         |(sel, _)| async move {
             let Some(id) = sel else { return None };
             let run = sql(format!("SELECT * FROM {id}")).await.into_iter().next();
+            // NOTE: SurrealDB requires ORDER BY fields in the projection.
             let plan = sql(format!(
-                "SELECT sub_tasks FROM goal_plan WHERE run_id = '{id}' ORDER BY version DESC LIMIT 1"
+                "SELECT sub_tasks, version FROM goal_plan WHERE run_id = '{id}' ORDER BY version DESC LIMIT 1"
             )).await.into_iter().next();
             let tasks = plan
                 .and_then(|p| p.get("sub_tasks").and_then(|v| v.as_array()).cloned())

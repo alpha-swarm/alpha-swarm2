@@ -56,6 +56,12 @@ pub async fn serve(addr: String, store: Arc<dyn KnowledgeBackend>, engine: Arc<W
         // Serve the Leptos dashboard bundle for any non-API path (so the daemon
         // is the single endpoint: API + UI on the same origin → no CORS).
         .fallback_service(tower_http::services::ServeDir::new(DASHBOARD_DIR))
+        // no-cache so the browser always picks up a freshly-built bundle (the
+        // bundle filename is content-hashed, but index.html must revalidate).
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        ))
         .with_state(shared);
 
     // Bind all interfaces on the configured port so the dashboard + /sql are
