@@ -216,6 +216,7 @@ async fn main() -> Result<()> {
             config.surrealdb.url.clone(),
             Arc::clone(&store),
             Arc::clone(&wf_engine),
+            config.nats.url.clone(),
         ));
     }
 

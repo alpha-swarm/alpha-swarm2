@@ -15,8 +15,12 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
 use axum::routing::{get, post};
 use axum::Router;
+use futures::{Stream, StreamExt};
+use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -36,15 +40,19 @@ const DASHBOARD_DIR: &str = "dashboard-leptos/dist";
 struct Shared {
     store: Arc<dyn KnowledgeBackend>,
     engine: Arc<WorkflowEngine>,
+    nats_url: String,
 }
 
 /// Serve the shim on `addr` (e.g. "127.0.0.1:8001"). Spawn me.
-pub async fn serve(addr: String, store: Arc<dyn KnowledgeBackend>, engine: Arc<WorkflowEngine>) {
-    let shared = Shared { store, engine };
+pub async fn serve(addr: String, store: Arc<dyn KnowledgeBackend>, engine: Arc<WorkflowEngine>, nats_url: String) {
+    let shared = Shared { store, engine, nats_url };
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/sql", post(handle_sql))
         .route("/workflow/{op}", post(handle_workflow))
+        // Server-Sent Events: bridge NATS SwarmEvents → the dashboard so it
+        // refreshes in real time instead of only polling.
+        .route("/events", get(handle_events))
         // Serve the Leptos dashboard bundle for any non-API path (so the daemon
         // is the single endpoint: API + UI on the same origin → no CORS).
         .fallback_service(tower_http::services::ServeDir::new(DASHBOARD_DIR))
@@ -66,6 +74,27 @@ pub async fn serve(addr: String, store: Arc<dyn KnowledgeBackend>, engine: Arc<W
     if let Err(e) = axum::serve(listener, app).await {
         warn!(error = %e, "HTTP bridge server ended");
     }
+}
+
+/// SSE stream of swarm events. Subscribes to the NATS event bus
+/// (`alpha-swarm.>`) per client and forwards each subject as an SSE message, so
+/// the dashboard can refresh on real activity instead of only polling. Connect
+/// failure → an empty stream (the dashboard keeps its poll fallback).
+async fn handle_events(
+    State(shared): State<Shared>,
+) -> Sse<Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>> {
+    let sub = match async_nats::connect(&shared.nats_url).await {
+        Ok(client) => client.subscribe("alpha-swarm.>").await.ok(),
+        Err(e) => {
+            warn!(error = %e, "SSE: NATS connect failed — empty event stream");
+            None
+        }
+    };
+    let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = match sub {
+        Some(sub) => Box::pin(sub.map(|msg| Ok(Event::default().data(msg.subject.to_string())))),
+        None => Box::pin(futures::stream::empty()),
+    };
+    Sse::new(stream)
 }
 
 /// Execute a SurrealQL text body, one statement at a time, replying in the

@@ -6,6 +6,8 @@ use gloo_net::http::Request;
 use gloo_timers::callback::Interval;
 use leptos::*;
 use serde_json::Value;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 const SQL_URL: &str = "/sql";
 const POLL_MS: u32 = 3000;
@@ -51,7 +53,18 @@ fn truncate(s: &str, n: usize) -> String {
 #[component]
 fn App() -> impl IntoView {
     let (tick, set_tick) = create_signal(0u32);
+    // Fallback poll.
     Interval::new(POLL_MS, move || set_tick.update(|t| *t += 1)).forget();
+    // Live: bump tick on each swarm event (real-time refresh; poll is the
+    // fallback if SSE drops). Best-effort — ignore if EventSource is unavailable.
+    if let Ok(es) = web_sys::EventSource::new("/events") {
+        let cb = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |_e: web_sys::MessageEvent| {
+            set_tick.update(|t| *t += 1);
+        });
+        es.set_onmessage(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+        std::mem::forget(es); // keep the connection open for the app lifetime
+    }
     // Currently-selected run id (clicked in the Runs table) → drives the detail panel.
     let (selected, set_selected) = create_signal::<Option<String>>(None);
 
