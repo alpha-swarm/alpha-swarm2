@@ -188,10 +188,16 @@ async fn main() -> Result<()> {
         "UPDATE agent_run SET status = 'pending', agent_id = 'recovered' WHERE status = 'running'"
     ).await;
 
-    // Clear stale execution locks from previous daemon crashes
+    // Clear stale execution locks AND per-task leases from previous daemon
+    // crashes. Without the lease purge, recovered tasks stay wedged: their
+    // `lease.*` claims survive the crash and every poll sees them "already
+    // claimed, deferring".
     if let Some(ref sched) = scheduler {
         let _ = sched.release_execution_lock().await;
-        info!("Cleared stale execution locks");
+        match sched.release_all_leases().await {
+            Ok(n) => info!(purged = n, "Cleared stale execution locks + task leases"),
+            Err(e) => warn!(error = %e, "Failed to purge stale task leases"),
+        }
     }
 
     // Workflow engine: persisted DAG runs, pause/resume, adaptive replanning.
