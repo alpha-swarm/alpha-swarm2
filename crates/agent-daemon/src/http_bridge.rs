@@ -55,6 +55,9 @@ pub async fn serve(addr: String, store: Arc<dyn KnowledgeBackend>, engine: Arc<W
         .route("/events", get(handle_events))
         // Review: accumulated swarm/auto commits + open PRs (git log / gh).
         .route("/review", get(handle_review))
+        // Graph: goals ↔ runs/agents ↔ SONA patterns/trajectories ↔ knowledge
+        // (files), assembled from the real join tables into {nodes, edges}.
+        .route("/graph", get(handle_graph))
         // Serve the Leptos dashboard bundle for any non-API path (so the daemon
         // is the single endpoint: API + UI on the same origin → no CORS).
         .fallback_service(tower_http::services::ServeDir::new(DASHBOARD_DIR))
@@ -126,6 +129,122 @@ async fn handle_review() -> axum::Json<serde_json::Value> {
         serde_json::json!({ "commits": commits, "prs": prs })
     }).await.unwrap_or_else(|_| serde_json::json!({ "commits": [], "prs": [] }));
     axum::Json(out)
+}
+
+/// Graph feed: the whole loop as a connected graph —
+///
+///   GOAL ──spawns──▶ RUN/AGENT ──guided(✓/✗)──▶ PATTERN (SONA)
+///                       │   ├──recorded──▶ TRAJECTORY (SONA)
+///                       │   └──touched───▶ FILE (knowledge / code_entity)
+///
+/// All edges come from the real link tables (no LLM-recorded fields, which are
+/// unpopulated): goal↔run by task-text match, run↔pattern via
+/// `pattern_effectiveness`, run↔trajectory via the trajectory's `key`, run↔file
+/// via `files_modified`. Returns `{nodes:[{id,kind,label,...}], edges:[...]}`.
+/// Each piece degrades to empty on error so a partial graph still renders.
+async fn handle_graph(State(shared): State<Shared>) -> axum::Json<serde_json::Value> {
+    use serde_json::{json, Value};
+    async fn q(store: &Arc<dyn KnowledgeBackend>, sql: &str) -> Vec<Value> {
+        store.query_json(sql, Value::Null).await.unwrap_or_default()
+    }
+    let s = |v: &Value, k: &str| -> String {
+        match v.get(k) {
+            Some(Value::String(x)) => x.clone(),
+            Some(Value::Null) | None => String::new(),
+            Some(other) => other.to_string(),
+        }
+    };
+    let clip = |t: &str, n: usize| -> String {
+        let t = t.trim();
+        if t.chars().count() > n { format!("{}…", t.chars().take(n).collect::<String>()) } else { t.to_string() }
+    };
+
+    let goals = q(&shared.store, "SELECT goal, status, created_at FROM autopilot_goal ORDER BY created_at DESC LIMIT 40").await;
+    let runs = q(&shared.store, "SELECT id, task_description, status, model_used, files_modified, created_at FROM agent_run ORDER BY created_at DESC LIMIT 40").await;
+    let patterns = q(&shared.store, "SELECT key, content, use_count FROM memory_entry WHERE namespace = 'patterns' ORDER BY use_count DESC LIMIT 40").await;
+    let trajectories = q(&shared.store, "SELECT key FROM memory_entry WHERE namespace = 'trajectories' LIMIT 80").await;
+    let effs = q(&shared.store, "SELECT pattern_id, run_id, run_succeeded FROM pattern_effectiveness LIMIT 500").await;
+    let entity_counts = q(&shared.store, "SELECT file, count() AS c FROM code_entity GROUP BY file").await;
+
+    let mut nodes: Vec<Value> = Vec::new();
+    let mut edges: Vec<Value> = Vec::new();
+
+    // RUN nodes — keyed by their record id so links resolve directly.
+    let mut run_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for r in &runs {
+        let id = s(r, "id");
+        if id.is_empty() { continue; }
+        run_ids.insert(id.clone());
+        nodes.push(json!({
+            "id": id, "kind": "run", "label": clip(&s(r, "task_description"), 46),
+            "status": s(r, "status"), "model": s(r, "model_used"),
+        }));
+    }
+
+    // GOAL nodes — link to runs by exact task-text match (the loop copies the
+    // queued goal verbatim into agent_run.task_description).
+    for (i, g) in goals.iter().enumerate() {
+        let text = s(g, "goal");
+        if text.trim().is_empty() { continue; }
+        let gid = format!("goal:{i}");
+        nodes.push(json!({ "id": gid, "kind": "goal", "label": clip(&text, 46), "status": s(g, "status") }));
+        let needle = text.trim();
+        for r in &runs {
+            if s(r, "task_description").trim() == needle {
+                edges.push(json!({ "src": gid, "dst": s(r, "id"), "kind": "spawns" }));
+            }
+        }
+    }
+
+    // PATTERN nodes — pattern_effectiveness.pattern_id is "patterns:{proj}:{key}",
+    // so match a pattern's key as the id suffix.
+    for p in &patterns {
+        let key = s(p, "key");
+        if key.is_empty() { continue; }
+        let uses = p.get("use_count").and_then(|v| v.as_i64()).unwrap_or(0);
+        nodes.push(json!({ "id": format!("pattern:{key}"), "kind": "pattern", "label": clip(&s(p, "content"), 44), "uses": uses }));
+    }
+    for e in &effs {
+        let run_id = s(e, "run_id");
+        if !run_ids.contains(&run_id) { continue; }
+        let pid = s(e, "pattern_id");
+        // Find which pattern node this effectiveness row points at.
+        if let Some(p) = patterns.iter().find(|p| { let k = s(p, "key"); !k.is_empty() && pid.ends_with(&k) }) {
+            let ok = e.get("run_succeeded").and_then(|v| v.as_bool()).unwrap_or(false);
+            edges.push(json!({ "src": run_id, "dst": format!("pattern:{}", s(p, "key")), "kind": "guided", "ok": ok }));
+        }
+    }
+
+    // TRAJECTORY nodes — the trajectory's key IS the run it was recorded from.
+    for (i, t) in trajectories.iter().enumerate() {
+        let run_id = s(t, "key");
+        if !run_ids.contains(&run_id) { continue; }
+        let tid = format!("traj:{i}");
+        nodes.push(json!({ "id": tid, "kind": "trajectory", "label": "trajectory" }));
+        edges.push(json!({ "src": run_id, "dst": tid, "kind": "recorded" }));
+    }
+
+    // FILE nodes (knowledge) — files each run modified, annotated with the
+    // code_entity symbol count for that file.
+    let counts: std::collections::HashMap<String, i64> = entity_counts.iter()
+        .map(|e| (s(e, "file"), e.get("c").and_then(|v| v.as_i64()).unwrap_or(0)))
+        .collect();
+    let mut seen_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for r in &runs {
+        let run_id = s(r, "id");
+        let files = r.get("files_modified").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        for f in files {
+            let Some(path) = f.as_str() else { continue };
+            let fid = format!("file:{path}");
+            if seen_files.insert(path.to_string()) {
+                let base = path.rsplit('/').next().unwrap_or(path);
+                nodes.push(json!({ "id": fid, "kind": "file", "label": base, "path": path, "symbols": counts.get(path).copied().unwrap_or(0) }));
+            }
+            edges.push(json!({ "src": run_id, "dst": fid, "kind": "touched" }));
+        }
+    }
+
+    axum::Json(json!({ "nodes": nodes, "edges": edges }))
 }
 
 /// Execute a SurrealQL text body, one statement at a time, replying in the

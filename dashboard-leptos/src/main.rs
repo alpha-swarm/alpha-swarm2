@@ -6,11 +6,20 @@ use gloo_net::http::Request;
 use gloo_timers::callback::Interval;
 use leptos::*;
 use serde_json::Value;
+use std::collections::HashSet;
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 const SQL_URL: &str = "/sql";
 const POLL_MS: u32 = 3000;
+
+// --- Graph canvas geometry + force-layout tuning (Obsidian-style view) ---
+const GW: f64 = 1180.0;
+const GH: f64 = 760.0;
+const GRAPH_ITERS: usize = 280;
+const DIM_OPACITY: f64 = 0.10;
+const EDGE_OPACITY: f64 = 0.22;
 
 /// POST a SurrealQL statement; return the first statement's result rows.
 async fn sql(query: String) -> Vec<Value> {
@@ -78,6 +87,374 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Graph view — goals ↔ agents ↔ SONA ↔ knowledge, force-directed (Obsidian-ish)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct GNode {
+    id: String,
+    kind: String,
+    label: String,
+    status: String,
+    /// secondary line: model (run) / "Nx reused" (pattern) / "N symbols" (file).
+    sub: String,
+    /// stable identity for detail lookups: run id / pattern key / file path.
+    ident: String,
+}
+
+#[derive(Clone)]
+struct GraphData {
+    nodes: Vec<GNode>,
+    edges: Vec<(usize, usize, bool)>, // (src, dst, ok)
+    pos: Vec<(f64, f64)>,
+    adj: Rc<Vec<HashSet<usize>>>,
+    deg: Vec<usize>,
+}
+
+/// Fill colour per node kind (matches the legend).
+fn kind_color(kind: &str, status: &str) -> &'static str {
+    match kind {
+        "goal" => "#e0af68",
+        "run" => match status {
+            "passed" => "#9ece6a",
+            "failed" => "#f7768e",
+            "running" => "#7aa2f7",
+            "skipped" | "cancelled" => "#565f89",
+            _ => "#a9b1d6",
+        },
+        "pattern" => "#bb9af7",
+        "trajectory" => "#7dcfff",
+        "file" => "#7c8099",
+        _ => "#a9b1d6",
+    }
+}
+
+/// Fruchterman-Reingold force-directed layout. Deterministic (nodes seeded on a
+/// circle by index — no RNG), cooled over `GRAPH_ITERS`. O(n²) per iter; node
+/// counts are LIMITed server-side so this stays well under a frame budget and
+/// runs once per load (not per poll), so the graph doesn't jump around.
+fn layout(n: usize, edges: &[(usize, usize, bool)]) -> Vec<(f64, f64)> {
+    let mut pos: Vec<(f64, f64)> = (0..n)
+        .map(|i| {
+            let a = i as f64 / n.max(1) as f64 * std::f64::consts::TAU;
+            (GW / 2.0 + GW * 0.34 * a.cos(), GH / 2.0 + GH * 0.34 * a.sin())
+        })
+        .collect();
+    if n < 2 {
+        return pos;
+    }
+    let k = 0.75 * ((GW * GH) / n as f64).sqrt();
+    let mut temp = GW * 0.10;
+    for _ in 0..GRAPH_ITERS {
+        let mut disp = vec![(0.0_f64, 0.0_f64); n];
+        // Repulsion between every pair.
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let dx = pos[i].0 - pos[j].0;
+                let dy = pos[i].1 - pos[j].1;
+                let d = (dx * dx + dy * dy).sqrt().max(0.01);
+                let f = k * k / d;
+                let (ux, uy) = (dx / d, dy / d);
+                disp[i].0 += ux * f;
+                disp[i].1 += uy * f;
+                disp[j].0 -= ux * f;
+                disp[j].1 -= uy * f;
+            }
+        }
+        // Attraction along edges.
+        for &(a, b, _) in edges {
+            let dx = pos[a].0 - pos[b].0;
+            let dy = pos[a].1 - pos[b].1;
+            let d = (dx * dx + dy * dy).sqrt().max(0.01);
+            let f = d * d / k;
+            let (ux, uy) = (dx / d, dy / d);
+            disp[a].0 -= ux * f;
+            disp[a].1 -= uy * f;
+            disp[b].0 += ux * f;
+            disp[b].1 += uy * f;
+        }
+        // Apply, capped by temperature, clamped to canvas.
+        for i in 0..n {
+            let (dx, dy) = disp[i];
+            let d = (dx * dx + dy * dy).sqrt().max(0.01);
+            let m = d.min(temp);
+            pos[i].0 = (pos[i].0 + dx / d * m).clamp(28.0, GW - 28.0);
+            pos[i].1 = (pos[i].1 + dy / d * m).clamp(28.0, GH - 28.0);
+        }
+        temp *= 0.965;
+    }
+    pos
+}
+
+/// Fetch /graph, parse, lay out, build adjacency. Runs once per refresh.
+async fn load_graph() -> GraphData {
+    let v = get_json("/graph").await;
+    let nraw = v.get("nodes").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let eraw = v.get("edges").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let nodes: Vec<GNode> = nraw.iter().map(|n| {
+        let kind = field(n, "kind");
+        let sub = match kind.as_str() {
+            "run" => field(n, "model"),
+            "pattern" => format!("{}× reused", n.get("uses").and_then(|v| v.as_i64()).unwrap_or(0)),
+            "file" => format!("{} symbols", n.get("symbols").and_then(|v| v.as_i64()).unwrap_or(0)),
+            _ => String::new(),
+        };
+        let id = field(n, "id");
+        let ident = match kind.as_str() {
+            "pattern" => id.strip_prefix("pattern:").unwrap_or(&id).to_string(),
+            "file" => field(n, "path"),
+            _ => id.clone(),
+        };
+        GNode { id, kind, label: field(n, "label"), status: field(n, "status"), sub, ident }
+    }).collect();
+
+    let index: std::collections::HashMap<String, usize> =
+        nodes.iter().enumerate().map(|(i, n)| (n.id.clone(), i)).collect();
+    let mut edges: Vec<(usize, usize, bool)> = Vec::new();
+    for e in &eraw {
+        let (s, d) = (field(e, "src"), field(e, "dst"));
+        if let (Some(&si), Some(&di)) = (index.get(&s), index.get(&d)) {
+            let ok = e.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
+            edges.push((si, di, ok));
+        }
+    }
+    let n = nodes.len();
+    let pos = layout(n, &edges);
+    let mut adj = vec![HashSet::new(); n];
+    for &(a, b, _) in &edges {
+        adj[a].insert(b);
+        adj[b].insert(a);
+    }
+    let deg = adj.iter().map(|a| a.len()).collect();
+    GraphData { nodes, edges, pos, adj: Rc::new(adj), deg }
+}
+
+/// Fetch the detail payload for a clicked node. Runs get their full row + plan
+/// (so detail_view can show diff + agent output); patterns get their content;
+/// files get their symbol list. Tagged with "mode" for the renderer.
+async fn fetch_node_detail(kind: String, ident: String) -> Value {
+    let id = ident.replace('\'', "");
+    match kind.as_str() {
+        "run" => {
+            let run = sql(format!("SELECT * FROM {id}")).await.into_iter().next().unwrap_or(Value::Null);
+            let plan = sql(format!(
+                "SELECT sub_tasks, version FROM goal_plan WHERE run_id = '{id}' ORDER BY version DESC LIMIT 1"
+            )).await.into_iter().next();
+            let tasks = plan.and_then(|p| p.get("sub_tasks").and_then(|v| v.as_array()).cloned()).unwrap_or_default();
+            serde_json::json!({ "mode": "run", "run": run, "tasks": tasks })
+        }
+        "pattern" => {
+            let rows = sql(format!(
+                "SELECT content, use_count FROM memory_entry WHERE namespace = 'patterns' AND key = '{id}' LIMIT 1"
+            )).await;
+            serde_json::json!({ "mode": "pattern", "rows": rows })
+        }
+        "file" => {
+            let rows = sql(format!(
+                "SELECT name, kind, line FROM code_entity WHERE file = '{id}' ORDER BY line LIMIT 60"
+            )).await;
+            serde_json::json!({ "mode": "file", "rows": rows })
+        }
+        _ => serde_json::json!({ "mode": "none" }),
+    }
+}
+
+/// Build the force-directed SVG. Hover dims everything but the node + its
+/// neighbours (Obsidian-style) and reveals their labels; click selects a node.
+fn render_graph(
+    g: GraphData,
+    hovered: ReadSignal<Option<usize>>,
+    set_hovered: WriteSignal<Option<usize>>,
+    selected: ReadSignal<Option<usize>>,
+    set_selected: WriteSignal<Option<usize>>,
+) -> View {
+    if g.nodes.is_empty() {
+        return view! { <p class="muted">"No graph yet — submit a goal and let a run complete."</p> }.into_view();
+    }
+    let pos = Rc::new(g.pos.clone());
+
+    let pe = pos.clone();
+    let edge_views = g.edges.iter().map(|&(s, d, ok)| {
+        let (x1, y1) = pe[s];
+        let (x2, y2) = pe[d];
+        let color = if ok { "#414868" } else { "#f7768e" };
+        let style = move || {
+            let o = match hovered.get() {
+                None => EDGE_OPACITY,
+                Some(h) => if h == s || h == d { 0.85 } else { 0.03 },
+            };
+            format!("stroke:{color};stroke-width:1;stroke-opacity:{o}")
+        };
+        view! { <line x1=x1 y1=y1 x2=x2 y2=y2 style=style /> }
+    }).collect_view();
+
+    let pn = pos.clone();
+    let node_views = g.nodes.iter().enumerate().map(|(i, node)| {
+        let (x, y) = pn[i];
+        let r = (5.0 + (g.deg[i] as f64).sqrt() * 2.0).min(16.0);
+        let ly = y - r - 4.0;
+        let color = kind_color(&node.kind, &node.status);
+        let label = node.label.clone();
+        let label_kind = node.kind.clone();
+
+        let adj_o = g.adj.clone();
+        let circle_style = move || {
+            let op = match hovered.get() {
+                None => 0.95,
+                Some(h) => if h == i || adj_o[h].contains(&i) { 1.0 } else { DIM_OPACITY },
+            };
+            let ring = if selected.get() == Some(i) { "#c0caf5" } else { "rgba(0,0,0,0)" };
+            format!("fill:{color};fill-opacity:{op};stroke:{ring};stroke-width:2;cursor:pointer")
+        };
+        let adj_l = g.adj.clone();
+        let show_label = move || match hovered.get() {
+            None => label_kind == "goal",
+            Some(h) => h == i || adj_l[h].contains(&i),
+        };
+        view! {
+            <g>
+                <circle cx=x cy=y r=r style=circle_style
+                    on:mouseenter=move |_| set_hovered.set(Some(i))
+                    on:mouseleave=move |_| set_hovered.set(None)
+                    on:click=move |_| set_selected.update(|s| *s = if *s == Some(i) { None } else { Some(i) }) />
+                {move || show_label().then({
+                    let label = label.clone();
+                    move || view! {
+                        <text x=x y=ly style="fill:#c0caf5;font-size:9px;text-anchor:middle;pointer-events:none">{label}</text>
+                    }
+                })}
+            </g>
+        }
+    }).collect_view();
+
+    view! {
+        <svg width=GW height=GH viewBox=format!("0 0 {GW} {GH}")
+            style="max-width:100%;height:auto;background:#16161e;border-radius:8px;border:1px solid #2a2e3f">
+            {edge_views}
+            {node_views}
+        </svg>
+    }.into_view()
+}
+
+#[component]
+fn GraphView() -> impl IntoView {
+    let (refresh, set_refresh) = create_signal(0u32);
+    let data = create_local_resource(move || refresh.get(), |_| async move { load_graph().await });
+    let (hovered, set_hovered) = create_signal::<Option<usize>>(None);
+    let (selected, set_selected) = create_signal::<Option<usize>>(None);
+
+    // Detail of the selected node (keyed on selection + the loaded graph).
+    let detail = create_local_resource(
+        move || data.get().and_then(|g| {
+            let i = selected.get()?;
+            g.nodes.get(i).map(|n| (n.kind.clone(), n.ident.clone()))
+        }),
+        |key| async move {
+            match key {
+                Some((kind, ident)) => fetch_node_detail(kind, ident).await,
+                None => Value::Null,
+            }
+        },
+    );
+
+    let legend = [
+        ("Goal", "#e0af68"), ("Agent ✓", "#9ece6a"), ("Agent ✗", "#f7768e"),
+        ("Running", "#7aa2f7"), ("Pattern", "#bb9af7"), ("Trajectory", "#7dcfff"), ("File", "#7c8099"),
+    ];
+
+    view! {
+        <div class="panel">
+            <div class="row" style="justify-content:space-between; align-items:center">
+                <h2 style="margin:0">"Graph — goals ↔ agents ↔ SONA ↔ knowledge"</h2>
+                <div class="row" style="gap:14px; align-items:center">
+                    <span class="muted">{move || {
+                        let n = data.get().map(|g| g.nodes.len()).unwrap_or(0);
+                        let e = data.get().map(|g| g.edges.len()).unwrap_or(0);
+                        format!("{n} nodes · {e} edges")
+                    }}</span>
+                    <button on:click=move |_| set_refresh.update(|r| *r += 1)>"⟳ refresh"</button>
+                </div>
+            </div>
+            <div class="row" style="gap:14px; flex-wrap:wrap; margin:8px 0 12px">
+                {legend.iter().map(|(name, col)| view! {
+                    <span class="muted" style="display:inline-flex; align-items:center; gap:5px; font-size:12px">
+                        <span style=format!("width:10px;height:10px;border-radius:50%;background:{col};display:inline-block")></span>
+                        {*name}
+                    </span>
+                }).collect_view()}
+            </div>
+            {move || match data.get() {
+                None => view! { <p class="muted">"laying out graph…"</p> }.into_view(),
+                Some(g) => render_graph(g, hovered, set_hovered, selected, set_selected),
+            }}
+            <div style="margin-top:12px; border-top:1px solid #2a2e3f; padding-top:10px">
+                {move || {
+                    let Some(idx) = selected.get() else {
+                        return view! { <p class="muted">"Hover to trace references; click a node to inspect it — agents show their plan, diff + raw output."</p> }.into_view();
+                    };
+                    let Some(g) = data.get() else { return ().into_view(); };
+                    let Some(node) = g.nodes.get(idx).cloned() else { return ().into_view(); };
+                    let neighbors: Vec<(usize, GNode)> = g.adj[idx].iter()
+                        .filter_map(|&j| g.nodes.get(j).map(|n| (j, n.clone()))).collect();
+                    let det = detail.get().unwrap_or(Value::Null);
+                    let body = match field(&det, "mode").as_str() {
+                        "run" => {
+                            let run = det.get("run").cloned().unwrap_or(Value::Null);
+                            let tasks = det.get("tasks").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                            if run.is_null() {
+                                view! { <span class="muted">"loading…"</span> }.into_view()
+                            } else {
+                                detail_view(run, tasks)
+                            }
+                        }
+                        "pattern" => {
+                            let rows = det.get("rows").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                            let content = rows.first().map(|r| field(r, "content")).unwrap_or_default();
+                            view! { <div><b>"Distilled pattern"</b>
+                                <pre style="white-space:pre-wrap; max-height:280px; overflow:auto">{content}</pre></div> }.into_view()
+                        }
+                        "file" => {
+                            let rows = det.get("rows").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                            view! { <div><b>"Symbols (code_entity)"</b>
+                                <ul style="max-height:240px; overflow:auto">
+                                    {rows.iter().map(|r| view! {
+                                        <li class="muted">{field(r, "kind")}" "<b style="color:var(--fg)">{field(r, "name")}</b>" :"{field(r, "line")}</li>
+                                    }).collect_view()}
+                                </ul></div> }.into_view()
+                        }
+                        _ => view! { <span class="muted">"loading…"</span> }.into_view(),
+                    };
+                    view! {
+                        <div>
+                            <div class="row" style="gap:10px; align-items:center; margin-bottom:6px">
+                                <span style=format!("width:12px;height:12px;border-radius:50%;background:{};display:inline-block", kind_color(&node.kind, &node.status))></span>
+                                <b>{node.kind.clone()}</b>
+                                <span class="goal">{node.label.clone()}</span>
+                                {(!node.sub.is_empty()).then(|| view! { <span class="muted">"· "{node.sub.clone()}</span> })}
+                            </div>
+                            <div class="muted" style="margin-bottom:8px; font-size:12px">
+                                <b>"Connected ("{neighbors.len()}"): "</b>
+                                {neighbors.into_iter().map(|(j, n)| {
+                                    let dot = kind_color(&n.kind, &n.status);
+                                    view! {
+                                        <span style="cursor:pointer; margin-right:8px"
+                                            on:click=move |_| set_selected.set(Some(j))>
+                                            <span style=format!("width:8px;height:8px;border-radius:50%;background:{dot};display:inline-block;margin-right:3px")></span>
+                                            {truncate(&n.label, 28)}
+                                        </span>
+                                    }
+                                }).collect_view()}
+                            </div>
+                            {body}
+                        </div>
+                    }.into_view()
+                }}
+            </div>
+        </div>
+    }
+}
+
 #[component]
 fn App() -> impl IntoView {
     let (tick, set_tick) = create_signal(0u32);
@@ -101,6 +478,7 @@ fn App() -> impl IntoView {
         </header>
         <main>
             <SubmitGoal set_tick=set_tick/>
+            <GraphView/>
             <Queue tick=tick/>
             <Runs tick=tick/>
             <div class="grid2">
@@ -213,6 +591,7 @@ fn detail_view(r: Value, tasks: Vec<Value>) -> View {
     let files = r.get("files_modified").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let err = field(&r, "error_message");
     let diff = field(&r, "diff");
+    let output = field(&r, "response_text");
     let num = |k: &str| r.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
     view! {
         <div style="padding:6px 0 10px">
@@ -241,6 +620,10 @@ fn detail_view(r: Value, tasks: Vec<Value>) -> View {
             {(!diff.is_empty()).then(|| view! {
                 <div><b>"Diff"</b>
                     <pre style="white-space:pre-wrap; max-height:300px; overflow:auto">{truncate(&diff, 4000)}</pre></div>
+            })}
+            {(!output.is_empty()).then(|| view! {
+                <div><b>"Agent output"</b>
+                    <pre style="white-space:pre-wrap; max-height:260px; overflow:auto; color:var(--muted)">{truncate(&output, 4000)}</pre></div>
             })}
         </div>
     }.into_view()
