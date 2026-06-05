@@ -108,8 +108,67 @@ fn App() -> impl IntoView {
                 <Recent tick=tick/>
             </div>
             <Review tick=tick/>
+            <Provenance tick=tick/>
             <Memory tick=tick/>
         </main>
+    }
+}
+
+#[component]
+fn Provenance(tick: ReadSignal<u32>) -> impl IntoView {
+    // Learning provenance: each distilled pattern + the runs that derived from
+    // it (pattern_effectiveness links a run to the pattern that guided it).
+    let patterns = create_local_resource(
+        move || tick.get(),
+        |_| async move {
+            sql("SELECT key, content, use_count FROM memory_entry WHERE namespace = 'patterns' ORDER BY use_count DESC LIMIT 20".into()).await
+        },
+    );
+    let links = create_local_resource(
+        move || tick.get(),
+        |_| async move {
+            sql("SELECT pattern_id, run_id, run_succeeded FROM pattern_effectiveness LIMIT 500".into()).await
+        },
+    );
+    view! {
+        <div class="panel">
+            <h2>"Provenance — runs derived from each learned pattern"</h2>
+            {move || {
+                let lks = links.get().unwrap_or_default();
+                let pats = patterns.get().unwrap_or_default();
+                if pats.is_empty() {
+                    return view! { <p class="muted">"No distilled patterns yet — they appear once successful runs are learned from."</p> }.into_view();
+                }
+                pats.into_iter().map(|p| {
+                    let key = field(&p, "key");
+                    let runs: Vec<&Value> = lks.iter()
+                        .filter(|l| field(l, "pattern_id").ends_with(&key))
+                        .collect();
+                    let uc = p.get("use_count").and_then(|v| v.as_i64()).unwrap_or(0);
+                    view! {
+                        <details style="margin-bottom:6px">
+                            <summary style="cursor:pointer">
+                                {truncate(&field(&p, "content"), 110)}
+                                <span class="muted">" — guided "{runs.len()}" run(s), reused "{uc}"×"</span>
+                            </summary>
+                            <ul>
+                                {runs.iter().map(|l| {
+                                    let ok = l.get("run_succeeded").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    let mark = if ok { "✓" } else { "✗" };
+                                    let color = if ok { "var(--ok)" } else { "var(--fail)" };
+                                    view! {
+                                        <li class="muted">
+                                            <span style=format!("color:{color}")>{mark}</span>
+                                            " "{field(l, "run_id")}
+                                        </li>
+                                    }
+                                }).collect_view()}
+                            </ul>
+                        </details>
+                    }
+                }).collect_view().into_view()
+            }}
+        </div>
     }
 }
 
