@@ -264,7 +264,7 @@ const VERIFY_DIFF_MAX_CHARS: usize = 4000;
 const VERIFY_MAX_TOKENS: u32 = 256;
 /// Max chars of the reject reason carried into the run record.
 const VERIFY_REASON_MAX_CHARS: usize = 200;
-const VERIFY_SYSTEM: &str = "You are a strict code reviewer. You are given a GOAL and a unified DIFF that already compiles and passes existing tests. Judge ONLY whether the diff correctly and completely satisfies the goal without deleting needed logic, weakening checks/validation, or introducing obvious bugs. Be conservative: a diff that compiles and is plausibly correct should be ACCEPTED. Reply with EXACTLY ONE line: 'VERDICT: ACCEPT' or 'VERDICT: REJECT <one short reason>'.";
+const VERIFY_SYSTEM: &str = "You are a rigorous, skeptical code reviewer. You are given a GOAL and a unified DIFF. The diff already compiles and passes EXISTING tests, but those tests may be thin or absent — passing is NOT proof of correctness, do not treat it as such. Decide whether the diff DEMONSTRABLY and COMPLETELY accomplishes the goal. REJECT if ANY of: it does not actually do what the goal asks; it is a no-op or only cosmetic when a real change was expected; it removes or weakens existing logic, validation, error handling, or replaces good documentation with worse; it is incomplete (e.g. changes one of several call sites that should all change); it adds no test for new/changed behaviour that warrants one; or it merely looks plausible and you cannot confirm correctness from the diff alone. A clean compile is NOT sufficient. When in doubt, REJECT. Reply with EXACTLY ONE line: 'VERDICT: ACCEPT' or 'VERDICT: REJECT <one short reason>'.";
 
 enum VerifyVerdict {
     Accept,
@@ -275,12 +275,55 @@ enum VerifyVerdict {
 /// rejection; on any inference error or ambiguous output it ACCEPTS (the cargo
 /// gate already passed — never block on a flaky second opinion). Uses the agent
 /// tier (cheaper than the 70b orchestrator).
+/// Does the diff add a test (a unit test or an assertion)?
+fn diff_adds_test(diff: &str) -> bool {
+    diff.lines()
+        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+        .any(|l| {
+            let t = l[1..].trim();
+            t.contains("#[test]") || t.contains("#[cfg(test)]")
+                || t.starts_with("assert") || t.contains("assert_eq!") || t.contains("assert!(")
+        })
+}
+
+/// True only if EVERY changed (+/-) line is a comment/doc/blank — i.e. the diff
+/// touches no real code. Trivial + safe → the critic's bar can be lenient.
+fn diff_is_doc_only(diff: &str) -> bool {
+    let mut any = false;
+    for l in diff.lines() {
+        let body = if l.starts_with('+') && !l.starts_with("+++") {
+            &l[1..]
+        } else if l.starts_with('-') && !l.starts_with("---") {
+            &l[1..]
+        } else {
+            continue;
+        };
+        let t = body.trim();
+        if t.is_empty() {
+            continue;
+        }
+        any = true;
+        let is_doc = t.starts_with("///") || t.starts_with("//!") || t.starts_with("//")
+            || t.starts_with("/*") || t.starts_with('*');
+        if !is_doc {
+            return false;
+        }
+    }
+    any
+}
+
 async fn adversarial_verify(router: &InferenceRouter, config: &SwarmConfig, goal: &str, diff: &str) -> VerifyVerdict {
     if diff.trim().is_empty() {
         return VerifyVerdict::Accept;
     }
+    let doc_only = diff_is_doc_only(diff);
+    let cov = if diff_adds_test(diff) {
+        "The diff INCLUDES a test exercising the change."
+    } else {
+        "The diff does NOT include any test."
+    };
     let diff_snippet: String = diff.chars().take(VERIFY_DIFF_MAX_CHARS).collect();
-    let user = format!("GOAL: {goal}\n\nDIFF:\n{diff_snippet}");
+    let user = format!("GOAL: {goal}\n\n{cov}\n\nDIFF:\n{diff_snippet}");
     let messages = vec![
         inference_client::ChatMessage::system(VERIFY_SYSTEM),
         inference_client::ChatMessage::user(user),
@@ -294,18 +337,27 @@ async fn adversarial_verify(router: &InferenceRouter, config: &SwarmConfig, goal
     match router.chat(&messages, inference_client::Complexity::Medium, &options).await {
         Ok(resp) => {
             let upper = resp.content.to_uppercase();
-            // Reject ONLY on an explicit REJECT verdict; anything else accepts.
-            if upper.contains("VERDICT: REJECT") || upper.contains("VERDICT:REJECT") {
+            let rejected = upper.contains("VERDICT: REJECT") || upper.contains("VERDICT:REJECT");
+            let accepted = upper.contains("VERDICT: ACCEPT") || upper.contains("VERDICT:ACCEPT");
+            if rejected {
                 let reason: String = resp.content.lines()
                     .find(|l| l.to_uppercase().contains("REJECT"))
                     .unwrap_or("semantic verify rejected")
                     .chars().take(VERIFY_REASON_MAX_CHARS).collect();
                 VerifyVerdict::Reject(reason)
-            } else {
+            } else if accepted || doc_only {
+                // Explicit accept, OR an ambiguous verdict on a trivial doc-only
+                // change (don't over-reject safe comment edits).
                 VerifyVerdict::Accept
+            } else {
+                // Reject-on-doubt: a substantive change the critic could not
+                // explicitly confirm correct is NOT trusted (gate already passed,
+                // so this only downgrades).
+                VerifyVerdict::Reject("verify inconclusive — correctness not confirmed".into())
             }
         }
         Err(e) => {
+            // Infra failure ≠ bad code — never block on a flaky second opinion.
             warn!(error = %e, "adversarial verify inference failed — accepting (gate already passed)");
             VerifyVerdict::Accept
         }
@@ -1175,10 +1227,12 @@ async fn handle_execute(
             // Adversarial verify (opt-in): a 2nd-model semantic critique that can
             // only DOWNGRADE a passed run to Failed (never upgrade a failed gate),
             // so it strictly raises the bar; the cargo gate stays the backstop.
+            let mut verify_reason: Option<String> = None;
             let (status, gate_passed) = if gate_passed && config.learning.verify_diffs {
                 match adversarial_verify(&router, config, goal, result.merged_diff.as_deref().unwrap_or("")).await {
                     VerifyVerdict::Reject(reason) => {
                         warn!(task_id, reason = %reason, "adversarial verify REJECTED — downgrading to Failed");
+                        verify_reason = Some(format!("verify-reject: {reason}"));
                         (RunStatus::Failed, false)
                     }
                     VerifyVerdict::Accept => (status, gate_passed),
@@ -1319,7 +1373,11 @@ async fn handle_execute(
                 .cloned()
                 .collect();
 
-            if !any_work_done {
+            if let Some(vr) = verify_reason {
+                // Adversarial verify downgraded a gate-passing run — record WHY,
+                // so verify-rejections are distinguishable from cargo-gate fails.
+                final_run.error_message = Some(vr);
+            } else if !any_work_done {
                 final_run.error_message = Some(if agent_errors.is_empty() {
                     "All agents completed without making changes".into()
                 } else {

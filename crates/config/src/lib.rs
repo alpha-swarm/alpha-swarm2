@@ -87,7 +87,9 @@ pub struct LearningConfig {
     pub proven_plans_char_budget: usize,
     /// Adversarial verify: after the cargo gate passes, run a 2nd-model semantic
     /// critique of (goal, diff) that can DOWNGRADE the run to Failed (never
-    /// upgrade). Costs one extra inference (serializes on Ollama) — OFF by default.
+    /// upgrade). The cargo gate only proves "compiles + existing tests pass" —
+    /// on a thinly-tested codebase that's weak, so this is the correctness
+    /// backstop. ON by default; one extra inference (serializes on Ollama).
     pub verify_diffs: bool,
 }
 
@@ -99,7 +101,7 @@ impl Default for LearningConfig {
             max_proven_plans: DEFAULT_MAX_PROVEN_PLANS,
             min_similarity: DEFAULT_LEARNING_MIN_SIMILARITY,
             proven_plans_char_budget: DEFAULT_PROVEN_PLANS_CHAR_BUDGET,
-            verify_diffs: false,
+            verify_diffs: true,
         }
     }
 }
