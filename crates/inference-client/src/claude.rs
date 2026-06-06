@@ -186,6 +186,7 @@ impl InferenceBackend for ClaudeBackend {
             backend: BackendKind::Claude,
             tokens_input: resp.usage.input_tokens,
             tokens_output: resp.usage.output_tokens,
+            cached_tokens: 0,
             duration_ms,
         })
     }

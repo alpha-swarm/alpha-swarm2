@@ -19,13 +19,19 @@ const ATTEMPT_PREVIEW_CHARS: usize = 500;
 const TOOL_RESULT_MAX_CHARS: usize = 2_000;
 /// Max characters for tool call/result previews stored in records.
 const TOOL_RECORD_PREVIEW_CHARS: usize = 200;
+/// Cap on tokens GENERATED per call. Decoupled from the context window: a tier
+/// may read a large prompt (context_window) but a single agent step (one tool
+/// call + reasoning, or a plan) rarely needs more than this to emit. Capping it
+/// bounds runaway generations — the dominant cost on local models — without
+/// shrinking the readable context. The gate catches the rare real truncation.
+const MAX_OUTPUT_TOKENS: u32 = 4096;
 
 // --- Helper functions ---
 
 /// Inference options for a given tier.
 fn tier_options(tier: &swarm_config::TierConfig) -> InferenceOptions {
     InferenceOptions {
-        max_tokens: Some(tier.context_window),
+        max_tokens: Some(tier.context_window.min(MAX_OUTPUT_TOKENS)),
         preferred_model: Some(tier.model.clone()),
         preferred_backend: Some(inference_client::BackendKind::Ollama),
         ..Default::default()
@@ -226,6 +232,7 @@ impl Agent {
                             backend: inference_client::BackendKind::Ollama,
                             tokens_input: 0,
                             tokens_output: 0,
+                            cached_tokens: 0,
                             duration_ms: 0,
                         },
                         applied: false,
@@ -840,6 +847,7 @@ impl Agent {
                 backend: inference_client::BackendKind::Ollama,
                 tokens_input: total_tokens_in,
                 tokens_output: total_tokens_out,
+                cached_tokens: 0,
                 duration_ms: total_duration,
             },
             applied,

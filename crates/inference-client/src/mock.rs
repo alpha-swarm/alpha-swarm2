@@ -100,6 +100,7 @@ impl InferenceBackend for MockBackend {
             backend: self.kind,
             tokens_input: 100,
             tokens_output: 50,
+            cached_tokens: 0,
             duration_ms: 500,
         })
     }

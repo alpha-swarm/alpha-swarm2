@@ -54,6 +54,10 @@ pub struct InferenceResponse {
     pub backend: BackendKind,
     pub tokens_input: u32,
     pub tokens_output: u32,
+    /// Tokens served from the backend's prompt/KV prefix cache (mlx_lm.server
+    /// reports this; 0 elsewhere). High vs `tokens_input` = the stable prompt
+    /// prefix is being reused across tool-loop steps instead of re-prefilled.
+    pub cached_tokens: u32,
     pub duration_ms: u64,
 }
 
