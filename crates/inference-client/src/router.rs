@@ -191,6 +191,22 @@ impl InferenceRouter {
         complexity: Complexity,
         options: &InferenceOptions,
     ) -> Result<InferenceResponse> {
+        // Preferred MODEL with MULTIPLE backends (e.g. one MLX server per model
+        // on its own port): route to the backend that actually HOSTS the model,
+        // not just the first of its kind. Single-backend setups skip this (no
+        // extra /models round-trip) and use the fast path below.
+        if let Some(ref pm) = options.preferred_model
+            && self.backends.len() > 1 {
+                let indexed = self.list_models_indexed().await;
+                if let Some(&(idx, _)) = indexed.iter().find(|(_, m)| &m.name == pm) {
+                    let _guard = InFlightGuard::enter(&self.in_flight[idx]);
+                    match self.backends[idx].chat(pm, messages, options).await {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => warn!(model = %pm, host = idx, "preferred-model backend failed: {e}"),
+                    }
+                }
+        }
+
         // If user specified a backend/model, try that first
         if let Some(preferred) = options.preferred_backend
             && let Some(backend) = self.backends.iter().find(|b| b.kind() == preferred) {
