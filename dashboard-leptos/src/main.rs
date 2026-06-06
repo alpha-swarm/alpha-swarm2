@@ -21,6 +21,20 @@ const GRAPH_ITERS: usize = 280;
 const DIM_OPACITY: f64 = 0.10;
 const EDGE_OPACITY: f64 = 0.22;
 
+// --- 3D graph bridge (graph-bridge.js → 3d-force-graph / three.js). The JS
+// globals load in index.html before the WASM bundle, so these are safe to call
+// from Leptos effects (which run after mount). The bridge buffers data until
+// its WebGL instance exists and routes node clicks back via setOnClick. ---
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = AlphaGraph, js_name = init)]
+    fn graph3d_init(container_id: &str);
+    #[wasm_bindgen(js_namespace = AlphaGraph, js_name = setData)]
+    fn graph3d_set_data(nodes_json: &str, links_json: &str);
+    #[wasm_bindgen(js_namespace = AlphaGraph, js_name = setOnClick)]
+    fn graph3d_set_on_click(cb: &Closure<dyn FnMut(f64)>);
+}
+
 /// POST a SurrealQL statement; return the first statement's result rows.
 async fn sql(query: String) -> Vec<Value> {
     let built = Request::post(SQL_URL)
@@ -128,6 +142,45 @@ fn kind_color(kind: &str, status: &str) -> &'static str {
         "file" => "#7c8099",
         _ => "#a9b1d6",
     }
+}
+
+/// Legend bucket a node belongs to — the toggle key for show/hide. Runs split
+/// by status (matching the legend rows); everything else is keyed by kind.
+fn node_key(kind: &str, status: &str) -> &'static str {
+    match kind {
+        "goal" => "goal",
+        "run" => match status {
+            "passed" => "run-pass",
+            "failed" => "run-fail",
+            "running" => "run-running",
+            _ => "run-other", // skipped/cancelled: no legend row → not toggleable
+        },
+        "pattern" => "pattern",
+        "trajectory" => "trajectory",
+        "file" => "file",
+        _ => "other",
+    }
+}
+
+/// Serialize the graph for the 3D bridge: nodes keyed by index (id), links by
+/// (source,target) index. The library runs its own 3D force layout, so the 2D
+/// `pos` is unused here. Colour + degree mirror the 2D legend/sizing. Nodes
+/// whose legend bucket is in `hidden` (and edges touching them) are dropped;
+/// surviving nodes keep their original index as id, so clicks still map back.
+fn graph_json(g: &GraphData, hidden: &HashSet<String>) -> (String, String) {
+    let vis = |i: usize| !hidden.contains(node_key(&g.nodes[i].kind, &g.nodes[i].status));
+    let nodes: Vec<Value> = g.nodes.iter().enumerate().filter(|(i, _)| vis(*i)).map(|(i, n)| serde_json::json!({
+        "id": i,
+        "label": n.label,
+        "kind": n.kind,
+        "sub": n.sub,
+        "color": kind_color(&n.kind, &n.status),
+        "deg": g.deg.get(i).copied().unwrap_or(0),
+    })).collect();
+    let links: Vec<Value> = g.edges.iter().filter(|(s, d, _)| vis(*s) && vis(*d)).map(|&(s, d, ok)| serde_json::json!({
+        "source": s, "target": d, "ok": ok,
+    })).collect();
+    (Value::Array(nodes).to_string(), Value::Array(links).to_string())
 }
 
 /// Fruchterman-Reingold force-directed layout. Deterministic (nodes seeded on a
@@ -268,14 +321,21 @@ fn render_graph(
     set_hovered: WriteSignal<Option<usize>>,
     selected: ReadSignal<Option<usize>>,
     set_selected: WriteSignal<Option<usize>>,
+    hidden: HashSet<String>,
 ) -> View {
     if g.nodes.is_empty() {
         return view! { <p class="muted">"No graph yet — submit a goal and let a run complete."</p> }.into_view();
     }
     let pos = Rc::new(g.pos.clone());
+    // Per-node visibility from the legend toggles; hidden nodes + any edge
+    // touching them are dropped (indices preserved for the surviving ones).
+    let visible: Rc<Vec<bool>> = Rc::new(
+        g.nodes.iter().map(|n| !hidden.contains(node_key(&n.kind, &n.status))).collect()
+    );
 
     let pe = pos.clone();
-    let edge_views = g.edges.iter().map(|&(s, d, ok)| {
+    let ve = visible.clone();
+    let edge_views = g.edges.iter().filter(|e| ve[e.0] && ve[e.1]).map(|&(s, d, ok)| {
         let (x1, y1) = pe[s];
         let (x2, y2) = pe[d];
         let color = if ok { "#414868" } else { "#f7768e" };
@@ -290,7 +350,8 @@ fn render_graph(
     }).collect_view();
 
     let pn = pos.clone();
-    let node_views = g.nodes.iter().enumerate().map(|(i, node)| {
+    let vn = visible.clone();
+    let node_views = g.nodes.iter().enumerate().filter(|(i, _)| vn[*i]).map(|(i, node)| {
         let (x, y) = pn[i];
         let r = (5.0 + (g.deg[i] as f64).sqrt() * 2.0).min(16.0);
         let ly = y - r - 4.0;
@@ -343,6 +404,36 @@ fn GraphView() -> impl IntoView {
     let data = create_local_resource(move || refresh.get(), |_| async move { load_graph().await });
     let (hovered, set_hovered) = create_signal::<Option<usize>>(None);
     let (selected, set_selected) = create_signal::<Option<usize>>(None);
+    // 3D (WebGL force graph) is the default view; toggle drops back to the 2D SVG.
+    let (view_3d, set_view_3d) = create_signal(true);
+    // Legend buckets toggled off (hidden). Click a legend chip to show/hide that
+    // kind in both the 3D and 2D views.
+    let (hidden, set_hidden) = create_signal::<HashSet<String>>(HashSet::new());
+
+    // Register the node-click callback once: the 3D graph reports the clicked
+    // node's id (= its index), which drives the SAME `selected` signal + detail
+    // panel as the 2D view. Closure is leaked (lives for the app's lifetime).
+    create_effect(move |prev: Option<()>| {
+        if prev.is_none() {
+            let cb = Closure::wrap(Box::new(move |id: f64| {
+                set_selected.set(Some(id as usize));
+            }) as Box<dyn FnMut(f64)>);
+            graph3d_set_on_click(&cb);
+            cb.forget();
+        }
+    });
+
+    // Push graph data into the 3D instance whenever the data or view changes.
+    // Re-runs on refresh (data) and on toggling back to 3D; init is idempotent
+    // and the bridge buffers data until its container <div> is mounted.
+    create_effect(move |_| {
+        if !view_3d.get() { return; }
+        let Some(g) = data.get() else { return; };
+        let h = hidden.get();                       // re-runs when legend toggled
+        let (nodes_json, links_json) = graph_json(&g, &h);
+        graph3d_init("graph3d");
+        graph3d_set_data(&nodes_json, &links_json);
+    });
 
     // Detail of the selected node (keyed on selection + the loaded graph).
     let detail = create_local_resource(
@@ -358,13 +449,16 @@ fn GraphView() -> impl IntoView {
         },
     );
 
+    // (legend bucket key, label, colour). Key matches node_key() for toggling.
     let legend = [
-        ("Goal", "#e0af68"), ("Agent ✓", "#9ece6a"), ("Agent ✗", "#f7768e"),
-        ("Running", "#7aa2f7"), ("Pattern", "#bb9af7"), ("Trajectory", "#7dcfff"), ("File", "#7c8099"),
+        ("goal", "Goal", "#e0af68"), ("run-pass", "Agent ✓", "#9ece6a"), ("run-fail", "Agent ✗", "#f7768e"),
+        ("run-running", "Running", "#7aa2f7"), ("pattern", "Pattern", "#bb9af7"),
+        ("trajectory", "Trajectory", "#7dcfff"), ("file", "File", "#7c8099"),
     ];
 
     view! {
-        <div class="panel">
+        <div class="graph-section">
+        <div class="graph-main panel">
             <div class="row" style="justify-content:space-between; align-items:center">
                 <h2 style="margin:0">"Graph — goals ↔ agents ↔ SONA ↔ knowledge"</h2>
                 <div class="row" style="gap:14px; align-items:center">
@@ -373,25 +467,53 @@ fn GraphView() -> impl IntoView {
                         let e = data.get().map(|g| g.edges.len()).unwrap_or(0);
                         format!("{n} nodes · {e} edges")
                     }}</span>
+                    <button on:click=move |_| set_view_3d.update(|v| *v = !*v)>
+                        {move || if view_3d.get() { "▦ 2D" } else { "✸ 3D" }}
+                    </button>
                     <button on:click=move |_| set_refresh.update(|r| *r += 1)>"⟳ refresh"</button>
                 </div>
             </div>
             <div class="row" style="gap:14px; flex-wrap:wrap; margin:8px 0 12px">
-                {legend.iter().map(|(name, col)| view! {
-                    <span class="muted" style="display:inline-flex; align-items:center; gap:5px; font-size:12px">
-                        <span style=format!("width:10px;height:10px;border-radius:50%;background:{col};display:inline-block")></span>
-                        {*name}
-                    </span>
+                {legend.iter().map(|(key, name, col)| {
+                    let key = key.to_string();
+                    let (kc, kd) = (key.clone(), key.clone());
+                    let off = move || hidden.get().contains(&kc);
+                    let toggle = move |_| set_hidden.update(|h| { if !h.remove(&kd) { h.insert(kd.clone()); } });
+                    let chip_style = move || format!(
+                        "display:inline-flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;user-select:none;{}",
+                        if off() { "opacity:0.4;text-decoration:line-through" } else { "" }
+                    );
+                    let dot_style = format!("width:10px;height:10px;border-radius:50%;background:{col};display:inline-block");
+                    view! {
+                        <span class="muted" style=chip_style on:click=toggle title="click to show/hide">
+                            <span style=dot_style></span>
+                            {*name}
+                        </span>
+                    }
                 }).collect_view()}
             </div>
-            {move || match data.get() {
-                None => view! { <p class="muted">"laying out graph…"</p> }.into_view(),
-                Some(g) => render_graph(g, hovered, set_hovered, selected, set_selected),
+            {move || {
+                if view_3d.get() {
+                    // 3D: the bridge attaches a WebGL canvas to this div and runs
+                    // its own force layout. Drag to orbit, scroll to zoom, click a
+                    // node to fly in + inspect it in the panel below.
+                    view! {
+                        <div id="graph3d"
+                            style="width:100%;background:#0d1117;border-radius:8px;border:1px solid #2a2e3f;overflow:hidden"></div>
+                    }.into_view()
+                } else {
+                    match data.get() {
+                        None => view! { <p class="muted">"laying out graph…"</p> }.into_view(),
+                        Some(g) => render_graph(g, hovered, set_hovered, selected, set_selected, hidden.get()),
+                    }
+                }
             }}
-            <div style="margin-top:12px; border-top:1px solid #2a2e3f; padding-top:10px">
+        </div>
+        <aside class="inspector panel">
+            <h2>"Inspector"</h2>
                 {move || {
                     let Some(idx) = selected.get() else {
-                        return view! { <p class="muted">"Hover to trace references; click a node to inspect it — agents show their plan, diff + raw output."</p> }.into_view();
+                        return view! { <p class="muted">"Click a node to inspect it — runs show plan + diff + raw output; patterns show content; files show symbols."</p> }.into_view();
                     };
                     let Some(g) = data.get() else { return ().into_view(); };
                     let Some(node) = g.nodes.get(idx).cloned() else { return ().into_view(); };
@@ -450,14 +572,19 @@ fn GraphView() -> impl IntoView {
                         </div>
                     }.into_view()
                 }}
-            </div>
+        </aside>
         </div>
     }
 }
 
+/// Which section the sidebar nav is showing in the content pane.
+#[derive(Clone, Copy, PartialEq)]
+enum Section { Graph, Runs, Queue, Knowledge, Review }
+
 #[component]
 fn App() -> impl IntoView {
     let (tick, set_tick) = create_signal(0u32);
+    let (section, set_section) = create_signal(Section::Graph);
     // Fallback poll.
     Interval::new(POLL_MS, move || set_tick.update(|t| *t += 1)).forget();
     // Live: bump tick on each swarm event (real-time refresh; poll is the
@@ -470,25 +597,41 @@ fn App() -> impl IntoView {
         cb.forget();
         std::mem::forget(es); // keep the connection open for the app lifetime
     }
+    let nav = move |s: Section, label: &'static str| view! {
+        <button class="nav-item" class:active=move || section.get() == s
+            on:click=move |_| set_section.set(s)>{label}</button>
+    };
     view! {
         <header>
             <span class="dot"></span>
             <h1>"alpha-swarm"</h1>
             <span class="muted">"local agent swarm — live"</span>
         </header>
-        <main>
-            <SubmitGoal set_tick=set_tick/>
-            <GraphView/>
-            <Queue tick=tick/>
-            <Runs tick=tick/>
-            <div class="grid2">
-                <Routing tick=tick/>
-                <Recent tick=tick/>
-            </div>
-            <Review tick=tick/>
-            <Provenance tick=tick/>
-            <Memory tick=tick/>
-        </main>
+        <div class="app">
+            <aside class="sidebar">
+                {nav(Section::Graph, "◉ Graph")}
+                {nav(Section::Runs, "▤ Runs")}
+                {nav(Section::Queue, "▸ Queue")}
+                {nav(Section::Knowledge, "✦ Knowledge")}
+                {nav(Section::Review, "⎇ Review")}
+                <div class="sidebar-foot">
+                    <SubmitGoal set_tick=set_tick/>
+                </div>
+            </aside>
+            <section class="content">
+                {move || match section.get() {
+                    Section::Graph => view! { <GraphView/> }.into_view(),
+                    Section::Runs => view! { <Runs tick=tick/> }.into_view(),
+                    Section::Queue => view! { <Queue tick=tick/> }.into_view(),
+                    Section::Knowledge => view! {
+                        <div class="grid2"><Routing tick=tick/><Recent tick=tick/></div>
+                        <Provenance tick=tick/>
+                        <Memory tick=tick/>
+                    }.into_view(),
+                    Section::Review => view! { <Review tick=tick/> }.into_view(),
+                }}
+            </section>
+        </div>
     }
 }
 
