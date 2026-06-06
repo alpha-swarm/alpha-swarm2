@@ -777,9 +777,13 @@ impl SwarmRunner {
                         // bigger model than the fast planner tier — escalate to
                         // the pre-warmed agent tier. Edits/docs stay on 14b.
                         let exec_model = if tmpl_eff == "refactor"
+                            || tmpl_eff == "doc"
                             || matches!(task.complexity, inference_client::Complexity::Complex)
                         {
-                            info!(task_id = %task.id, model = %self.agent_tier.model, "escalating to agent tier (refactor/complex)");
+                            // doc = full-file rewrite: the fast 14b truncates a
+                            // non-trivial file (drops sections); the 32b reproduces
+                            // it faithfully. refactor/complex also need the big tier.
+                            info!(task_id = %task.id, model = %self.agent_tier.model, "escalating to agent tier (refactor/doc/complex)");
                             self.agent_tier.model.clone()
                         } else {
                             self.planner_tier.model.clone()
