@@ -162,6 +162,14 @@ mod tests {
     }
 
     #[test]
+    fn test_is_code_file() {
+        assert!(is_code_file("src/main.rs"));
+        assert!(is_code_file("lib.rs"));
+        assert!(!is_code_file("README.md"));
+        assert!(!is_code_file("config.toml"));
+    }
+
+    #[test]
     fn fuzzy_replace_rewrites_all_sites() {
         // Multi-site refactor: one block, repeated expression → EVERY site.
         let content = "let a = key(x);\nlet b = key(y) + key(x);\n";
