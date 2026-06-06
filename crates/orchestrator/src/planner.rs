@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use inference_client::{ChatMessage, Complexity, InferenceOptions, InferenceRouter};
-use crate::planner_types::{SubTask, PLANNER_SYSTEM, REPLANNER_SYSTEM, parse_plan};
+use crate::planner_types::{SubTask, PLANNER_SYSTEM, REPLANNER_SYSTEM, parse_plan, constrain_to_named_files};
 
 /// Max chars of step error text included in a replan prompt.
 const MAX_REPLAN_ERROR_CHARS: usize = 600;
@@ -122,6 +122,9 @@ pub async fn plan_goal(
 
     let tasks = parse_plan(json_str, repo_files)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Scope guard: if the goal named specific files, never let the plan edit
+    // other existing files (local planners over-decompose + break unrelated crates).
+    let tasks = constrain_to_named_files(goal, tasks, repo_files);
 
     let mut seen_files = std::collections::HashSet::new();
     for task in &tasks {
@@ -202,6 +205,7 @@ pub async fn replan_goal(
     // initial plan (cycle detection, file-hallucination dropping, glob rejection).
     let tasks = parse_plan(json_str, repo_files)
         .map_err(|e| anyhow::anyhow!("Replan validation failed: {e}"))?;
+    let tasks = constrain_to_named_files(goal, tasks, repo_files);
 
     info!(task_count = tasks.len(), "Replan produced remaining tasks");
     Ok(tasks)
