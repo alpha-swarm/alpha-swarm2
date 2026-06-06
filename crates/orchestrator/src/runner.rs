@@ -763,12 +763,20 @@ impl SwarmRunner {
 
                     // Graph executor path: known template → fewer LLM calls
                     if let Some(ref tmpl) = task.template {
-                        info!(task_id = %task.id, template = %tmpl, "Using graph executor");
-                        let crate_name = crate::graph::detect_crate(&wt_path, task.files.first().map(|s| s.as_str()).unwrap_or(""));
+                        let first_file = task.files.first().map(|s| s.as_str()).unwrap_or("");
+                        // Route by FILE EXTENSION, not the planner's label: local
+                        // planners mislabel .md/.toml/.yaml as "edit", and OLD-block
+                        // diffs don't apply reliably to a large doc — force the doc
+                        // (full-file rewrite) path for doc/config files.
+                        let is_doc = [".md", ".markdown", ".toml", ".yaml", ".yml", ".txt", ".rst"]
+                            .iter().any(|ext| first_file.ends_with(ext));
+                        let tmpl_eff = if is_doc { "doc" } else { tmpl.as_str() };
+                        info!(task_id = %task.id, template = %tmpl_eff, "Using graph executor");
+                        let crate_name = crate::graph::detect_crate(&wt_path, first_file);
                         // Structural work (refactors / complex tasks) needs a
                         // bigger model than the fast planner tier — escalate to
                         // the pre-warmed agent tier. Edits/docs stay on 14b.
-                        let exec_model = if tmpl.as_str() == "refactor"
+                        let exec_model = if tmpl_eff == "refactor"
                             || matches!(task.complexity, inference_client::Complexity::Complex)
                         {
                             info!(task_id = %task.id, model = %self.agent_tier.model, "escalating to agent tier (refactor/complex)");
@@ -779,12 +787,12 @@ impl SwarmRunner {
                         let executor = crate::graph::GraphExecutor::new(
                             Arc::clone(&self.router), wt_path.clone(), crate_name, 3,
                         ).with_model(exec_model.clone()).with_ollama(Arc::clone(&self.ollama));
-                        let graph_result = match tmpl.as_str() {
-                            "edit" => executor.execute_edit(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
-                            "create" => executor.execute_create(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
+                        let graph_result = match tmpl_eff {
+                            "edit" => executor.execute_edit(&augmented_desc, first_file).await,
+                            "create" => executor.execute_create(&augmented_desc, first_file).await,
                             "refactor" => executor.execute_refactor(&augmented_desc, &task.files).await,
-                            "doc" => executor.execute_doc(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
-                            _ => Err(anyhow::anyhow!("Unknown template: {tmpl}")),
+                            "doc" => executor.execute_doc(&augmented_desc, first_file).await,
+                            _ => Err(anyhow::anyhow!("Unknown template: {tmpl_eff}")),
                         };
 
                         match graph_result {
