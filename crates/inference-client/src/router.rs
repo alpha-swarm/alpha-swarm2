@@ -84,11 +84,13 @@ impl InferenceRouter {
 
     /// Pick the best model for a complexity tier.
     ///
-    /// Routing strategy:
-    ///   All tiers → prefer largest code model for quality.
-    ///   Running locally with 96GB RAM — no reason to be stingy.
-    ///   Simple tasks still get routed to the largest model because
-    ///   the quality improvement is worth the extra seconds.
+    /// Routing strategy (fast-loop):
+    ///   Simple/Medium → SMALLEST ready code model (e.g. qwen2.5-coder:14b).
+    ///   Picking the largest code model cold-loads a 20–40GB model that isn't
+    ///   resident (qwen3:32b / llama3.3:70b), saturates the single Ollama host,
+    ///   and times out every other request — the loop wedges. Quality comes from
+    ///   the cargo gate + compile-feedback iteration, not a bigger planner model.
+    ///   Complex → Claude if configured, else the largest local model.
     pub async fn recommend_model(&self, complexity: Complexity) -> Result<ModelInfo> {
         Ok(self.pick_model_and_hosts(complexity).await?.0)
     }
@@ -103,9 +105,10 @@ impl InferenceRouter {
         let models: Vec<ModelInfo> = indexed.iter().map(|(_, m)| m.clone()).collect();
 
         let pick = match complexity {
-            // Simple + Medium → largest code model (quality over speed).
-            Complexity::Simple | Complexity::Medium => largest_ollama(&models)
-                .or_else(|| best_ollama_by_size(&models, |_| true))
+            // Simple + Medium → SMALLEST ready code model (fast, resident).
+            // best_ollama_by_size sorts code-models first, then smallest size,
+            // so this yields qwen2.5-coder:14b over the cold 32b/70b giants.
+            Complexity::Simple | Complexity::Medium => best_ollama_by_size(&models, |_| true)
                 .or_else(|| any_ready(&models)),
             Complexity::Complex => find_model(&models, BackendKind::Claude, "sonnet")
                 .or_else(|| find_model(&models, BackendKind::Claude, ""))
@@ -188,6 +191,22 @@ impl InferenceRouter {
         complexity: Complexity,
         options: &InferenceOptions,
     ) -> Result<InferenceResponse> {
+        // Preferred MODEL with MULTIPLE backends (e.g. one MLX server per model
+        // on its own port): route to the backend that actually HOSTS the model,
+        // not just the first of its kind. Single-backend setups skip this (no
+        // extra /models round-trip) and use the fast path below.
+        if let Some(ref pm) = options.preferred_model
+            && self.backends.len() > 1 {
+                let indexed = self.list_models_indexed().await;
+                if let Some(&(idx, _)) = indexed.iter().find(|(_, m)| &m.name == pm) {
+                    let _guard = InFlightGuard::enter(&self.in_flight[idx]);
+                    match self.backends[idx].chat(pm, messages, options).await {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => warn!(model = %pm, host = idx, "preferred-model backend failed: {e}"),
+                    }
+                }
+        }
+
         // If user specified a backend/model, try that first
         if let Some(preferred) = options.preferred_backend
             && let Some(backend) = self.backends.iter().find(|b| b.kind() == preferred) {
@@ -341,8 +360,9 @@ mod tests {
     use crate::mock::MockBackend;
 
     #[tokio::test]
-    async fn simple_task_selects_largest_code_model() {
-        // All tiers now prefer largest code model for quality
+    async fn simple_task_selects_smallest_code_model() {
+        // Fast-loop: Simple/Medium pick the SMALLEST code model (resident, fast),
+        // not the largest (cold-load thrash on a single Ollama host).
         let router = InferenceRouter::new()
             .add_backend(
                 MockBackend::new(BackendKind::Ollama)
@@ -352,11 +372,11 @@ mod tests {
             );
 
         let model = router.recommend_model(Complexity::Simple).await.unwrap();
-        assert_eq!(model.name, "deepseek-coder:33b");
+        assert_eq!(model.name, "qwen2.5-coder:7b");
     }
 
     #[tokio::test]
-    async fn medium_task_selects_midsize_model() {
+    async fn medium_task_selects_smallest_code_model() {
         let router = InferenceRouter::new()
             .add_backend(
                 MockBackend::new(BackendKind::Ollama)
@@ -365,7 +385,7 @@ mod tests {
             );
 
         let model = router.recommend_model(Complexity::Medium).await.unwrap();
-        assert_eq!(model.name, "deepseek-coder:33b");
+        assert_eq!(model.name, "qwen2.5-coder:7b");
     }
 
     #[tokio::test]
@@ -500,9 +520,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn larger_preferred_model_wins_across_prefixes() {
-        // qwen3:32b should beat qwen2.5-coder:14b — both match PREFERRED_CODE_MODELS
-        // ("qwen2.5-coder" and "qwen" prefixes), but 32B > 14B
+    async fn simple_prefers_small_code_model_over_giant() {
+        // Fast-loop: Simple must NOT cold-load the 32B giant. qwen2.5-coder:14b
+        // is a code model and smaller, so it wins over the larger qwen3:32b.
         let router = InferenceRouter::new()
             .add_backend(
                 MockBackend::new(BackendKind::Ollama)
@@ -511,7 +531,7 @@ mod tests {
             );
 
         let model = router.recommend_model(Complexity::Simple).await.unwrap();
-        assert_eq!(model.name, "qwen3:32b");
+        assert_eq!(model.name, "qwen2.5-coder:14b");
     }
 
     #[test]

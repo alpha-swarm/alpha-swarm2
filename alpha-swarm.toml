@@ -39,25 +39,33 @@ simple_model = "qwen2.5-coder:14b"  # use a model present on csatapaci (7b not p
 project = "default"
 
 # --- Agent Tiers ---
-# All inference on csatapaci. Orchestrator = llama3.3:70b (planning reasoning),
-# agent = qwen2.5-coder:32b (code execution), worker = qwen2.5-coder:14b.
+# All inference on csatapaci (M2 Max 96GB). FAST-LOOP + escalation:
+#   * orchestrator (planner) + worker = qwen2.5-coder:14b @ 8192 — plans in
+#     seconds; doc/edit/test tasks run here. 14b plans cost seconds vs 2–8 min
+#     for 32b, and most tasks don't need more.
+#   * agent = qwen2.5-coder:32b @ 16384 — the ESCALATION tier: refactor/complex
+#     tasks route here (14b can't reliably emit structural multi-line edits).
+# Both 14b (~10GB) + 32b (~22GB) + nomic stay co-resident (~33GB ≪ 70% RAM) and
+# are pre-warmed, so escalation never cold-loads/wedges. Distinct models don't
+# share a KV cache, so no reload churn between tiers. Set OLLAMA_MAX_LOADED_MODELS
+# >= 3 on the host.
 [tiers.orchestrator]
-model = "llama3.3:70b"
-context_window = 16384
+model = "qwen2.5-coder:14b"     # fast planner (was 32b @ 2–8 min/plan)
+context_window = 8192
 time_limit_secs = 14400         # 4 hours
 token_limit = 1000000           # 1M tokens
-max_iterations = 20
+max_iterations = 10             # don't over-think; gate catches bad plans
 max_backoff_secs = 60
-max_context_files = 100
+max_context_files = 40          # tighter RAG → smaller prompt → faster prefill
 
 [tiers.agent]
-model = "qwen2.5-coder:32b"
-context_window = 16384
+model = "qwen2.5-coder:32b"     # escalation tier for refactor/complex tasks
+context_window = 16384          # more room for structural multi-file edits
 time_limit_secs = 1800          # 30 min
 token_limit = 300000            # 300K tokens
 max_iterations = 10
 max_backoff_secs = 30
-max_context_files = 50
+max_context_files = 30
 
 [tiers.worker]
 model = "qwen2.5-coder:14b"     # 7b not pulled on csatapaci; 14b is present + warm
@@ -146,6 +154,40 @@ auto_approve = true
 # fmt/check/test), so only passing changes count. Seed the backlog via
 # `nats req swarm.db.autopilot.queue '{"project":"...","goal":"..."}'`.
 continuous = false
+
+# --- GitHub Issues ticketing (OFF by default) ---
+# When enabled, the daemon treats GitHub Issues as the 1:1 ticket queue:
+#   * INGEST: open issues labelled `trigger_label` → autopilot_goal backlog
+#     (tagged external_id "owner/repo#N"); the issue gets a `swarm:queued`
+#     label + a comment.
+#   * RECONCILE: each run's status is synced back to its issue as a `swarm:*`
+#     label + comment (running / done+PR-link / failed). A passing run opens a
+#     per-issue PR (`Fixes #N`) so merging auto-closes the issue.
+# GitHub's own notifications then ping you on every state change (no custom
+# notifier needed). Auth is ambient `gh` (must be `gh auth login`-ed). Polling,
+# not webhooks. Label scheme: humans apply `swarm` to opt an issue in; the
+# daemon manages `swarm:queued|running|done|failed|skipped`.
+[github]
+enabled = false
+repo = ""                  # owner/repo; empty → infer from the repo's origin remote
+trigger_label = "swarm"    # only issues with this label become tickets
+poll_secs = 60
+base_branch = ""           # PR base; empty → the project's branch, else "main"
+project = "default"        # backlog project ingested issues feed
+
+# --- Knowledge carry-over (export OFF by default) ---
+# Export the learned brain (SONA patterns/errors/trajectories + routing stats +
+# run transcripts) to human-readable, git-friendly files under <repo>/.swarm so
+# it travels with the repo and is reviewable. A fresh DB re-imports + re-embeds
+# it on startup. Embeddings are derived → never written to git. auto_commit
+# snapshots .swarm onto commit_branch via a throwaway worktree (never touches
+# the live checkout) — review/merge that branch to land the brain in main.
+[knowledge]
+export = false
+import_on_start = true
+export_interval_secs = 900
+auto_commit = false
+commit_branch = "swarm/knowledge"
 
 # Embedded Wassette WASM tool host. Tools are sandboxed WASM components run
 # in-process (deny-by-default capabilities). Each [[wassette.tools]] entry is

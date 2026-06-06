@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use anyhow::{Context, Result, bail};
-use tracing::{info, warn, debug};
+use tracing::{info, warn};
 
 use agent_core::{parse_edits, FileEdit};
 use inference_client::{InferenceRouter, InferenceResponse, OllamaBackend, ChatMessage, InferenceOptions, Complexity};
@@ -281,25 +281,13 @@ impl GraphExecutor {
             ..Default::default()
         };
 
-        // Try streaming with preferred model (if Ollama backend available)
-        if let Some(ref ollama) = self.ollama {
-            if let Some(ref model) = self.preferred_model {
-                let blocks_found = std::sync::atomic::AtomicU32::new(0);
-                match ollama.chat_streaming(model, &messages, &options, |chunk| {
-                    if chunk.contains(">>>") { blocks_found.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
-                }).await {
-                    Ok(response) => {
-                        debug!(blocks = blocks_found.load(std::sync::atomic::Ordering::Relaxed), tokens = response.tokens_output, "Graph streaming complete");
-                        return Ok(response);
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Graph streaming failed, falling back to router");
-                    }
-                }
-            }
-        }
-
-        // Fallback: non-streaming via router (uses preferred_model from options)
+        // Non-streaming via router (uses preferred_model from options). Streaming
+        // was removed: against a single busy Ollama host the streaming send
+        // failed repeatedly ("Failed to send streaming request") and each retry
+        // then hung on the fallback for up to the client timeout, wedging the
+        // loop for tens of minutes. The daemon only needs the final result + the
+        // gate verdict, not token-by-token output, so non-streaming is simpler
+        // and far more robust.
         self.router.chat(&messages, Complexity::Simple, &options).await
             .context("Graph LLM call failed")
     }

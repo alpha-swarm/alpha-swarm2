@@ -30,6 +30,13 @@ pub struct SwarmConfig {
     /// Inference providers (multiple Ollama hosts, etc.)
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+    /// GitHub Issues ticketing integration (OFF by default).
+    #[serde(default)]
+    pub github: GithubConfig,
+    /// Knowledge carry-over: export the learned brain to git-friendly files,
+    /// re-import (re-embedding) on a fresh DB.
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
 }
 
 /// Default severity at/above which a security finding fails the run.
@@ -80,7 +87,9 @@ pub struct LearningConfig {
     pub proven_plans_char_budget: usize,
     /// Adversarial verify: after the cargo gate passes, run a 2nd-model semantic
     /// critique of (goal, diff) that can DOWNGRADE the run to Failed (never
-    /// upgrade). Costs one extra inference (serializes on Ollama) — OFF by default.
+    /// upgrade). The cargo gate only proves "compiles + existing tests pass" —
+    /// on a thinly-tested codebase that's weak, so this is the correctness
+    /// backstop. ON by default; one extra inference (serializes on Ollama).
     pub verify_diffs: bool,
 }
 
@@ -92,7 +101,7 @@ impl Default for LearningConfig {
             max_proven_plans: DEFAULT_MAX_PROVEN_PLANS,
             min_similarity: DEFAULT_LEARNING_MIN_SIMILARITY,
             proven_plans_char_budget: DEFAULT_PROVEN_PLANS_CHAR_BUDGET,
-            verify_diffs: false,
+            verify_diffs: true,
         }
     }
 }
@@ -131,6 +140,84 @@ impl Default for AutopilotConfig {
             max_runs_per_day: DEFAULT_AUTOPILOT_MAX_RUNS_PER_DAY,
             auto_approve: true,
             continuous: false,
+        }
+    }
+}
+
+/// Default label that marks a GitHub issue as a swarm ticket.
+pub const DEFAULT_GITHUB_TRIGGER_LABEL: &str = "swarm";
+/// Default GitHub issue/run reconcile poll interval.
+pub const DEFAULT_GITHUB_POLL_SECS: u64 = 60;
+
+/// GitHub Issues as the 1:1 ticketing backend. OFF by default. When enabled,
+/// open issues carrying `trigger_label` are ingested as autopilot goals, and
+/// each run's status is synced back to its issue (labels + comments); a passing
+/// run opens a per-issue PR (`Fixes #N`). Auth is ambient `gh` (the daemon
+/// already shells `gh`); the repo is inferred from the project's origin remote
+/// when `repo` is empty.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GithubConfig {
+    /// Master switch. Default false.
+    pub enabled: bool,
+    /// `owner/repo`. Empty → infer from the project's git origin remote.
+    pub repo: String,
+    /// Only issues with this label become tickets.
+    pub trigger_label: String,
+    /// Issue↔run reconcile poll interval (seconds).
+    pub poll_secs: u64,
+    /// PR base branch. Empty → the project's branch, else "main".
+    pub base_branch: String,
+    /// Project whose backlog ingested issues feed.
+    pub project: String,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            repo: String::new(),
+            trigger_label: DEFAULT_GITHUB_TRIGGER_LABEL.to_string(),
+            poll_secs: DEFAULT_GITHUB_POLL_SECS,
+            base_branch: String::new(),
+            project: "default".to_string(),
+        }
+    }
+}
+
+/// Default knowledge-export interval.
+pub const DEFAULT_KNOWLEDGE_EXPORT_SECS: u64 = 900;
+/// Default branch the knowledge snapshot is committed to.
+pub const DEFAULT_KNOWLEDGE_BRANCH: &str = "swarm/knowledge";
+
+/// Knowledge carry-over. The learned brain (SONA memory + routing stats + run
+/// transcripts) is exported to human-readable, git-friendly files under
+/// `<repo>/.swarm` so it travels with the repo and is reviewable; a fresh DB
+/// re-imports + re-embeds it. Embeddings are derived → never written to git.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct KnowledgeConfig {
+    /// Periodically write `.swarm/` snapshots from the live DB.
+    pub export: bool,
+    /// On startup, seed an EMPTY memory table from `.swarm/` (re-embedding).
+    pub import_on_start: bool,
+    /// How often to export.
+    pub export_interval_secs: u64,
+    /// Commit + push `.swarm/` to `commit_branch` after each export (via a
+    /// throwaway worktree — the live checkout is never touched).
+    pub auto_commit: bool,
+    /// Branch the snapshot is committed to (kept off `main`; review/merge it).
+    pub commit_branch: String,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            export: false,
+            import_on_start: true,
+            export_interval_secs: DEFAULT_KNOWLEDGE_EXPORT_SECS,
+            auto_commit: false,
+            commit_branch: DEFAULT_KNOWLEDGE_BRANCH.to_string(),
         }
     }
 }

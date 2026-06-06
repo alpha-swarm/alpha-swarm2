@@ -10,7 +10,10 @@ use crate::backend::InferenceBackend;
 use crate::types::*;
 
 /// Hard timeout for inference requests (chat/generate)
-const INFERENCE_TIMEOUT: Duration = Duration::from_secs(600); // 10 minutes
+// 14b generates in seconds; a request still running after this is stuck (a
+// jammed Ollama slot), so time out and free the slot rather than holding it for
+// 10 min and wedging every other request behind it.
+const INFERENCE_TIMEOUT: Duration = Duration::from_secs(180); // 3 minutes
 /// Hard timeout for embedding requests
 const EMBED_TIMEOUT: Duration = Duration::from_secs(120); // 2 minutes
 /// Hard timeout for metadata requests (tags, ps)
@@ -27,23 +30,30 @@ pub const DEFAULT_KEEP_ALIVE: &str = "-1";
 /// over-estimates the token count, a generous output headroom is added, and the
 /// result is clamped to [floor, caller-ceiling] — never below the floor, never
 /// above what the caller already asked for.
+///
+/// The result is then quantized UP to a power-of-two bucket. Ollama reloads the
+/// whole model whenever `num_ctx` changes between requests; a continuously-sized
+/// window makes near-identical prompts each pick a slightly different size and
+/// thrash a 20GB reload — fatal when two runs plan concurrently against one
+/// Ollama host (the model wedges in "Stopping..." and never serves). Bucketing
+/// collapses similar prompts onto a shared window so the model stays resident.
 const NUM_CTX_FLOOR: u32 = 4096;
 const NUM_CTX_OUTPUT_HEADROOM: u32 = 4096;
 /// Number of characters per token used for estimating the number of context tokens.
 const NUM_CTX_CHARS_PER_TOKEN: usize = 3;
 
-fn bucket_ctx(prompt_chars: usize, ceiling: Option<u32>) -> Option<u32> {
+/// Size `num_ctx` from the prompt's char length, clamped to `[NUM_CTX_FLOOR,
+/// ceiling]` and quantized up to a power-of-two bucket. `ceiling` is the tier's
+/// max_tokens (None = let Ollama default).
+fn sized_num_ctx(prompt_chars: usize, ceiling: Option<u32>) -> Option<u32> {
     ceiling.map(|c| {
         let est_prompt_tokens = (prompt_chars / NUM_CTX_CHARS_PER_TOKEN) as u32;
         let lo = NUM_CTX_FLOOR.min(c);
-        est_prompt_tokens.saturating_add(NUM_CTX_OUTPUT_HEADROOM).clamp(lo, c)
+        let want = est_prompt_tokens.saturating_add(NUM_CTX_OUTPUT_HEADROOM).max(lo);
+        // Snap up to a power-of-two bucket so concurrent/sequential requests of
+        // similar size share one loaded KV window instead of forcing a reload.
+        want.checked_next_power_of_two().unwrap_or(c).min(c)
     })
-}
-
-/// Size `num_ctx` from the prompt's char length, clamped to `[NUM_CTX_FLOOR,
-/// ceiling]`. `ceiling` is the tier's max_tokens (None = let Ollama default).
-fn sized_num_ctx(prompt_chars: usize, ceiling: Option<u32>) -> Option<u32> {
-    bucket_ctx(prompt_chars, ceiling)
 }
 
 pub struct OllamaBackend {
@@ -446,5 +456,27 @@ impl OllamaBackend {
 
         resp.embeddings.into_iter().next()
             .ok_or_else(|| anyhow::anyhow!("No embedding returned"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn num_ctx_none_ceiling_lets_ollama_default() {
+        assert_eq!(sized_num_ctx(10_000, None), None);
+    }
+
+    #[test]
+    fn num_ctx_buckets_to_power_of_two() {
+        let c = Some(16384);
+        // Tiny prompts floor at 4096 (already a power of two).
+        assert_eq!(sized_num_ctx(0, c), Some(4096));
+        // Mid prompts that previously landed at e.g. 6392 now snap to 8192,
+        // so similar-sized concurrent requests share one loaded window.
+        assert_eq!(sized_num_ctx(7_000, c), Some(8192));
+        // Never exceeds the caller ceiling.
+        assert_eq!(sized_num_ctx(1_000_000, c), Some(16384));
     }
 }

@@ -12,6 +12,8 @@ mod hooks;
 mod db_bridge;
 mod http_bridge;
 mod autopilot;
+mod github_sync;
+mod knowledge_sync;
 pub mod resources;
 pub mod provider_client;
 
@@ -40,12 +42,27 @@ const MEMORY_DECAY_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// 5-minute default idle-unload window; with keep_alive=-1 this is a safety net
 /// (also re-warms after an Ollama restart).
 const WARM_INTERVAL: Duration = Duration::from_secs(240);
+/// Shared, warm cargo target dir for the AGENT's quality tools
+/// (run_check/run_build). Each per-run workspace otherwise compiles from a COLD
+/// target (~100s/check — the loop's real bottleneck); a process-wide shared dir
+/// makes those checks incremental (~seconds after the first build). The gate
+/// keeps its own GATE_TARGET_DIR, so the two never contend on cargo's lock.
+const AGENT_TARGET_DIR: &str = "/tmp/alpha-swarm/agent-target";
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter("info,agent_core=info,swarm_orchestrator=info")
         .init();
+
+    // Warm, shared cargo target for agent quality tools (run_check/run_build) so
+    // mid-iteration `cargo check`/`clippy` are incremental, not cold full builds.
+    // Respect an explicit override; set before any task/thread is spawned.
+    if std::env::var_os("CARGO_TARGET_DIR").is_none() {
+        let _ = std::fs::create_dir_all(AGENT_TARGET_DIR);
+        unsafe { std::env::set_var("CARGO_TARGET_DIR", AGENT_TARGET_DIR); }
+        info!(dir = AGENT_TARGET_DIR, "Warm shared cargo target dir for agent checks");
+    }
 
     let config = SwarmConfig::load();
     let daemon_id = format!("daemon-{}-{}", hostname(), &uuid::Uuid::new_v4().to_string()[..8]);
@@ -126,10 +143,12 @@ async fn main() -> Result<()> {
     // after an Ollama restart. Warms every distinct chat tier + the embed model.
     {
         let ollama_warm = Arc::clone(&ollama);
-        // Each tier PINS its own model (preferred_model = tier.model in
-        // agent.rs / planner.rs), so a run touches all of them — keep every
-        // distinct tier model co-resident, not just the router's fallback pick.
-        // (Set OLLAMA_MAX_LOADED_MODELS >= number of distinct models on the host.)
+        // Keep every DISTINCT tier model co-resident: planner + worker (14b) and
+        // the agent escalation tier (32b for refactor/complex). REQUIRES the host
+        // to allow enough resident models — set OLLAMA_MAX_LOADED_MODELS >= the
+        // distinct model count (14b + 32b + embed = 3). On a host with fewer
+        // slots, set tiers.agent = the fast model so this list collapses to one
+        // (warming 3 models into 2 slots thrashes via constant eviction).
         let mut chat_models = vec![
             config.tiers.orchestrator.model.clone(),
             config.tiers.agent.model.clone(),
@@ -137,11 +156,22 @@ async fn main() -> Result<()> {
         ];
         chat_models.sort();
         chat_models.dedup();
-        chat_models.retain(|m| !m.is_empty());
+        // Only Ollama-addressable chat models get warmed here. MLX models are
+        // configured as absolute filesystem paths ("/Users/.../mlx-models/..")
+        // and are served by their own mlx_lm.server process, which keeps the
+        // model resident always — so warming them against the Ollama (embed)
+        // host is both pointless and noisy (400 "invalid model name" per cycle).
+        chat_models.retain(|m| !m.is_empty() && !m.starts_with('/'));
         let embed_model = config.defaults.embed_model.clone();
+        // Warm at the orchestrator context window, NOT max_tokens=1: a tiny
+        // ceiling makes num_ctx collapse to ~1, which Ollama treats as "use the
+        // model default" and loads llama3.3:70b at its full 131072 context
+        // (~81GB VRAM) — starving the box so the 32b/embed models can't co-load.
+        // A sane ceiling keeps the resident KV cache (hence VRAM) small.
+        let warm_ctx = config.tiers.orchestrator.context_window;
         tokio::spawn(async move {
             use inference_client::InferenceBackend;
-            let opts = inference_client::InferenceOptions { max_tokens: Some(1), ..Default::default() };
+            let opts = inference_client::InferenceOptions { max_tokens: Some(warm_ctx), ..Default::default() };
             info!(chat = ?chat_models, embed = %embed_model, "Warming tier models into Ollama memory (keep_alive)");
             loop {
                 let messages = vec![inference_client::ChatMessage::user("warm")];
@@ -182,10 +212,16 @@ async fn main() -> Result<()> {
         "UPDATE agent_run SET status = 'pending', agent_id = 'recovered' WHERE status = 'running'"
     ).await;
 
-    // Clear stale execution locks from previous daemon crashes
+    // Clear stale execution locks AND per-task leases from previous daemon
+    // crashes. Without the lease purge, recovered tasks stay wedged: their
+    // `lease.*` claims survive the crash and every poll sees them "already
+    // claimed, deferring".
     if let Some(ref sched) = scheduler {
         let _ = sched.release_execution_lock().await;
-        info!("Cleared stale execution locks");
+        match sched.release_all_leases().await {
+            Ok(n) => info!(purged = n, "Cleared stale execution locks + task leases"),
+            Err(e) => warn!(error = %e, "Failed to purge stale task leases"),
+        }
     }
 
     // Workflow engine: persisted DAG runs, pause/resume, adaptive replanning.
@@ -287,6 +323,22 @@ async fn main() -> Result<()> {
     // Autonomous operation (opt-in; OFF by default). Drains the autopilot_goal
     // backlog when idle + under the daily cap.
     autopilot::spawn(config.autopilot.clone(), Arc::clone(&store), scheduler.clone(), config.resources.max_concurrent_runs);
+
+    // GitHub Issues ticketing: ingest labelled issues → backlog, sync run
+    // status back to issues (labels + comments). No-op unless [github] enabled.
+    github_sync::spawn(config.github.clone(), Arc::clone(&store));
+
+    // Knowledge carry-over: import the learned brain from .swarm on a fresh DB,
+    // periodically export it back (+ optional git commit). Repo = daemon CWD.
+    if let Ok(repo) = std::env::current_dir() {
+        knowledge_sync::spawn(
+            config.knowledge.clone(),
+            Arc::clone(&store),
+            Arc::clone(&ollama),
+            config.defaults.embed_model.clone(),
+            repo,
+        );
+    }
 
     // Start resource heartbeat
     {

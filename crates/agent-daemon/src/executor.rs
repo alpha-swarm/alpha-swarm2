@@ -264,7 +264,7 @@ const VERIFY_DIFF_MAX_CHARS: usize = 4000;
 const VERIFY_MAX_TOKENS: u32 = 256;
 /// Max chars of the reject reason carried into the run record.
 const VERIFY_REASON_MAX_CHARS: usize = 200;
-const VERIFY_SYSTEM: &str = "You are a strict code reviewer. You are given a GOAL and a unified DIFF that already compiles and passes existing tests. Judge ONLY whether the diff correctly and completely satisfies the goal without deleting needed logic, weakening checks/validation, or introducing obvious bugs. Be conservative: a diff that compiles and is plausibly correct should be ACCEPTED. Reply with EXACTLY ONE line: 'VERDICT: ACCEPT' or 'VERDICT: REJECT <one short reason>'.";
+const VERIFY_SYSTEM: &str = "You are a rigorous, skeptical code reviewer. You are given a GOAL and a unified DIFF. The diff already compiles and passes EXISTING tests, but those tests may be thin or absent — passing is NOT proof of correctness, do not treat it as such. Decide whether the diff DEMONSTRABLY and COMPLETELY accomplishes the goal. REJECT if ANY of: it does not actually do what the goal asks; it is a no-op or only cosmetic when a real change was expected; it removes or weakens existing logic, validation, error handling, or replaces good documentation with worse; it is incomplete (e.g. changes one of several call sites that should all change); it adds no test for new/changed behaviour that warrants one; or it merely looks plausible and you cannot confirm correctness from the diff alone. A clean compile is NOT sufficient. When in doubt, REJECT. Reply with EXACTLY ONE line: 'VERDICT: ACCEPT' or 'VERDICT: REJECT <one short reason>'.";
 
 enum VerifyVerdict {
     Accept,
@@ -275,37 +275,93 @@ enum VerifyVerdict {
 /// rejection; on any inference error or ambiguous output it ACCEPTS (the cargo
 /// gate already passed — never block on a flaky second opinion). Uses the agent
 /// tier (cheaper than the 70b orchestrator).
+/// Does the diff add a test (a unit test or an assertion)?
+fn diff_adds_test(diff: &str) -> bool {
+    diff.lines()
+        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+        .any(|l| {
+            let t = l[1..].trim();
+            t.contains("#[test]") || t.contains("#[cfg(test)]")
+                || t.starts_with("assert") || t.contains("assert_eq!") || t.contains("assert!(")
+        })
+}
+
+/// True only if EVERY changed (+/-) line is a comment/doc/blank — i.e. the diff
+/// touches no real code. Trivial + safe → the critic's bar can be lenient.
+fn diff_is_doc_only(diff: &str) -> bool {
+    let mut any = false;
+    for l in diff.lines() {
+        let body = if l.starts_with('+') && !l.starts_with("+++") {
+            &l[1..]
+        } else if l.starts_with('-') && !l.starts_with("---") {
+            &l[1..]
+        } else {
+            continue;
+        };
+        let t = body.trim();
+        if t.is_empty() {
+            continue;
+        }
+        any = true;
+        let is_doc = t.starts_with("///") || t.starts_with("//!") || t.starts_with("//")
+            || t.starts_with("/*") || t.starts_with('*');
+        if !is_doc {
+            return false;
+        }
+    }
+    any
+}
+
 async fn adversarial_verify(router: &InferenceRouter, config: &SwarmConfig, goal: &str, diff: &str) -> VerifyVerdict {
     if diff.trim().is_empty() {
         return VerifyVerdict::Accept;
     }
+    let doc_only = diff_is_doc_only(diff);
+    let cov = if diff_adds_test(diff) {
+        "The diff INCLUDES a test exercising the change."
+    } else {
+        "The diff does NOT include any test."
+    };
     let diff_snippet: String = diff.chars().take(VERIFY_DIFF_MAX_CHARS).collect();
-    let user = format!("GOAL: {goal}\n\nDIFF:\n{diff_snippet}");
+    let user = format!("GOAL: {goal}\n\n{cov}\n\nDIFF:\n{diff_snippet}");
     let messages = vec![
         inference_client::ChatMessage::system(VERIFY_SYSTEM),
         inference_client::ChatMessage::user(user),
     ];
     let options = inference_client::InferenceOptions {
         max_tokens: Some(VERIFY_MAX_TOKENS),
-        preferred_model: Some(config.tiers.agent.model.clone()),
+        // Use the WARM fast tier (planner/14b), NOT the agent escalation tier:
+        // verify runs on every gate-passing run, so a cold-loading 32b here would
+        // re-thrash the limited Ollama slots. The rigorous reject-on-doubt prompt
+        // carries the judgement; a warm 14b critic stays fast + keeps the loop stable.
+        preferred_model: Some(config.tiers.orchestrator.model.clone()),
         preferred_backend: Some(inference_client::BackendKind::Ollama),
         ..Default::default()
     };
     match router.chat(&messages, inference_client::Complexity::Medium, &options).await {
         Ok(resp) => {
             let upper = resp.content.to_uppercase();
-            // Reject ONLY on an explicit REJECT verdict; anything else accepts.
-            if upper.contains("VERDICT: REJECT") || upper.contains("VERDICT:REJECT") {
+            let rejected = upper.contains("VERDICT: REJECT") || upper.contains("VERDICT:REJECT");
+            let accepted = upper.contains("VERDICT: ACCEPT") || upper.contains("VERDICT:ACCEPT");
+            if rejected {
                 let reason: String = resp.content.lines()
                     .find(|l| l.to_uppercase().contains("REJECT"))
                     .unwrap_or("semantic verify rejected")
                     .chars().take(VERIFY_REASON_MAX_CHARS).collect();
                 VerifyVerdict::Reject(reason)
-            } else {
+            } else if accepted || doc_only {
+                // Explicit accept, OR an ambiguous verdict on a trivial doc-only
+                // change (don't over-reject safe comment edits).
                 VerifyVerdict::Accept
+            } else {
+                // Reject-on-doubt: a substantive change the critic could not
+                // explicitly confirm correct is NOT trusted (gate already passed,
+                // so this only downgrades).
+                VerifyVerdict::Reject("verify inconclusive — correctness not confirmed".into())
             }
         }
         Err(e) => {
+            // Infra failure ≠ bad code — never block on a flaky second opinion.
             warn!(error = %e, "adversarial verify inference failed — accepting (gate already passed)");
             VerifyVerdict::Accept
         }
@@ -438,11 +494,15 @@ async fn sync_repo_to_branch(store: &dyn knowledge_base::KnowledgeBackend, proje
     }
 }
 
-/// Land a passed run's changes onto a `swarm/auto` branch in the source repo,
-/// via a throwaway git worktree so the live checkout is never touched. Commits
-/// accumulate on `swarm/auto` for human review/merge. Local-path repos only
-/// (remote URLs are left to PR mode). Best-effort; logs and moves on.
-fn land_to_branch(repo_url: &str, base_branch: &str, run_id: &str, goal: &str, files: &[(String, Vec<u8>)]) {
+/// Land a passed run's changes in the source repo via a throwaway git worktree
+/// (the live checkout is never touched). Two modes:
+///   - `issue = Some(n)` (GitHub ticket) → a FRESH per-issue branch
+///     `swarm/issue-n` reset to base, with a PR whose body says `Fixes #n` so
+///     merging auto-closes the issue (true 1:1).
+///   - `issue = None` (manual goal) → accumulate on the shared `swarm/auto`
+///     branch + one rolling PR.
+/// Local-path repos only (remote URLs left to PR mode). Best-effort; logs on.
+fn land_to_branch(repo_url: &str, base_branch: &str, run_id: &str, goal: &str, files: &[(String, Vec<u8>)], issue: Option<i64>) {
     if files.is_empty() || repo_url.contains("://") {
         return;
     }
@@ -459,11 +519,20 @@ fn land_to_branch(repo_url: &str, base_branch: &str, run_id: &str, goal: &str, f
             .map(|o| o.status.success()).unwrap_or(false)
     };
     let _ = git(repo, &["worktree", "prune"]);
-    // Reuse the existing swarm/auto branch (accumulate), else create from HEAD.
-    if !git(repo, &["worktree", "add", "--force", &ld, "swarm/auto"])
-        && !git(repo, &["worktree", "add", "--force", "-b", "swarm/auto", &ld, "HEAD"])
-    {
-        warn!(run_id, "land: could not create swarm/auto worktree");
+
+    let branch = match issue {
+        Some(n) => format!("swarm/issue-{n}"),
+        None => "swarm/auto".to_string(),
+    };
+    let added = match issue {
+        // Per-issue: fresh branch reset to base each run (one ticket = one PR).
+        Some(_) => git(repo, &["worktree", "add", "--force", "-B", &branch, &ld, "HEAD"]),
+        // Aggregate: reuse swarm/auto (accumulate), else create from HEAD.
+        None => git(repo, &["worktree", "add", "--force", &ld, &branch])
+            || git(repo, &["worktree", "add", "--force", "-b", &branch, &ld, "HEAD"]),
+    };
+    if !added {
+        warn!(run_id, %branch, "land: could not create worktree");
         return;
     }
     for (path, content) in files {
@@ -474,30 +543,48 @@ fn land_to_branch(repo_url: &str, base_branch: &str, run_id: &str, goal: &str, f
         let _ = std::fs::write(&full, content);
     }
     let _ = git(&land_dir, &["add", "-A"]);
-    let msg = format!("swarm: {} [{}]", goal.chars().take(60).collect::<String>(), run_id);
+    let goal_short: String = goal.chars().take(60).collect();
+    let msg = match issue {
+        Some(n) => format!("swarm: {goal_short} (#{n}) [{run_id}]"),
+        None => format!("swarm: {goal_short} [{run_id}]"),
+    };
     let committed = git(&land_dir, &[
         "-c", "user.email=swarm@local", "-c", "user.name=alpha-swarm",
         "commit", "-m", &msg, "--no-verify",
     ]);
     let _ = git(repo, &["worktree", "remove", "--force", &ld]);
-    if committed {
-        info!(run_id, branch = "swarm/auto", files = files.len(), "landed changes");
-        // Push the loop branch + ensure a PR exists (best-effort; needs an
-        // 'origin' on a hosting service + gh auth — silently skipped otherwise).
-        if git(repo, &["push", "-u", "origin", "swarm/auto"]) {
-            let pr = std::process::Command::new("gh")
-                .args([
-                    "pr", "create", "--base", base_branch, "--head", "swarm/auto",
-                    "--title", "swarm: autonomous loop changes",
-                    "--body", "Quality-gated changes accumulated by the autopilot loop. Review before merge.",
-                ])
-                .current_dir(repo)
-                .output();
-            if matches!(pr, Ok(ref o) if o.status.success()) {
-                info!(run_id, base = base_branch, "opened swarm/auto PR");
-            } // else: PR already exists — the push updated it.
-        }
+    if !committed {
+        return;
     }
+    info!(run_id, %branch, files = files.len(), "landed changes");
+    // Push + ensure a PR exists (needs an 'origin' on a hosting service + gh
+    // auth — silently skipped otherwise). Per-issue branches are reset each run,
+    // so force-with-lease; the aggregate branch accumulates with a plain push.
+    let pushed = match issue {
+        Some(_) => git(repo, &["push", "--force-with-lease", "-u", "origin", &branch]),
+        None => git(repo, &["push", "-u", "origin", &branch]),
+    };
+    if !pushed {
+        return;
+    }
+    let (title, body) = match issue {
+        Some(n) => (
+            format!("swarm: {goal_short}"),
+            format!("Fixes #{n}\n\n{}\n\n🤖 Autonomous change by alpha-swarm — quality-gated (cargo check/test). Review before merge.",
+                goal.chars().take(500).collect::<String>()),
+        ),
+        None => (
+            "swarm: autonomous loop changes".to_string(),
+            "Quality-gated changes accumulated by the autopilot loop. Review before merge.".to_string(),
+        ),
+    };
+    let pr = std::process::Command::new("gh")
+        .args(["pr", "create", "--base", base_branch, "--head", &branch, "--title", &title, "--body", &body])
+        .current_dir(repo)
+        .output();
+    if matches!(pr, Ok(ref o) if o.status.success()) {
+        info!(run_id, base = base_branch, %branch, "opened PR");
+    } // else: PR already exists — the push updated it.
 }
 
 fn discover_source_files(repo_path: &std::path::Path) -> Vec<String> {
@@ -986,6 +1073,7 @@ async fn handle_execute(
             .with_parent_run_id(task_id)
             .with_max_concurrent(config.resources.max_concurrent_agents)
             .with_planner_tier(config.tiers.orchestrator.clone())
+            .with_agent_tier(config.tiers.agent.clone())
             .with_depth(config.resources.max_sub_plan_depth)
             .with_embed_model(config.defaults.embed_model.clone())
             .with_hooks(Arc::clone(&hooks))
@@ -1114,7 +1202,13 @@ async fn handle_execute(
             let tasks_passed = result.results.iter().filter(|r| r.agent_result.as_ref().is_some_and(|a| a.applied)).count();
             let tasks_failed = result.results.iter().filter(|r| r.error.is_some()).count();
             // Check if any agent produced work — either via edits or via tool-based file writes
-            let any_work_done = tasks_passed > 0 || !result.merged_diff.as_ref().is_none_or(|d| d.is_empty());
+            // A run "did work" only if it produced REAL captured file changes
+            // (git diff in the workspace, cargo's own Cargo.lock churn stripped
+            // upstream). The agent CLAIMING tasks passed (tasks_passed > 0) is
+            // not enough: a failed-to-apply edit reports success but leaves no
+            // diff, and gating an empty change set trivially "passes" because the
+            // unchanged baseline still compiles. Require an actual diff.
+            let any_work_done = !result.modified_files.is_empty();
 
             // Real quality gate: materialize the changed files + `cargo
             // check/test` the changed crates. The runner's disk-mode
@@ -1137,10 +1231,12 @@ async fn handle_execute(
             // Adversarial verify (opt-in): a 2nd-model semantic critique that can
             // only DOWNGRADE a passed run to Failed (never upgrade a failed gate),
             // so it strictly raises the bar; the cargo gate stays the backstop.
+            let mut verify_reason: Option<String> = None;
             let (status, gate_passed) = if gate_passed && config.learning.verify_diffs {
                 match adversarial_verify(&router, config, goal, result.merged_diff.as_deref().unwrap_or("")).await {
                     VerifyVerdict::Reject(reason) => {
                         warn!(task_id, reason = %reason, "adversarial verify REJECTED — downgrading to Failed");
+                        verify_reason = Some(format!("verify-reject: {reason}"));
                         (RunStatus::Failed, false)
                     }
                     VerifyVerdict::Accept => (status, gate_passed),
@@ -1157,7 +1253,15 @@ async fn handle_execute(
                     .and_then(|rows| rows.first().and_then(|r| r.get("branch")).and_then(|b| b.as_str()).map(String::from))
                     .filter(|b| !b.is_empty())
                     .unwrap_or_else(|| "main".to_string());
-                land_to_branch(&repo_url, &base_branch, task_id, goal, &result.modified_files);
+                // If this run came from a GitHub ticket ("owner/repo#N"), land on
+                // a per-issue branch + PR ("Fixes #N"); else accumulate on swarm/auto.
+                let issue = store
+                    .query_json(&format!("SELECT external_id FROM {task_id}"), serde_json::Value::Null)
+                    .await.ok()
+                    .and_then(|rows| rows.first().and_then(|r| r.get("external_id")).and_then(|v| v.as_str()).map(String::from))
+                    .filter(|s| !s.is_empty())
+                    .and_then(|ext| ext.rsplit('#').next().and_then(|n| n.parse::<i64>().ok()));
+                land_to_branch(&repo_url, &base_branch, task_id, goal, &result.modified_files, issue);
             }
 
             // Learned routing: attribute this run's gate outcome to the tier that
@@ -1251,9 +1355,12 @@ async fn handle_execute(
                 final_run.response_text = Some(responses.join("\n---\n"));
             }
 
-            // Collect files modified from sub-agents
-            final_run.files_modified = result.results.iter()
-                .flat_map(|r| r.task.files.iter().cloned())
+            // Files ACTUALLY modified (real git-diff capture, Cargo.lock churn
+            // stripped) — NOT r.task.files, which is the planner's CLAIM and is
+            // recorded even when the edit never applied. Keeps files_modified
+            // consistent with `diff` so reviews + co-edit stats reflect reality.
+            final_run.files_modified = result.modified_files.iter()
+                .map(|(p, _)| p.clone())
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
                 .collect();
@@ -1270,7 +1377,11 @@ async fn handle_execute(
                 .cloned()
                 .collect();
 
-            if !any_work_done {
+            if let Some(vr) = verify_reason {
+                // Adversarial verify downgraded a gate-passing run — record WHY,
+                // so verify-rejections are distinguishable from cargo-gate fails.
+                final_run.error_message = Some(vr);
+            } else if !any_work_done {
                 final_run.error_message = Some(if agent_errors.is_empty() {
                     "All agents completed without making changes".into()
                 } else {
@@ -1552,5 +1663,29 @@ async fn fail_task_with_duration(
             duration_ms,
             timestamp: SwarmEvent::timestamp(),
         }).await;
+    }
+}
+
+#[cfg(test)]
+mod verify_tests {
+    use super::{diff_adds_test, diff_is_doc_only};
+
+    #[test]
+    fn detects_added_test() {
+        assert!(diff_adds_test("+    #[test]\n+    fn x() { assert_eq!(1, 1); }"));
+        assert!(diff_adds_test("+        assert!(got.is_some());"));
+        assert!(!diff_adds_test("+    pub fn foo() -> i32 { 1 }"));
+        // a REMOVED test (-) doesn't count as adding coverage
+        assert!(!diff_adds_test("-    #[test]\n-    fn gone() {}"));
+    }
+
+    #[test]
+    fn doc_only_detection() {
+        assert!(diff_is_doc_only("+/// a doc comment\n+//! module doc"));
+        assert!(diff_is_doc_only("-// old comment\n+// new comment"));
+        // real code change → not doc-only
+        assert!(!diff_is_doc_only("+/// doc\n+pub const X: u32 = 1;"));
+        // no changed lines at all → not doc-only (nothing to be lenient about)
+        assert!(!diff_is_doc_only(" context line only\n@@ hunk @@"));
     }
 }

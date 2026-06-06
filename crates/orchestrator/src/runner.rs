@@ -128,6 +128,10 @@ pub struct SwarmRunner {
     max_concurrent: usize,
     nats_client: Option<async_nats::Client>,
     planner_tier: swarm_config::TierConfig,
+    /// Heavier execution tier (e.g. 32b) for refactor/complex tasks. Pre-warmed
+    /// + resident; the fast planner tier (14b) can't reliably emit structural
+    /// multi-line edits, so those escalate here.
+    agent_tier: swarm_config::TierConfig,
     /// When set, use GitHub API + VirtWorkspace instead of disk clone.
     github: Option<GitHubRepo>,
     /// Remaining depth for recursive sub-planning (0 = no sub-plans).
@@ -163,6 +167,7 @@ impl SwarmRunner {
             max_concurrent: DEFAULT_MAX_CONCURRENT,
             nats_client: None,
             planner_tier: swarm_config::TierConfig::orchestrator(),
+            agent_tier: swarm_config::TierConfig::agent(),
             github: None,
             depth: 0,
             embed_model: swarm_config::DEFAULT_EMBED_MODEL.into(),
@@ -219,6 +224,12 @@ impl SwarmRunner {
 
     pub fn with_planner_tier(mut self, tier: swarm_config::TierConfig) -> Self {
         self.planner_tier = tier;
+        self
+    }
+
+    /// Heavier tier used for refactor/complex tasks (pre-warmed, resident).
+    pub fn with_agent_tier(mut self, tier: swarm_config::TierConfig) -> Self {
+        self.agent_tier = tier;
         self
     }
 
@@ -754,9 +765,20 @@ impl SwarmRunner {
                     if let Some(ref tmpl) = task.template {
                         info!(task_id = %task.id, template = %tmpl, "Using graph executor");
                         let crate_name = crate::graph::detect_crate(&wt_path, task.files.first().map(|s| s.as_str()).unwrap_or(""));
+                        // Structural work (refactors / complex tasks) needs a
+                        // bigger model than the fast planner tier — escalate to
+                        // the pre-warmed agent tier. Edits/docs stay on 14b.
+                        let exec_model = if tmpl.as_str() == "refactor"
+                            || matches!(task.complexity, inference_client::Complexity::Complex)
+                        {
+                            info!(task_id = %task.id, model = %self.agent_tier.model, "escalating to agent tier (refactor/complex)");
+                            self.agent_tier.model.clone()
+                        } else {
+                            self.planner_tier.model.clone()
+                        };
                         let executor = crate::graph::GraphExecutor::new(
                             Arc::clone(&self.router), wt_path.clone(), crate_name, 3,
-                        ).with_model(self.planner_tier.model.clone()).with_ollama(Arc::clone(&self.ollama));
+                        ).with_model(exec_model.clone()).with_ollama(Arc::clone(&self.ollama));
                         let graph_result = match tmpl.as_str() {
                             "edit" => executor.execute_edit(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
                             "create" => executor.execute_create(&augmented_desc, task.files.first().map(|s| s.as_str()).unwrap_or("")).await,
@@ -770,9 +792,17 @@ impl SwarmRunner {
                                 any_applied = true;
                                 let summary = format!("Graph:{tmpl} edits:{}", gr.edits.len());
                                 completed_summaries.insert(task.id.clone(), summary);
+                                // Stamp the tier model that ran this task so
+                                // model_used / the brain export attribute it
+                                // (the graph response loses .model on some paths
+                                // → was recorded "unknown", hiding escalation).
+                                let mut gr_response = gr.response;
+                                if gr_response.model.is_empty() {
+                                    gr_response.model = exec_model.clone();
+                                }
                                 let result = TaskRunResult {
                                     task, agent_result: Some(AgentResult {
-                                        edits: gr.edits, inference_response: gr.response,
+                                        edits: gr.edits, inference_response: gr_response,
                                         applied: true, skipped: false, run_id: None, attempt: 1,
                                         escalated_from: None, tool_calls: vec![],
                                     }), error: None,
@@ -925,7 +955,18 @@ impl SwarmRunner {
                             .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(String::from).collect())
                             .unwrap_or_default();
 
+                        // A Cargo.lock delta with no matching Cargo.toml edit is
+                        // just cargo re-resolving deps during the run's checks —
+                        // the agent never touched it. Capturing it pollutes the
+                        // diff and lands unrelated lock churn in swarm/auto, and
+                        // can mask a no-op run as "changed". Drop that churn (and
+                        // any target/ artifacts); keep Cargo.lock only when a
+                        // Cargo.toml also changed (a real dependency edit).
+                        let toml_changed = changed.iter().chain(new_files.iter())
+                            .any(|f| f.ends_with("Cargo.toml"));
                         for file_path in changed.iter().chain(new_files.iter()) {
+                            if file_path.starts_with("target/") { continue; }
+                            if file_path.ends_with("Cargo.lock") && !toml_changed { continue; }
                             let orig = std::fs::read_to_string(self.repo_path.join(file_path)).unwrap_or_default();
                             virt_ws.load_file(&mut blob_store, file_path, &orig);
                             if let Ok(modified) = std::fs::read_to_string(ws.join(file_path)) {
