@@ -304,7 +304,11 @@ pub fn constrain_to_named_files(goal: &str, mut tasks: Vec<SubTask>, repo_files:
             id: "task-1".into(),
             description: desc.chars().take(800).collect(),
             files: vec![file],
-            complexity: Complexity::Medium,
+            // The merged task is now several changes in one pass — too much for
+            // the fast 14b tier (it emits broken multi-line edits the gate then
+            // rejects). Mark Complex so the runner escalates it to the 32b agent
+            // tier, which handles structural multi-line edits.
+            complexity: Complexity::Complex,
             depends_on: Vec::new(),
             edit: None,
             template,
@@ -595,6 +599,8 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].files, vec!["README.md"]);
         assert!(out[0].depends_on.is_empty());
+        // merged multi-change task escalates to the 32b agent tier
+        assert!(matches!(out[0].complexity, Complexity::Complex));
     }
 
     #[test]
