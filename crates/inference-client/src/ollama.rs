@@ -286,6 +286,7 @@ impl InferenceBackend for OllamaBackend {
             backend: BackendKind::Ollama,
             tokens_input: resp.prompt_eval_count,
             tokens_output: resp.eval_count,
+            cached_tokens: 0,
             duration_ms,
         })
     }
@@ -355,7 +356,7 @@ impl OllamaBackend {
 
         Ok(InferenceResponse {
             content: full_content, model: model_name, backend: BackendKind::Ollama,
-            tokens_input: tokens_in, tokens_output: tokens_out,
+            tokens_input: tokens_in, tokens_output: tokens_out, cached_tokens: 0,
             duration_ms: start.elapsed().as_millis() as u64,
         })
     }

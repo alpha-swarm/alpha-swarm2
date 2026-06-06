@@ -79,6 +79,19 @@ struct OpenAIChoice {
 struct OpenAIUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
+    // Prompt/KV prefix-cache hit count. mlx_lm.server may report it either as a
+    // top-level `cached_tokens` or nested under OpenAI's `prompt_tokens_details`
+    // — accept both.
+    #[serde(default)]
+    cached_tokens: Option<u32>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u32>,
 }
 
 #[async_trait]
@@ -139,9 +152,19 @@ impl InferenceBackend for OpenAICompatBackend {
             .map(|c| c.message.content.clone())
             .unwrap_or_default();
 
-        let (tokens_in, tokens_out) = resp.usage
-            .map(|u| (u.prompt_tokens, u.completion_tokens))
-            .unwrap_or((0, 0));
+        let (tokens_in, tokens_out, cached) = resp.usage
+            .map(|u| {
+                let cached = u.cached_tokens
+                    .or_else(|| u.prompt_tokens_details.and_then(|d| d.cached_tokens))
+                    .unwrap_or(0);
+                (u.prompt_tokens, u.completion_tokens, cached)
+            })
+            .unwrap_or((0, 0, 0));
+        if tokens_in > 0 {
+            debug!(model, prompt_tokens = tokens_in, cached_tokens = cached,
+                hit_pct = (cached as f64 / tokens_in as f64 * 100.0) as u32,
+                "prompt-cache reuse");
+        }
 
         Ok(InferenceResponse {
             content,
@@ -149,6 +172,7 @@ impl InferenceBackend for OpenAICompatBackend {
             backend: BackendKind::Ollama,
             tokens_input: tokens_in,
             tokens_output: tokens_out,
+            cached_tokens: cached,
             duration_ms: start.elapsed().as_millis() as u64,
         })
     }
