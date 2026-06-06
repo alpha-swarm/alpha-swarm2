@@ -156,7 +156,12 @@ async fn main() -> Result<()> {
         ];
         chat_models.sort();
         chat_models.dedup();
-        chat_models.retain(|m| !m.is_empty());
+        // Only Ollama-addressable chat models get warmed here. MLX models are
+        // configured as absolute filesystem paths ("/Users/.../mlx-models/..")
+        // and are served by their own mlx_lm.server process, which keeps the
+        // model resident always — so warming them against the Ollama (embed)
+        // host is both pointless and noisy (400 "invalid model name" per cycle).
+        chat_models.retain(|m| !m.is_empty() && !m.starts_with('/'));
         let embed_model = config.defaults.embed_model.clone();
         // Warm at the orchestrator context window, NOT max_tokens=1: a tiny
         // ceiling makes num_ctx collapse to ~1, which Ollama treats as "use the
