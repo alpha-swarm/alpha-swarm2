@@ -54,6 +54,11 @@ mod tests {
         for (status, expected_label) in status_map {
             assert_eq!(status_to_label(status), expected_label);
         }
+
+        // Add test cases for unknown statuses
+        assert_eq!(status_to_label("unknown"), "Unknown");
+        assert_eq!(status_to_label(""), "Unknown");
+        assert_eq!(status_to_label("random_status"), "Unknown");
     }
 
     #[test]
