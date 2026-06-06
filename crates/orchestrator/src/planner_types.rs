@@ -44,6 +44,7 @@ RULES:
 - Tasks that run in parallel MUST NOT modify the same file. Use depends_on if they share files.
 - Maximum 5 tasks. Most goals need 1-3.
 - If the goal lists multiple distinct changes (e.g. "X and Y and Z"), create at least one task per change.
+- SCOPE: if the goal names specific file(s) (e.g. "README.md", "crates/x/src/y.rs") or says "only edit X", EVERY task must touch ONLY those files. NEVER modify other existing files.
 - The React frontend is in dashboard/src/ (.tsx/.ts files). components/ is WASI Rust backend — not frontend.
 
 For TRIVIAL single-line changes (adding an import, renaming, inserting a line):
@@ -230,6 +231,64 @@ pub fn parse_plan(json_str: &str, repo_files: &[String]) -> Result<Vec<SubTask>,
     warn_parallel_file_overlap(&tasks);
 
     Ok(tasks)
+}
+
+/// Existing repo files the GOAL explicitly names. Precise pass first: a full
+/// repo path appearing verbatim in the goal. If none, a looser pass: a file's
+/// basename (>=5 chars, with extension) appearing in the goal (catches "README.md").
+fn named_files_in_goal(goal: &str, repo_files: &[String]) -> Vec<String> {
+    let g = goal.to_lowercase();
+    let full: Vec<String> = repo_files.iter()
+        .filter(|f| g.contains(&f.to_lowercase()))
+        .cloned().collect();
+    if !full.is_empty() {
+        return full;
+    }
+    repo_files.iter()
+        .filter(|f| {
+            let base = f.rsplit('/').next().unwrap_or(f).to_lowercase();
+            base.len() >= 5 && base.contains('.') && g.contains(&base)
+        })
+        .cloned().collect()
+}
+
+/// Scope guard: when the GOAL explicitly names existing repo files, the plan
+/// must not touch any OTHER existing file. Local planners over-decompose
+/// constrained goals and invent tasks editing unrelated crates (which then break
+/// the build — the exact failure mode this guards). Each task's EXISTING-file
+/// set is clamped to the named files; new-file (CREATE) paths are left alone. If
+/// the goal names no existing file, the plan is returned unchanged (general
+/// goals may legitimately span files). If clamping empties the plan, one task on
+/// the named files is synthesized so the goal still runs.
+pub fn constrain_to_named_files(goal: &str, mut tasks: Vec<SubTask>, repo_files: &[String]) -> Vec<SubTask> {
+    let named = named_files_in_goal(goal, repo_files);
+    if named.is_empty() {
+        return tasks;
+    }
+    let named_set: HashSet<&str> = named.iter().map(|s| s.as_str()).collect();
+    let repo_set: HashSet<&str> = repo_files.iter().map(|s| s.as_str()).collect();
+    for task in &mut tasks {
+        let before = task.files.len();
+        // Keep named files and any NEW (to-be-created) path; drop other EXISTING files.
+        task.files.retain(|f| named_set.contains(f.as_str()) || !repo_set.contains(f.as_str()));
+        if task.files.len() != before {
+            warn!(task = %task.id, "scope guard: trimmed out-of-scope files (goal named specific files)");
+        }
+    }
+    tasks.retain(|t| !t.files.is_empty());
+    if tasks.is_empty() {
+        warn!("scope guard: plan was entirely out of scope — synthesizing one task on the named files");
+        tasks.push(SubTask {
+            id: "task-1".into(),
+            description: goal.chars().take(500).collect(),
+            files: named,
+            complexity: Complexity::Medium,
+            depends_on: Vec::new(),
+            edit: None,
+            template: None,
+        });
+    }
+    tasks
 }
 
 /// Detect cycles in the task dependency graph using DFS.
@@ -476,6 +535,40 @@ mod tests {
             },
         ];
         assert!(detect_cycle(&tasks));
+    }
+
+    #[test]
+    fn scope_guard_drops_out_of_scope_files() {
+        // The README failure: a "only edit README.md" goal produced a task
+        // editing an unrelated crate → must be dropped.
+        let repo_files = vec!["README.md".into(), "crates/wf/src/lib.rs".into()];
+        let tasks = vec![
+            SubTask { id: "task-1".into(), description: "edit readme".into(), files: vec!["README.md".into()], complexity: Complexity::Simple, depends_on: vec![], edit: None, template: None },
+            SubTask { id: "task-2".into(), description: "oops".into(), files: vec!["crates/wf/src/lib.rs".into()], complexity: Complexity::Simple, depends_on: vec![], edit: None, template: None },
+        ];
+        let goal = "Update the top-level README.md model list. Only edit README.md.";
+        let out = constrain_to_named_files(goal, tasks, &repo_files);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].files, vec!["README.md"]);
+    }
+
+    #[test]
+    fn scope_guard_noop_when_no_named_files() {
+        let repo_files = vec!["src/a.rs".into(), "src/b.rs".into()];
+        let tasks = vec![SubTask { id: "task-1".into(), description: "broad".into(), files: vec!["src/a.rs".into(), "src/b.rs".into()], complexity: Complexity::Medium, depends_on: vec![], edit: None, template: None }];
+        let out = constrain_to_named_files("Improve error handling across the daemon", tasks, &repo_files);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].files.len(), 2); // unchanged — goal named no file
+    }
+
+    #[test]
+    fn scope_guard_keeps_new_create_paths() {
+        let repo_files = vec!["crates/x/src/y.rs".into()];
+        let tasks = vec![SubTask { id: "task-1".into(), description: "create".into(), files: vec!["crates/x/src/new_mod.rs".into()], complexity: Complexity::Simple, depends_on: vec![], edit: None, template: None }];
+        let goal = "In crates/x/src/y.rs add a module; create crates/x/src/new_mod.rs";
+        let out = constrain_to_named_files(goal, tasks, &repo_files);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].files.contains(&"crates/x/src/new_mod.rs".to_string())); // CREATE path survives
     }
 
     #[test]
