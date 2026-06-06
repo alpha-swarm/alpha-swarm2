@@ -1,0 +1,38 @@
+[
+  {
+    "attempts": 15,
+    "shape": "complex",
+    "successes": 6,
+    "tier": "agent"
+  },
+  {
+    "attempts": 10,
+    "shape": "complex",
+    "successes": 4,
+    "tier": "orchestrator"
+  },
+  {
+    "attempts": 16,
+    "shape": "doc",
+    "successes": 13,
+    "tier": "agent"
+  },
+  {
+    "attempts": 1,
+    "shape": "doc",
+    "successes": 0,
+    "tier": "orchestrator"
+  },
+  {
+    "attempts": 1,
+    "shape": "simple",
+    "successes": 0,
+    "tier": "agent"
+  },
+  {
+    "attempts": 2,
+    "shape": "trivial",
+    "successes": 2,
+    "tier": "orchestrator"
+  }
+]
