@@ -288,6 +288,28 @@ pub fn constrain_to_named_files(goal: &str, mut tasks: Vec<SubTask>, repo_files:
             template: None,
         });
     }
+
+    // Collapse multiple tasks that ALL target the same single file into one.
+    // The planner loves to split a single-file goal ("update README.md") into
+    // several tasks that each edit that one file; run in parallel they race +
+    // livelock the workflow engine, and serialized they're N slow generations
+    // for what one agent pass does. One file → one task.
+    let all_files: HashSet<&str> = tasks.iter().flat_map(|t| t.files.iter().map(|s| s.as_str())).collect();
+    if tasks.len() > 1 && all_files.len() == 1 {
+        let file = all_files.into_iter().next().unwrap().to_string();
+        let desc: String = tasks.iter().map(|t| t.description.as_str()).collect::<Vec<_>>().join("; ");
+        let template = tasks.iter().find_map(|t| t.template.clone());
+        warn!(count = tasks.len(), file = %file, "scope guard: collapsed same-file tasks into one");
+        tasks = vec![SubTask {
+            id: "task-1".into(),
+            description: desc.chars().take(800).collect(),
+            files: vec![file],
+            complexity: Complexity::Medium,
+            depends_on: Vec::new(),
+            edit: None,
+            template,
+        }];
+    }
     tasks
 }
 
@@ -559,6 +581,20 @@ mod tests {
         let out = constrain_to_named_files("Improve error handling across the daemon", tasks, &repo_files);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].files.len(), 2); // unchanged — goal named no file
+    }
+
+    #[test]
+    fn scope_guard_collapses_same_file_tasks() {
+        // Planner split a single-file README goal into 4 tasks all editing
+        // README.md → must collapse to ONE (else the workflow engine livelocks
+        // on parallel same-file edits).
+        let repo_files = vec!["README.md".into()];
+        let mk = |id: &str, d: &str| SubTask { id: id.into(), description: d.into(), files: vec!["README.md".into()], complexity: Complexity::Simple, depends_on: vec![], edit: None, template: Some("doc".into()) };
+        let tasks = vec![mk("task-1","models"), mk("task-2","mermaid"), mk("task-3","autopilot"), mk("task-4","dashboard")];
+        let out = constrain_to_named_files("Update README.md: models, mermaid, autopilot, dashboard. Only edit README.md.", tasks, &repo_files);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].files, vec!["README.md"]);
+        assert!(out[0].depends_on.is_empty());
     }
 
     #[test]
