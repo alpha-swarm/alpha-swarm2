@@ -74,6 +74,16 @@ pub fn detect_crate(repo: &std::path::Path, file_path: &str) -> Option<String> {
     None
 }
 
+/// A doc full-file rewrite dramatically shorter than the original is a
+/// truncated/partial generation, not a real edit. Docs skip the build gate, so
+/// without this check a truncated rewrite would land silently. Only flags when
+/// the original was non-trivial (>= 20 lines) and the rewrite is under 60% of it.
+fn doc_rewrite_truncated(original: &str, rewritten: &str) -> bool {
+    let o = original.lines().count();
+    let n = rewritten.lines().count();
+    o >= 20 && n * 100 < o * 60
+}
+
 pub struct GraphExecutor {
     router: Arc<InferenceRouter>,
     ollama: Option<Arc<OllamaBackend>>,
@@ -129,12 +139,28 @@ impl GraphExecutor {
         self.check_and_fix_multi(task, paths, &response, edits).await
     }
 
-    /// Doc/config edit — no build check.
+    /// Doc/config edit — no build check. Docs are safe to overwrite wholesale,
+    /// and OLD-block matching is unreliable on a large existing file (the model
+    /// rarely reproduces the exact OLD lines → fuzzy_replace misses → "no
+    /// changes"). So the model returns the COMPLETE updated file as a CREATE
+    /// block (overwrite) instead of a diff. Guard against truncation: docs skip
+    /// the build gate, so a partial/short rewrite must NOT silently land.
     pub async fn execute_doc(&self, task: &str, path: &str) -> Result<GraphResult> {
-        info!(template = "doc", path, "Graph executor: doc (no build check)");
+        info!(template = "doc", path, "Graph executor: doc (full-file rewrite, no build check)");
         let content = self.read_file(path).unwrap_or_default();
-        let response = self.llm_edit(task, path, &content).await?;
-        let edits = self.apply_response(path, &response.content)?;
+        let response = self.llm_doc_rewrite(task, path, &content).await?;
+        let edits = parse_edits(&response.content).unwrap_or_default();
+        for e in &edits {
+            if let FileEdit::Create { content: new, .. } = e {
+                if doc_rewrite_truncated(&content, new) {
+                    bail!(
+                        "doc rewrite of {path} looks truncated ({} → {} lines) — rejecting to avoid landing a partial file",
+                        content.lines().count(), new.lines().count()
+                    );
+                }
+            }
+        }
+        self.apply_edits(&edits)?;
         Ok(GraphResult { response, edits, escalated: false })
     }
 
@@ -247,6 +273,18 @@ impl GraphExecutor {
         self.call_llm(&prompt).await
     }
 
+    /// Doc rewrite: return the WHOLE updated file (not a diff) as a CREATE block.
+    async fn llm_doc_rewrite(&self, task: &str, path: &str, content: &str) -> Result<InferenceResponse> {
+        let truncated: String = content.chars().take(MAX_FILE_CONTEXT).collect();
+        let prompt = format!(
+            "Current content of {path}:\n\n{truncated}\n\nTask: {task}\n\n\
+             Output the COMPLETE updated file with the task applied — the ENTIRE file \
+             (keep all unrelated content verbatim), not a diff, not only the changed \
+             lines. One block only:\n<<<CREATE {path}\n<entire updated file>\n>>>"
+        );
+        self.call_llm(&prompt).await
+    }
+
     async fn llm_refactor(&self, task: &str, files: &[(String, String)]) -> Result<InferenceResponse> {
         let mut ctx = String::new();
         for (path, content) in files {
@@ -299,4 +337,22 @@ pub struct GraphResult {
     pub edits: Vec<FileEdit>,
     /// If true, graph failed and should escalate to full agent.
     pub escalated: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::doc_rewrite_truncated;
+
+    #[test]
+    fn truncation_guard() {
+        let orig = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        // a near-complete rewrite is fine
+        let full = (0..98).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        assert!(!doc_rewrite_truncated(&orig, &full));
+        // a truncated rewrite (30 of 100 lines) is rejected
+        let cut = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        assert!(doc_rewrite_truncated(&orig, &cut));
+        // small originals are never flagged (no reliable baseline)
+        assert!(!doc_rewrite_truncated("a\nb\nc", ""));
+    }
 }
