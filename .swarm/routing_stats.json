@@ -6,9 +6,9 @@
     "tier": "agent"
   },
   {
-    "attempts": 10,
+    "attempts": 19,
     "shape": "complex",
-    "successes": 4,
+    "successes": 6,
     "tier": "orchestrator"
   },
   {
@@ -18,7 +18,7 @@
     "tier": "agent"
   },
   {
-    "attempts": 1,
+    "attempts": 2,
     "shape": "doc",
     "successes": 0,
     "tier": "orchestrator"
